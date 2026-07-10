@@ -19,19 +19,6 @@ def git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-@pytest.fixture
-def repository(tmp_path: Path) -> Path:
-    root = tmp_path / "project"
-    root.mkdir()
-    git(root, "init", "-b", "main")
-    git(root, "config", "user.name", "AOP Test")
-    git(root, "config", "user.email", "aop@example.invalid")
-    (root / "README.md").write_text("# Test project\n")
-    git(root, "add", "README.md")
-    git(root, "commit", "-m", "Initial commit")
-    return root
-
-
 def test_worktree_lifecycle(repository: Path) -> None:
     manager = WorktreeManager.discover(repository)
     manager.initialize()

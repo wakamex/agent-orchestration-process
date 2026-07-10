@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .batch import BatchResult, BatchRunner
 from .models import RunResult
 from .runner import AgentRunner
 from .worktrees import AOPError, WorktreeManager
@@ -20,6 +21,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("init", help="prepare the current Git repository for AOP")
+
+    batch = commands.add_parser("batch", help="run a TOML task manifest in parallel")
+    batch.add_argument("manifest", type=Path)
+    batch.add_argument("--jobs", type=_positive_integer, default=4)
 
     run = commands.add_parser("run", help="run Codex in an isolated task worktree")
     run.add_argument("task")
@@ -89,6 +94,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if command[:1] == ["--"]:
                 command = command[1:]
             return manager.run(args.task, command)
+
+        if args.command == "batch":
+            result = BatchRunner(manager, jobs=args.jobs).run(
+                args.manifest,
+                progress=lambda message: print(f"aop: {message}", file=sys.stderr),
+            )
+            return _report_batch(result, manager)
 
         if args.command == "run":
             result = AgentRunner(manager).run(
@@ -164,6 +176,16 @@ def _positive_timeout(value: str) -> float:
     return timeout
 
 
+def _positive_integer(value: str) -> int:
+    try:
+        integer = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("value must be an integer") from error
+    if integer <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return integer
+
+
 def _report_run(result: RunResult, manager: WorktreeManager) -> int:
     if result.final_message:
         print(
@@ -182,6 +204,19 @@ def _report_run(result: RunResult, manager: WorktreeManager) -> int:
     if result.timed_out:
         return 124
     return result.exit_code if 0 < result.exit_code < 126 else 1
+
+
+def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
+    summary = manager.state_dir / "batches" / f"{result.batch_id}.json"
+    succeeded = sum(task.status == "succeeded" for task in result.tasks)
+    print(
+        f"aop: batch_id={result.batch_id} succeeded={succeeded}/{len(result.tasks)} "
+        f"summary={summary}",
+        file=sys.stderr,
+    )
+    if result.interrupted:
+        return 130
+    return 0 if result.succeeded else 1
 
 
 if __name__ == "__main__":

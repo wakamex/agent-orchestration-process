@@ -61,6 +61,36 @@ Codex model, reasoning effort, authentication, and user instructions are preserv
 or `--effort` is supplied. `AOP_CODEX_BIN` may override the Codex executable for testing or a custom
 installation.
 
+Run independent tasks concurrently from a TOML manifest:
+
+```toml
+[[tasks]]
+id = "parser"
+prompt_file = "tasks/parser.md"
+model = "<model-id>"
+effort = "xhigh"
+timeout = 1800
+
+[[tasks]]
+id = "tests"
+prompt = "Add adversarial parser tests"
+effort = "high"
+```
+
+```sh
+aop batch tasks.toml --jobs 4
+```
+
+Prompt-file paths are resolved relative to the manifest. Each task may set `base`, `model`,
+`effort`, `sandbox`, and `timeout`; unspecified values use the same defaults as `aop run`. The
+scheduler keeps at most `--jobs` tasks active, prints only concise lifecycle status, and stores full
+agent output in the normal per-run directories. On interruption it launches no additional tasks and
+waits for already-active tasks to finish.
+
+Every batch writes `.aop/batches/<batch-id>.json` with task-order-preserving run IDs, session IDs,
+durations, exit codes, and errors. A batch exits nonzero if any task fails, without discarding
+successful sibling results.
+
 Run any other command in a task worktree with the lower-level escape hatch:
 
 ```sh
@@ -78,15 +108,15 @@ Runtime state lives under the ignored `.aop/` directory:
 
 ```text
 .aop/
+├── batches/            structured batch summaries
 ├── cache/              shared cache root for future build and runner adapters
 ├── runs/<run-id>/      request, result, JSONL events, stderr, and final message
 ├── worktrees/          one isolated checkout per task
 └── worktrees.lock      lifecycle-operation lock
 ```
 
-The current CLI does not merge task commits, configure language-specific build caches, schedule
-batches, or launch providers other than Codex. Those interfaces will be added when a real project
-needs them.
+The current CLI does not merge task commits, configure language-specific build caches, or launch
+providers other than Codex. Those interfaces will be added when a real project needs them.
 
 ## 1. Core contract
 

@@ -18,6 +18,7 @@ def test_manifest_resolves_prompt_files_and_options(tmp_path: Path) -> None:
         """
 [[tasks]]
 id = "parser"
+agent = "agy"
 prompt_file = "prompt.md"
 model = "test-model"
 effort = "xhigh"
@@ -35,6 +36,7 @@ prompt = "Add tests"
     assert [task.id for task in tasks] == ["parser", "tests"]
     assert tasks[0].prompt == "Implement the parser.\n"
     assert tasks[0].prompt_source == os.fspath(tmp_path / "prompt.md")
+    assert tasks[0].agent == "agy"
     assert tasks[0].model == "test-model"
     assert tasks[0].effort == "xhigh"
     assert tasks[0].sandbox == "read-only"
@@ -126,6 +128,41 @@ prompt = "FAIL"
     summary = json.loads(summaries[0].read_text())
     assert [task["status"] for task in summary["tasks"]] == ["succeeded", "failed"]
     assert all(task["run_id"] for task in summary["tasks"])
+
+
+def test_batch_can_mix_claude_and_agy(
+    repository: Path,
+    fake_claude: Path,
+    fake_agy: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_CLAUDE_BIN", os.fspath(fake_claude))
+    monkeypatch.setenv("AOP_AGY_BIN", os.fspath(fake_agy))
+    manifest = repository / "providers.toml"
+    manifest.write_text(
+        """
+[[tasks]]
+id = "claude-task"
+agent = "claude"
+model = "sonnet"
+effort = "high"
+prompt = "one"
+
+[[tasks]]
+id = "agy-task"
+agent = "agy"
+model = "gemini-3.1-pro"
+effort = "low"
+prompt = "two"
+"""
+    )
+
+    result = BatchRunner(WorktreeManager.discover(repository), jobs=2).run(manifest)
+
+    assert result.succeeded
+    assert [task.agent for task in result.tasks] == ["claude", "agy"]
+    assert result.tasks[0].model == "claude-test-model"
+    assert result.tasks[1].model == "Gemini 3.1 Pro (Low)"
 
 
 @pytest.mark.parametrize(

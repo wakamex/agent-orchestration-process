@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import signal
 import subprocess
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .models import RunRequest, RunResult
 from .locks import exclusive_lock, task_lock_path
-from .pricing import TokenUsage, estimate_api_cost
+from .pricing import EstimatedCost, TokenUsage, estimate_api_cost
 from .worktrees import AOPError, Worktree, WorktreeManager
 
 
@@ -87,6 +90,10 @@ class RunStore:
 class AgentAdapter(Protocol):
     provider: str
 
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]: ...
+
     def execute(
         self,
         request: RunRequest,
@@ -101,6 +108,11 @@ class CodexAdapter:
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_CODEX_BIN", "codex")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        return model, effort
 
     def execute(
         self,
@@ -325,6 +337,431 @@ class CodexAdapter:
             pass
 
 
+@dataclass(frozen=True)
+class _ProcessCapture:
+    stdout: str
+    stderr: str
+    exit_code: int
+    timed_out: bool
+    duration_seconds: float
+    first_event_seconds: float | None
+    first_response_seconds: float | None
+
+
+def _capture_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    prompt: str | None,
+    timeout_seconds: float | None,
+    is_response: Callable[[str], bool],
+) -> _ProcessCapture:
+    started = time.monotonic()
+    timed_out = False
+    first_event_seconds = None
+    first_response_seconds = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        return _ProcessCapture(
+            stdout="",
+            stderr=f"command not found: {command[0]}\n",
+            exit_code=127,
+            timed_out=False,
+            duration_seconds=round(time.monotonic() - started, 6),
+            first_event_seconds=None,
+            first_response_seconds=None,
+        )
+
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+
+    def read_stdout() -> None:
+        nonlocal first_event_seconds, first_response_seconds
+        assert process.stdout is not None
+        for line in process.stdout:
+            elapsed = time.monotonic() - started
+            if first_event_seconds is None:
+                first_event_seconds = elapsed
+            if first_response_seconds is None and is_response(line):
+                first_response_seconds = elapsed
+            stdout_parts.append(line)
+
+    def read_stderr() -> None:
+        assert process.stderr is not None
+        stderr_parts.extend(process.stderr)
+
+    stdout_reader = threading.Thread(target=read_stdout, daemon=True)
+    stderr_reader = threading.Thread(target=read_stderr, daemon=True)
+    stdout_reader.start()
+    stderr_reader.start()
+    try:
+        if prompt is not None:
+            assert process.stdin is not None
+            try:
+                process.stdin.write(prompt)
+                process.stdin.flush()
+            except BrokenPipeError:
+                pass
+            finally:
+                process.stdin.close()
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        CodexAdapter._signal_process_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            CodexAdapter._signal_process_group(process, signal.SIGKILL)
+            process.wait()
+    except KeyboardInterrupt:
+        CodexAdapter._signal_process_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            CodexAdapter._signal_process_group(process, signal.SIGKILL)
+            process.wait()
+        raise
+    finally:
+        stdout_reader.join(timeout=5)
+        stderr_reader.join(timeout=5)
+    return _ProcessCapture(
+        stdout="".join(stdout_parts),
+        stderr="".join(stderr_parts),
+        exit_code=process.returncode,
+        timed_out=timed_out,
+        duration_seconds=round(time.monotonic() - started, 6),
+        first_event_seconds=_rounded(first_event_seconds),
+        first_response_seconds=_rounded(first_response_seconds),
+    )
+
+
+class ClaudeAdapter:
+    provider = "claude"
+    EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_CLAUDE_BIN", "claude")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        if effort is not None and effort not in self.EFFORTS:
+            raise AOPError(
+                f"Claude effort must be one of: {', '.join(sorted(self.EFFORTS))}"
+            )
+        return model, effort
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        command = self._command(request, worktree)
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=request.prompt,
+            timeout_seconds=request.timeout_seconds,
+            is_response=self._is_response,
+        )
+        _atomic_write(run_dir / "events.jsonl", capture.stdout)
+        _atomic_write(run_dir / "stderr.log", capture.stderr)
+        parsed = self._parse(capture.stdout)
+        final_message = parsed["final_message"]
+        if final_message is not None:
+            _atomic_write(run_dir / "last-message.txt", final_message)
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif parsed["error"]:
+            error = parsed["error"]
+        elif capture.exit_code:
+            error = (
+                capture.stderr.strip()
+                or f"Claude exited with status {capture.exit_code}"
+            )
+        elif parsed["session_id"] is None:
+            error = "Claude did not report a session ID"
+        else:
+            error = None
+        return RunResult(
+            run_id=request.run_id,
+            provider=self.provider,
+            task=request.task,
+            model=parsed["model"] or request.model,
+            effort=request.effort,
+            session_id=parsed["session_id"] or request.session_id,
+            command=command,
+            started_at=started_at,
+            finished_at=_now(),
+            duration_seconds=capture.duration_seconds,
+            time_to_first_event_seconds=capture.first_event_seconds,
+            time_to_first_response_seconds=capture.first_response_seconds,
+            exit_code=capture.exit_code,
+            timed_out=capture.timed_out,
+            error=error,
+            final_message=final_message,
+            usage=parsed["usage"],
+            api_equivalent_cost=parsed["cost"],
+        )
+
+    def _command(self, request: RunRequest, worktree: Worktree) -> list[str]:
+        permission = {
+            "read-only": "plan",
+            "workspace-write": "acceptEdits",
+            "danger-full-access": "bypassPermissions",
+        }[request.sandbox]
+        command = [
+            self.binary,
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--permission-mode",
+            permission,
+            "--add-dir",
+            os.fspath(worktree.path),
+        ]
+        if request.sandbox == "danger-full-access":
+            command.append("--dangerously-skip-permissions")
+        if request.session_id:
+            command.extend(["--resume", request.session_id])
+        else:
+            command.extend(["--session-id", str(uuid.uuid4())])
+            if request.model:
+                command.extend(["--model", request.model])
+            if request.effort:
+                command.extend(["--effort", request.effort])
+        return command
+
+    @staticmethod
+    def _is_response(line: str) -> bool:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if event.get("type") != "assistant":
+            return False
+        content = event.get("message", {}).get("content", [])
+        return any(
+            item.get("type") == "text" for item in content if isinstance(item, dict)
+        )
+
+    @staticmethod
+    def _parse(output: str) -> dict[str, object]:
+        session_id = None
+        model = None
+        final_message = None
+        error = None
+        usage = TokenUsage()
+        cost = None
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            session_id = event.get("session_id") or session_id
+            if event.get("type") == "system" and event.get("subtype") == "init":
+                model = event.get("model") or model
+            if event.get("type") != "result":
+                continue
+            final_message = (
+                event.get("result") if isinstance(event.get("result"), str) else None
+            )
+            if event.get("is_error"):
+                error = final_message or "Claude turn failed"
+            raw_usage = (
+                event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            )
+            uncached = int(raw_usage.get("input_tokens", 0) or 0)
+            cached = int(raw_usage.get("cache_read_input_tokens", 0) or 0)
+            created = int(raw_usage.get("cache_creation_input_tokens", 0) or 0)
+            usage = TokenUsage(
+                input_tokens=uncached + cached + created,
+                cached_input_tokens=cached,
+                output_tokens=int(raw_usage.get("output_tokens", 0) or 0),
+            )
+            amount = event.get("total_cost_usd")
+            if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+                priced_as = model or "claude"
+                cost = EstimatedCost(
+                    amount_usd=round(float(amount), 8),
+                    currency="USD",
+                    estimated=False,
+                    model=priced_as,
+                    priced_as=priced_as,
+                    pricing_version="claude-cli-reported",
+                    pricing_source="Claude Code result event",
+                    long_context_pricing=False,
+                )
+        return {
+            "session_id": session_id,
+            "model": model,
+            "final_message": final_message,
+            "error": error,
+            "usage": usage,
+            "cost": cost,
+        }
+
+
+AGY_MODELS = {
+    "gemini-3.5-flash": {
+        "low": "Gemini 3.5 Flash (Low)",
+        "medium": "Gemini 3.5 Flash (Medium)",
+        "high": "Gemini 3.5 Flash (High)",
+    },
+    "gemini-3.1-pro": {
+        "low": "Gemini 3.1 Pro (Low)",
+        "high": "Gemini 3.1 Pro (High)",
+    },
+}
+
+
+class AgyAdapter:
+    provider = "agy"
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_AGY_BIN", "agy")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        selected = model or "gemini-3.5-flash"
+        if selected in AGY_MODELS:
+            level = effort or "medium"
+            try:
+                return AGY_MODELS[selected][level], level
+            except KeyError as error:
+                supported = ", ".join(AGY_MODELS[selected])
+                raise AOPError(
+                    f"agy model {selected} supports effort: {supported}"
+                ) from error
+        if effort is not None:
+            raise AOPError(
+                "agy effort is encoded in its model label; use a known model alias or pass "
+                "an exact label from `agy models` without --effort"
+            )
+        return selected, None
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        log_path = run_dir / "agy.log"
+        command = self._command(request, worktree, log_path)
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=None,
+            timeout_seconds=request.timeout_seconds,
+            is_response=lambda line: bool(line.strip()),
+        )
+        _atomic_write(run_dir / "events.jsonl", capture.stdout)
+        _atomic_write(run_dir / "stderr.log", capture.stderr)
+        final_message = capture.stdout.strip() or None
+        if final_message is not None:
+            _atomic_write(run_dir / "last-message.txt", final_message)
+        log = log_path.read_text(errors="replace") if log_path.exists() else ""
+        session_id = request.session_id or _agy_session_id(log)
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif capture.exit_code:
+            error = (
+                capture.stderr.strip() or f"agy exited with status {capture.exit_code}"
+            )
+        elif session_id is None:
+            error = "agy did not report a conversation ID"
+        else:
+            error = None
+        return RunResult(
+            run_id=request.run_id,
+            provider=self.provider,
+            task=request.task,
+            model=request.model,
+            effort=request.effort,
+            session_id=session_id,
+            command=command,
+            started_at=started_at,
+            finished_at=_now(),
+            duration_seconds=capture.duration_seconds,
+            time_to_first_event_seconds=capture.first_event_seconds,
+            time_to_first_response_seconds=capture.first_response_seconds,
+            exit_code=capture.exit_code,
+            timed_out=capture.timed_out,
+            error=error,
+            final_message=final_message,
+            usage=TokenUsage(),
+            api_equivalent_cost=None,
+        )
+
+    def _command(
+        self, request: RunRequest, worktree: Worktree, log_path: Path
+    ) -> list[str]:
+        mode = "plan" if request.sandbox == "read-only" else "accept-edits"
+        command = [
+            self.binary,
+            "--log-file",
+            os.fspath(log_path),
+            "--add-dir",
+            os.fspath(worktree.path),
+            "--mode",
+            mode,
+            "--print-timeout",
+            (
+                f"{max(1, math.ceil(request.timeout_seconds))}s"
+                if request.timeout_seconds is not None
+                else "24h"
+            ),
+        ]
+        if request.sandbox == "danger-full-access":
+            command.append("--dangerously-skip-permissions")
+        if request.session_id:
+            command.extend(["--conversation", request.session_id])
+        elif request.model:
+            command.extend(["--model", request.model])
+        command.extend(["-p", request.prompt])
+        return command
+
+
+def _agy_session_id(log: str) -> str | None:
+    matches = re.findall(
+        r"(?:Created conversation\s+|conversation=)([0-9a-f-]{36})", log
+    )
+    return matches[-1] if matches else None
+
+
+def adapter_for(agent: str) -> AgentAdapter:
+    if agent == "codex":
+        return CodexAdapter()
+    if agent == "claude":
+        return ClaudeAdapter()
+    if agent == "agy":
+        return AgyAdapter()
+    raise AOPError(f"unknown agent: {agent}")
+
+
 class AgentRunner:
     """Coordinate worktree selection, adapter execution, and durable records."""
 
@@ -335,6 +772,7 @@ class AgentRunner:
     ):
         self.manager = manager
         self.adapter = adapter or CodexAdapter()
+        self._adapter_was_explicit = adapter is not None
         self.store = RunStore(manager.state_dir / "runs")
 
     def run(
@@ -348,6 +786,7 @@ class AgentRunner:
         sandbox: str = "workspace-write",
         timeout_seconds: float | None = None,
     ) -> RunResult:
+        model, effort = self.adapter.normalize_options(model, effort)
         worktree = self._get_or_create_worktree(task, base)
         request = self._request(
             task=task,
@@ -370,8 +809,14 @@ class AgentRunner:
     ) -> RunResult:
         parent_request = self.store.load_request(run_id)
         parent_result = self.store.load_result(run_id)
+        if parent_request.provider != self.adapter.provider:
+            if self._adapter_was_explicit:
+                raise AOPError(
+                    f"run uses {parent_request.provider}, not {self.adapter.provider}"
+                )
+            self.adapter = adapter_for(parent_request.provider)
         if not parent_result.session_id:
-            raise AOPError(f"run has no resumable Codex session: {run_id}")
+            raise AOPError(f"run has no resumable agent session: {run_id}")
         worktree = self.manager.get(parent_request.task)
         request = self._request(
             task=parent_request.task,

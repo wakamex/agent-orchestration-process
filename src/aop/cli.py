@@ -10,7 +10,7 @@ from typing import Sequence
 from .batch import BatchResult, BatchRunner
 from .integration import CheckpointManager, IntegrationManager
 from .models import RunResult
-from .runner import AgentRunner
+from .runner import AgentRunner, adapter_for
 from .worktrees import AOPError, WorktreeManager
 
 
@@ -48,15 +48,15 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("manifest", type=Path)
     batch.add_argument("--jobs", type=_positive_integer, default=4)
 
-    run = commands.add_parser("run", help="run Codex in an isolated task worktree")
+    run = commands.add_parser("run", help="run an agent in an isolated task worktree")
     run.add_argument("task")
-    run.add_argument("--agent", choices=["codex"], default="codex")
+    run.add_argument("--agent", choices=["codex", "claude", "agy"], default="codex")
     run.add_argument("--base", default="HEAD", help="commit for a new task worktree")
-    run.add_argument("--model", help="override the configured Codex model")
+    run.add_argument("--model", help="override the agent model")
     run.add_argument(
         "--effort",
         choices=["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-        help="override Codex model reasoning effort",
+        help="override agent reasoning effort",
     )
     run.add_argument(
         "--sandbox",
@@ -152,7 +152,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _report_batch(result, manager)
 
         if args.command == "run":
-            result = AgentRunner(manager).run(
+            result = AgentRunner(manager, adapter_for(args.agent)).run(
                 task=args.task,
                 prompt=_read_prompt(args),
                 base=args.base,
@@ -268,7 +268,10 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
         f"summary={summary}",
         file=sys.stderr,
     )
-    print("aop: task\tmodel\teffort\ttime\ttokens\tapi-equiv", file=sys.stderr)
+    print(
+        "aop: task\tagent\tmodel\teffort\ttime\ttokens\tapi-equiv",
+        file=sys.stderr,
+    )
     for task in result.tasks:
         duration = (
             f"{task.duration_seconds:.2f}s"
@@ -286,7 +289,7 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
             else "n/a"
         )
         print(
-            f"aop: {task.task}\t{task.model or '(configured)'}\t"
+            f"aop: {task.task}\t{task.agent}\t{task.model or '(configured)'}\t"
             f"{task.effort or '(configured)'}\t{duration}\t{tokens}\t{cost}",
             file=sys.stderr,
         )

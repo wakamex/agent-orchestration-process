@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from aop.runner import AgyAdapter, AgentRunner, ClaudeAdapter
+from aop.worktrees import AOPError, WorktreeManager
+
+
+def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude)))
+
+    first = runner.run(
+        task="claude-task",
+        prompt="first",
+        model="opus",
+        effort="high",
+        timeout_seconds=5,
+    )
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded
+    assert first.provider == "claude"
+    assert first.model == "claude-test-model"
+    assert first.usage.input_tokens == 60
+    assert first.usage.cached_input_tokens == 20
+    assert first.usage.output_tokens == 40
+    assert first.api_equivalent_cost is not None
+    assert first.api_equivalent_cost.amount_usd == 0.0123
+    assert ["--model", "opus"] == first.command[
+        first.command.index("--model") : first.command.index("--model") + 2
+    ]
+    assert ["--effort", "high"] == first.command[
+        first.command.index("--effort") : first.command.index("--effort") + 2
+    ]
+    assert resumed.succeeded
+    assert ["--resume", first.session_id] == resumed.command[-2:]
+    assert "--model" not in resumed.command
+
+
+def test_agy_translates_model_effort_and_resumes_exact_conversation(
+    repository: Path, fake_agy: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, AgyAdapter(os.fspath(fake_agy)))
+
+    first = runner.run(
+        task="agy-task",
+        prompt="first",
+        model="gemini-3.5-flash",
+        effort="low",
+        timeout_seconds=5,
+    )
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded
+    assert first.provider == "agy"
+    assert first.model == "Gemini 3.5 Flash (Low)"
+    assert first.effort == "low"
+    assert ["--model", "Gemini 3.5 Flash (Low)"] == first.command[
+        first.command.index("--model") : first.command.index("--model") + 2
+    ]
+    assert first.usage.total_tokens == 0
+    assert first.api_equivalent_cost is None
+    assert resumed.succeeded
+    assert ["--conversation", first.session_id] == resumed.command[
+        resumed.command.index("--conversation") : resumed.command.index(
+            "--conversation"
+        )
+        + 2
+    ]
+    assert "--model" not in resumed.command
+
+
+def test_agy_rejects_an_unavailable_effort(repository: Path, fake_agy: Path) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), AgyAdapter(os.fspath(fake_agy))
+    )
+
+    with pytest.raises(AOPError, match="supports effort: low, high"):
+        runner.run(
+            task="bad-agy",
+            prompt="test",
+            model="gemini-3.1-pro",
+            effort="medium",
+        )
+
+
+def test_agy_defaults_to_gemini_35_flash_medium(
+    repository: Path, fake_agy: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), AgyAdapter(os.fspath(fake_agy))
+    )
+
+    result = runner.run(task="default-agy", prompt="test", timeout_seconds=5)
+
+    assert result.succeeded
+    assert result.model == "Gemini 3.5 Flash (Medium)"
+    assert result.effort == "medium"

@@ -14,9 +14,9 @@ each project.
 
 ## Reference implementation
 
-This repository includes a dependency-free Python CLI for running concurrent tasks in isolated Git
-worktrees. Its first normalized model adapter runs Codex non-interactively, records the full result,
-and resumes the exact Codex session associated with an earlier run.
+This repository includes a dependency-free Python CLI for running Codex, Claude Code, and
+Antigravity (`agy`) concurrently in isolated Git worktrees. Each adapter records a normalized
+result and resumes the exact provider session associated with an earlier run.
 
 Install the CLI from this checkout:
 
@@ -45,28 +45,47 @@ aop worktree create task-b
 `aop init` adds `/.aop/` to `.gitignore`. Commit that project-level change before integrating
 tasks so the main worktree is clean.
 
-Run Codex in a new or existing task worktree:
+Run an agent in a new or existing task worktree:
 
 ```sh
 aop run task-a --prompt-file task.md --timeout 1800
-aop run task-b --prompt "Implement the parser and its tests"
+aop run task-b --agent claude --model sonnet --effort high \
+  --prompt "Implement the parser and its tests"
+aop run task-c --agent agy --model gemini-3.5-flash --effort low \
+  --prompt "Add adversarial parser tests"
 ```
 
-`aop run` prints the agent's final message to stdout and the AOP run ID, Codex session ID, and
+`aop run` prints the agent's final message to stdout and its AOP run ID, provider session ID, and
 artifact directory to stderr. Resume the exact session using the AOP run ID:
 
 ```sh
 aop resume <run-id> --prompt "Address the review findings"
 ```
 
-The default Codex sandbox is `workspace-write`, scoped to the isolated task worktree. The configured
-Codex model, reasoning effort, authentication, and user instructions are preserved unless `--model`
-or `--effort` is supplied. `AOP_CODEX_BIN` may override the Codex executable for testing or a custom
-installation.
+The default sandbox is `workspace-write`. AOP maps it to Codex's workspace sandbox, Claude's
+`acceptEdits` permission mode, or agy's `accept-edits` mode; the providers' permission semantics are
+not identical. Configured authentication and user instructions are preserved. `AOP_CODEX_BIN`,
+`AOP_CLAUDE_BIN`, and `AOP_AGY_BIN` may override their respective executables.
 
-Every run records wall-clock time, time to first event, time to first agent response, input tokens,
-cached input tokens, output tokens, and reasoning-output tokens. When `--model` names a model in
-AOP's dated pricing table, the result also contains an estimated standard API-equivalent USD cost.
+Claude accepts its normal model aliases and effort levels `low`, `medium`, `high`, `xhigh`, and
+`max`. Agy encodes effort in the model selection. AOP provides ergonomic aliases for the currently
+advertised Gemini choices:
+
+```text
+gemini-3.5-flash  low | medium | high
+gemini-3.1-pro    low | high
+```
+
+The agy default is `gemini-3.5-flash` at `medium` effort.
+
+For example, `--model gemini-3.5-flash --effort low` is sent to agy as the exact label
+`Gemini 3.5 Flash (Low)`. Any exact label printed by `agy models` can instead be passed without
+`--effort`.
+
+Every run records wall-clock time and time to first event and agent response. Adapters also record
+input, cached-input, output, and reasoning-output tokens when the provider exposes them. When
+`--model` names a model in AOP's dated pricing table, the result also contains an estimated standard
+API-equivalent USD cost.
 This is a comparison metric for subscription runs, not an amount billed to the account. Reasoning
 tokens are reported separately but are already included in output tokens and are not charged twice.
 
@@ -74,21 +93,26 @@ Pricing is versioned in each result. The built-in 2026-07-10 snapshot covers GPT
 Luna; GPT-5.5; GPT-5.4, mini, and nano; and GPT-5.3-Codex. It accounts for documented long-context
 multipliers but cannot account for GPT-5.6 cache-write premiums because Codex currently reports
 cached reads without identifying cache writes. If the model is implicit or unknown, token and timing
-metrics remain available while cost is reported as `n/a`.
+metrics remain available while cost is reported as `n/a`. Claude's result stream supplies its
+resolved model, token usage, and CLI-reported USD API-equivalent cost. Agy currently supplies timing
+and its selected model but no token or cost accounting, so those fields remain `0` and `n/a`.
 
 Run independent tasks concurrently from a TOML manifest:
 
 ```toml
 [[tasks]]
 id = "parser"
+agent = "claude"
 prompt_file = "tasks/parser.md"
-model = "<model-id>"
-effort = "xhigh"
+model = "sonnet"
+effort = "high"
 timeout = 1800
 
 [[tasks]]
 id = "tests"
+agent = "agy"
 prompt = "Add adversarial parser tests"
+model = "gemini-3.1-pro"
 effort = "high"
 ```
 
@@ -96,7 +120,7 @@ effort = "high"
 aop batch tasks.toml --jobs 4
 ```
 
-Prompt-file paths are resolved relative to the manifest. Each task may set `base`, `model`,
+Prompt-file paths are resolved relative to the manifest. Each task may set `agent`, `base`, `model`,
 `effort`, `sandbox`, and `timeout`; unspecified values use the same defaults as `aop run`. The
 scheduler keeps at most `--jobs` tasks active, prints only concise lifecycle status, and stores full
 agent output in the normal per-run directories. On interruption it launches no additional tasks and
@@ -104,7 +128,7 @@ waits for already-active tasks to finish.
 
 Every batch writes `.aop/batches/<batch-id>.json` with task-order-preserving run IDs, session IDs,
 durations, exit codes, and errors. A batch exits nonzero if any task fails, without discarding
-successful sibling results. Its terminal summary compares task, model, effort, wall time, total
+successful sibling results. Its terminal summary compares task, agent, model, effort, wall time, total
 tokens, and estimated API-equivalent cost.
 
 Checkpoint a completed task, then integrate its commits onto the branch currently checked out in
@@ -122,7 +146,7 @@ the resulting commit, and successful AOP run IDs associated with the task.
 
 `integrate` rebases exactly the task commits onto current main. AOP owns the privileged, mechanical
 Git operations: starting and continuing the rebase, recording any final validation edits, and
-fast-forwarding main. When a commit conflicts, AOP resumes the task's latest Codex session in its
+fast-forwarding main. When a commit conflicts, AOP resumes the task's latest authoring session in its
 original sandbox. The author resolves file content and runs relevant tests inside its isolated
 worktree; AOP then stages the resolution and continues. This repeats for every conflicting commit.
 After the rebase, the author gets one final sandboxed validation turn before AOP fast-forwards main.
@@ -172,8 +196,8 @@ Runtime state lives under the ignored `.aop/` directory:
 └── worktrees.lock      lifecycle-operation lock
 ```
 
-The current CLI does not configure language-specific build caches or launch providers other than
-Codex. Those interfaces will be added when a real project needs them.
+The current CLI does not configure language-specific build caches. That interface will be added
+when a real project needs it.
 
 ## 1. Core contract
 

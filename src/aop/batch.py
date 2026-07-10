@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
-from .runner import AgentRunner
+from .runner import AgentRunner, adapter_for
 from .worktrees import AOPError, TASK_ID, WorktreeManager
 
 
@@ -41,6 +41,7 @@ class BatchTask:
     id: str
     prompt: str
     prompt_source: str
+    agent: str = "codex"
     base: str = "HEAD"
     model: str | None = None
     effort: str | None = None
@@ -51,6 +52,7 @@ class BatchTask:
 @dataclass(frozen=True)
 class BatchTaskResult:
     task: str
+    agent: str
     status: str
     model: str | None
     effort: str | None
@@ -152,6 +154,7 @@ class BatchRunner:
             if task.id not in outcomes:
                 outcomes[task.id] = BatchTaskResult(
                     task=task.id,
+                    agent=task.agent,
                     status="not_started",
                     model=task.model,
                     effort=task.effort,
@@ -182,7 +185,7 @@ class BatchRunner:
 
     def _execute_task(self, task: BatchTask) -> BatchTaskResult:
         try:
-            result = AgentRunner(self.manager).run(
+            result = AgentRunner(self.manager, adapter_for(task.agent)).run(
                 task=task.id,
                 prompt=task.prompt,
                 base=task.base,
@@ -194,6 +197,7 @@ class BatchRunner:
         except Exception as error:
             return BatchTaskResult(
                 task=task.id,
+                agent=task.agent,
                 status="error",
                 model=task.model,
                 effort=task.effort,
@@ -210,6 +214,7 @@ class BatchRunner:
             )
         return BatchTaskResult(
             task=task.id,
+            agent=task.agent,
             status="succeeded" if result.succeeded else "failed",
             model=result.model,
             effort=result.effort,
@@ -279,8 +284,8 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
     if not TASK_ID.fullmatch(task_id):
         raise AOPError(f"{label}.id is not a valid task id: {task_id}")
     agent = value.get("agent", "codex")
-    if agent != "codex":
-        raise AOPError(f"{label}.agent must be 'codex'")
+    if not isinstance(agent, str) or agent not in {"codex", "claude", "agy"}:
+        raise AOPError(f"{label}.agent must be one of: agy, claude, codex")
 
     prompt = value.get("prompt")
     prompt_file = value.get("prompt_file")
@@ -330,6 +335,7 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
         id=task_id,
         prompt=prompt_text,
         prompt_source=prompt_source,
+        agent=agent,
         base=base,
         model=model,
         effort=effort,

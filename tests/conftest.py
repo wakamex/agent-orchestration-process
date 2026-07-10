@@ -106,3 +106,73 @@ print(json.dumps({{
     )
     executable.chmod(0o755)
     return executable
+
+
+@pytest.fixture
+def fake_claude(tmp_path: Path) -> Path:
+    executable = tmp_path / "claude"
+    executable.write_text(
+        f"""#!{sys.executable}
+import json
+import sys
+
+args = sys.argv[1:]
+prompt = sys.stdin.read()
+session_id = (
+    args[args.index("--resume") + 1]
+    if "--resume" in args
+    else args[args.index("--session-id") + 1]
+)
+print(json.dumps({{
+    "type": "system",
+    "subtype": "init",
+    "session_id": session_id,
+    "model": "claude-test-model",
+}}), flush=True)
+print(json.dumps({{
+    "type": "assistant",
+    "session_id": session_id,
+    "message": {{"content": [{{"type": "text", "text": "working"}}]}},
+}}), flush=True)
+print(json.dumps({{
+    "type": "result",
+    "subtype": "success",
+    "is_error": False,
+    "session_id": session_id,
+    "result": f"answer:{{prompt}}",
+    "total_cost_usd": 0.0123,
+    "usage": {{
+        "input_tokens": 10,
+        "cache_read_input_tokens": 20,
+        "cache_creation_input_tokens": 30,
+        "output_tokens": 40,
+    }},
+}}), flush=True)
+"""
+    )
+    executable.chmod(0o755)
+    return executable
+
+
+@pytest.fixture
+def fake_agy(tmp_path: Path) -> Path:
+    executable = tmp_path / "agy"
+    executable.write_text(
+        f"""#!{sys.executable}
+import pathlib
+import sys
+
+args = sys.argv[1:]
+log_path = pathlib.Path(args[args.index("--log-file") + 1])
+session_id = (
+    args[args.index("--conversation") + 1]
+    if "--conversation" in args
+    else "49f2a36e-43e4-4ba9-9f4f-817bee57f64c"
+)
+log_path.write_text(f"Created conversation {{session_id}}\\n")
+prompt = args[args.index("-p") + 1]
+print(f"answer:{{prompt}}", flush=True)
+"""
+    )
+    executable.chmod(0o755)
+    return executable

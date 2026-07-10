@@ -39,9 +39,7 @@ def fake_codex(tmp_path: Path) -> Path:
     executable.write_text(
         f"""#!{sys.executable}
 import json
-import os
 import pathlib
-import re
 import subprocess
 import sys
 import time
@@ -57,50 +55,27 @@ session_id = {SESSION_ID!r}
 if "resume" in args:
     session_id = args[args.index("resume") + 1]
 
-if prompt.startswith("AOP integration assignment"):
-    def field(name):
-        match = re.search(rf"^{{name}}: (.+)$", prompt, re.MULTILINE)
-        if match is None:
-            raise RuntimeError(f"missing integration field: {{name}}")
-        return match.group(1)
-
-    root = field("Main worktree")
-    main_head = field("Current main commit")
-    base = field("Recorded task base")
-    task_head = field("Original task head")
-    rebase = subprocess.run(
-        ["git", "rebase", "--onto", main_head, base, task_head], check=False
-    )
-    if rebase.returncode:
-        conflicts = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=U"],
+if prompt.startswith("AOP conflict resolution"):
+    conflicts = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.splitlines()
+    for name in conflicts:
+        main_content = subprocess.run(
+            ["git", "show", f":2:{{name}}"],
             text=True,
             capture_output=True,
             check=True,
-        ).stdout.splitlines()
-        for name in conflicts:
-            main_content = subprocess.run(
-                ["git", "-C", root, "show", f"{{main_head}}:{{name}}"],
-                text=True,
-                capture_output=True,
-                check=True,
-            ).stdout.rstrip()
-            task_content = subprocess.run(
-                ["git", "show", f"{{task_head}}:{{name}}"],
-                text=True,
-                capture_output=True,
-                check=True,
-            ).stdout.rstrip()
-            pathlib.Path(name).write_text(f"{{main_content}}\\n{{task_content}}\\n")
-            subprocess.run(["git", "add", name], check=True)
-        environment = dict(os.environ, GIT_EDITOR="true")
-        subprocess.run(["git", "rebase", "--continue"], env=environment, check=True)
-    rebased_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True
-    ).stdout.strip()
-    subprocess.run(
-        ["git", "-C", root, "merge", "--ff-only", rebased_head], check=True
-    )
+        ).stdout.rstrip()
+        task_content = subprocess.run(
+            ["git", "show", f":3:{{name}}"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.rstrip()
+        pathlib.Path(name).write_text(f"{{main_content}}\\n{{task_content}}\\n")
 
 print(json.dumps({{"type": "thread.started", "thread_id": session_id}}), flush=True)
 print(json.dumps({{"type": "turn.started"}}), flush=True)

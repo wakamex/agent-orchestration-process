@@ -1,4 +1,4 @@
-"""Explicit checkpoints and author-owned task integration."""
+"""Explicit checkpoints and sandboxed author-assisted task integration."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ class IntegrationResult:
     source_commits: list[str]
     integrated_commits: list[str]
     author_run: RunResult
+    resolution_run_ids: list[str]
     record_path: Path
 
 
@@ -87,7 +88,7 @@ class CheckpointManager:
 
 
 class IntegrationManager:
-    """Ask the task's authoring session to rebase and fast-forward main."""
+    """Rebase mechanically while the sandboxed author resolves content."""
 
     def __init__(
         self,
@@ -126,19 +127,7 @@ class IntegrationManager:
         _require_clean(self.worktrees.root, "main worktree")
         _require_clean(worktree.path, f"task worktree {task}")
 
-        branch = git(
-            self.worktrees.root,
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "HEAD",
-            check=False,
-        )
-        if branch.returncode:
-            raise AOPError(
-                "main worktree must be on an attached branch before integration"
-            )
-
+        branch = _attached_branch(self.worktrees.root)
         previous_head = git(self.worktrees.root, "rev-parse", "HEAD").stdout.strip()
         task_head = git(worktree.path, "rev-parse", "HEAD").stdout.strip()
         _require_ancestor(
@@ -170,60 +159,126 @@ class IntegrationManager:
             )
 
         author_run_id = _latest_resumable_run_id(self.worktrees.state_dir, task)
-        prompt = _integration_prompt(
-            task=task,
-            root=self.worktrees.root,
-            worktree=worktree.path,
-            branch=branch.stdout.strip(),
-            base_commit=metadata.base_commit,
-            task_head=task_head,
-            main_head=previous_head,
-        )
-        author_run = self.runner.resume(
-            run_id=author_run_id,
-            prompt=prompt,
-            timeout_seconds=timeout_seconds,
-            sandbox="danger-full-access",
-            _task_lock_held=True,
-        )
-
-        _require_clean(self.worktrees.root, "main worktree after author integration")
-        _require_clean(worktree.path, f"task worktree {task} after author integration")
-        final_branch = git(
-            self.worktrees.root,
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "HEAD",
+        rebase = git(
+            worktree.path,
+            "rebase",
+            "--onto",
+            previous_head,
+            metadata.base_commit,
+            task_head,
             check=False,
-        ).stdout.strip()
-        if final_branch != branch.stdout.strip():
-            raise AOPError(
-                f"authoring agent changed main branch from {branch.stdout.strip()} "
-                f"to {final_branch or '(detached)'}; run_id={author_run.run_id}"
+        )
+        resolution_run_ids: list[str] = []
+        while rebase.returncode:
+            if not _rebase_in_progress(worktree.path):
+                detail = rebase.stderr.strip() or rebase.stdout.strip()
+                raise AOPError(f"could not start or continue task rebase: {detail}")
+
+            conflicts = _unmerged_files(worktree.path)
+            if not conflicts:
+                detail = rebase.stderr.strip() or rebase.stdout.strip()
+                raise AOPError(
+                    f"task rebase stopped without conflicted files: {detail}"
+                )
+            resolution = self.runner.resume(
+                run_id=author_run_id,
+                prompt=_conflict_prompt(
+                    task=task,
+                    root=self.worktrees.root,
+                    worktree=worktree.path,
+                    branch=branch,
+                    main_head=previous_head,
+                    conflicts=conflicts,
+                ),
+                timeout_seconds=timeout_seconds,
+                _task_lock_held=True,
             )
-        integrated_head = git(self.worktrees.root, "rev-parse", "HEAD").stdout.strip()
-        final_task_head = git(worktree.path, "rev-parse", "HEAD").stdout.strip()
-        if integrated_head != final_task_head:
-            raise AOPError(
-                "authoring agent did not fast-forward main to the rebased task head; "
-                f"run_id={author_run.run_id}"
+            resolution_run_ids.append(resolution.run_id)
+            author_run_id = resolution.run_id
+            if not resolution.succeeded:
+                raise AOPError(
+                    "authoring agent failed while resolving rebase conflicts; "
+                    f"run_id={resolution.run_id}"
+                )
+
+            git(worktree.path, "diff", "--check")
+            git(worktree.path, "add", "--all")
+            if _unmerged_files(worktree.path):
+                raise AOPError(
+                    "authoring agent left unresolved conflict entries; "
+                    f"run_id={resolution.run_id}"
+                )
+            git(worktree.path, "diff", "--cached", "--check")
+            rebase = git(
+                worktree.path,
+                "-c",
+                "core.editor=true",
+                "rebase",
+                "--continue",
+                check=False,
             )
-        if integrated_head == previous_head:
-            raise AOPError(
-                f"authoring agent left main unchanged; run_id={author_run.run_id}"
-            )
+
+        rebased_head = git(worktree.path, "rev-parse", "HEAD").stdout.strip()
         _require_ancestor(
             self.worktrees.root,
             previous_head,
-            integrated_head,
-            "authoring agent did not preserve main as an ancestor of the integrated result",
+            rebased_head,
+            "rebased task does not descend from current main",
         )
+        self.worktrees.update_base(task, branch, previous_head)
+
+        validation = self.runner.resume(
+            run_id=author_run_id,
+            prompt=_validation_prompt(
+                task=task,
+                root=self.worktrees.root,
+                worktree=worktree.path,
+                branch=branch,
+                main_head=previous_head,
+                rebased_head=rebased_head,
+            ),
+            timeout_seconds=timeout_seconds,
+            _task_lock_held=True,
+        )
+        if not validation.succeeded:
+            raise AOPError(
+                "authoring agent failed while validating the rebased task; "
+                f"run_id={validation.run_id}"
+            )
+
+        if _is_dirty(worktree.path):
+            _require_no_unmerged_files(worktree.path)
+            git(worktree.path, "diff", "--check")
+            git(worktree.path, "add", "--all")
+            git(worktree.path, "diff", "--cached", "--check")
+            git(
+                worktree.path,
+                "commit",
+                "-m",
+                f"Address integration validation for {task}",
+            )
+
+        _require_clean(worktree.path, f"task worktree {task} after validation")
+        _require_clean(self.worktrees.root, "main worktree before fast-forward")
+        if _attached_branch(self.worktrees.root) != branch:
+            raise AOPError(f"main worktree is no longer on expected branch {branch}")
+        current_main = git(self.worktrees.root, "rev-parse", "HEAD").stdout.strip()
+        if current_main != previous_head:
+            raise AOPError(
+                "main advanced during integration; retry against its new head"
+            )
+
+        final_task_head = git(worktree.path, "rev-parse", "HEAD").stdout.strip()
+        git(self.worktrees.root, "merge", "--ff-only", final_task_head)
+        integrated_head = git(self.worktrees.root, "rev-parse", "HEAD").stdout.strip()
+        if integrated_head != final_task_head:
+            raise AOPError("fast-forward did not leave main at the task head")
+        _require_clean(self.worktrees.root, "main worktree after fast-forward")
+        self.worktrees.update_base(task, branch, integrated_head)
 
         integrated_commits = _commits_between(
             self.worktrees.root, previous_head, integrated_head
         )
-        self.worktrees.update_base(task, branch.stdout.strip(), integrated_head)
         record_id = (
             f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S.%fZ')}-{uuid4().hex[:8]}"
         )
@@ -232,15 +287,16 @@ class IntegrationManager:
             record_path,
             {
                 "task": task,
-                "branch": branch.stdout.strip(),
+                "branch": branch,
                 "base_commit": metadata.base_commit,
                 "original_task_head": task_head,
                 "previous_head": previous_head,
                 "integrated_head": integrated_head,
                 "source_commits": source_commits,
                 "integrated_commits": integrated_commits,
-                "author_run_id": author_run.run_id,
-                "author_session_id": author_run.session_id,
+                "resolution_run_ids": resolution_run_ids,
+                "validation_run_id": validation.run_id,
+                "author_session_id": validation.session_id,
                 "created_at": datetime.now(UTC).isoformat(),
             },
         )
@@ -250,44 +306,57 @@ class IntegrationManager:
             integrated_head=integrated_head,
             source_commits=source_commits,
             integrated_commits=integrated_commits,
-            author_run=author_run,
+            author_run=validation,
+            resolution_run_ids=resolution_run_ids,
             record_path=record_path,
         )
 
 
-def _integration_prompt(
+def _conflict_prompt(
     *,
     task: str,
     root: Path,
     worktree: Path,
     branch: str,
-    base_commit: str,
-    task_head: str,
     main_head: str,
+    conflicts: list[str],
 ) -> str:
-    return f"""AOP integration assignment for task {task}.
+    listed = "\n".join(f"- {name}" for name in conflicts)
+    return f"""AOP conflict resolution for task {task}.
 
-You authored this task and are responsible for completing its integration. Work persistently until
-the rebase, conflict resolution, relevant tests, and final fast-forward all succeed. You have
-explicit permission to update the task's Git history and the main worktree for this assignment.
+AOP is rebasing your task onto {branch} at {main_head}. Resolve the content conflicts in your
+isolated task worktree and run relevant tests where possible:
 
-Main worktree: {root}
-Main branch: {branch}
-Current main commit: {main_head}
+{listed}
+
 Task worktree: {worktree}
-Recorded task base: {base_commit}
-Original task head: {task_head}
+Main worktree (read-only context): {root}
 
-In the task worktree, rebase exactly the task commits onto current main with:
+You are running with your original sandbox. Edit the conflicted files until they contain the final
+intended result and contain no conflict markers. Do not run git add, git commit, git rebase, git
+merge, or modify the main worktree; AOP owns those privileged Git operations. Do not finish until
+the file conflicts are resolved.
+"""
 
-    git rebase --onto {main_head} {base_commit} {task_head}
 
-Resolve any conflicts yourself, continue the rebase, and run the relevant tests. Do not return
-while a rebase or conflict is unfinished. Before promotion, verify that main is still clean and at
-{main_head}. Then, from the main worktree, fast-forward {branch} to the rebased task HEAD with
-`git merge --ff-only <rebased-task-head>`. Finish only after both worktrees are clean and both HEADs
-name the same integrated commit. Do not force-update, reset, merge non-fast-forward, or discard
-either side's changes.
+def _validation_prompt(
+    *,
+    task: str,
+    root: Path,
+    worktree: Path,
+    branch: str,
+    main_head: str,
+    rebased_head: str,
+) -> str:
+    return f"""AOP rebased-task validation for task {task}.
+
+AOP rebased your task onto {branch} at {main_head}. The rebased task head is {rebased_head}.
+Inspect the result in {worktree}, run the relevant tests, and fix any content problems you find.
+The main worktree at {root} is read-only context.
+
+You are running with your original sandbox. You may edit task files, but do not run git add, git
+commit, git rebase, git merge, or modify main; AOP will capture your final edits and perform the
+fast-forward. Finish only when the rebased task is ready to integrate.
 """
 
 
@@ -300,10 +369,36 @@ def _require_clean(path: Path, description: str) -> None:
         raise AOPError(f"{description} must be clean")
 
 
+def _unmerged_files(path: Path) -> list[str]:
+    return git(path, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
+
+
 def _require_no_unmerged_files(path: Path) -> None:
-    names = git(path, "diff", "--name-only", "--diff-filter=U").stdout.strip()
+    names = _unmerged_files(path)
     if names:
-        raise AOPError(f"task worktree contains unresolved conflicts: {names}")
+        raise AOPError(
+            f"task worktree contains unresolved conflicts: {', '.join(names)}"
+        )
+
+
+def _rebase_in_progress(path: Path) -> bool:
+    for name in ("rebase-merge", "rebase-apply"):
+        value = git(path, "rev-parse", "--git-path", name).stdout.strip()
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = path / candidate
+        if candidate.exists():
+            return True
+    return False
+
+
+def _attached_branch(path: Path) -> str:
+    branch = git(
+        path, "symbolic-ref", "--quiet", "--short", "HEAD", check=False
+    ).stdout.strip()
+    if not branch:
+        raise AOPError("main worktree must be on an attached branch before integration")
+    return branch
 
 
 def _require_ancestor(path: Path, ancestor: str, descendant: str, message: str) -> None:

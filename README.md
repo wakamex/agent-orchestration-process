@@ -120,26 +120,28 @@ unresolved conflicts, whitespace errors, empty changes, missing Git author ident
 that still has an active AOP agent run. The checkpoint record includes its base and parent commits,
 the resulting commit, and successful AOP run IDs associated with the task.
 
-`integrate` resumes the task's latest Codex session and makes the author responsible for the whole
-integration. The author rebases exactly the task commits onto current main, resolves any conflicts
-inside its isolated worktree, runs the relevant tests, and then fast-forwards the current main
-branch to the rebased task head. It is instructed not to finish until the rebase and fast-forward
-succeed and both worktrees are clean at the same commit.
+`integrate` rebases exactly the task commits onto current main. AOP owns the privileged, mechanical
+Git operations: starting and continuing the rebase, recording any final validation edits, and
+fast-forwarding main. When a commit conflicts, AOP resumes the task's latest Codex session in its
+original sandbox. The author resolves file content and runs relevant tests inside its isolated
+worktree; AOP then stages the resolution and continues. This repeats for every conflicting commit.
+After the rebase, the author gets one final sandboxed validation turn before AOP fast-forwards main.
 
-AOP serializes this operation with task and integration locks. It verifies the recorded base,
-linear history, clean starting state, unchanged main branch, fast-forward ancestry, and identical
-final task/main heads. Because the trusted author must write Git metadata and main itself, this
-continuation runs with Codex's `danger-full-access` sandbox. Use `--timeout` to override the
+AOP serializes the operation with task and integration locks and verifies the recorded base,
+linear history, clean starting state, unchanged main branch, and fast-forward ancestry. Author
+continuations retain the sandbox selected by the original run—normally `workspace-write`—and are
+explicitly denied responsibility for Git metadata or main. Use `--timeout` to override the
 authoring run's timeout. A successful integration updates the task's recorded base and writes an
-audit record linking the original commits, rebased commits, and author continuation run. Keep the
-task worktree by default for further work, or remove it only after success with:
+audit record linking original commits, rebased commits, conflict-resolution runs, and the final
+validation run. Keep the task worktree by default for further work, or remove it only after success
+with:
 
 ```sh
 aop integrate task-a --remove-worktree
 ```
 
-AOP itself never stashes changes, force-updates a branch, or auto-resolves conflicts. Conflict
-judgment belongs to the authoring agent, and a task is never deleted after a failed integration.
+AOP never stashes changes, force-updates a branch, or decides conflict content. Conflict judgment
+belongs to the sandboxed authoring agent, and a task is never deleted after a failed integration.
 
 Run any other command in a task worktree with the lower-level escape hatch:
 

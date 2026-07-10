@@ -46,10 +46,11 @@ def test_checkpoint_and_integrate_linear_task(
     record = json.loads(result.record_path.read_text())
     assert record["task"] == "feature"
     assert record["source_commits"] == [checkpoint.commit]
-    assert record["author_run_id"] == result.author_run.run_id
+    assert record["validation_run_id"] == result.author_run.run_id
     assert result.author_run.command[
         result.author_run.command.index("--sandbox") + 1
-    ] == ("danger-full-access")
+    ] == ("workspace-write")
+    assert result.resolution_run_ids == []
     assert manager.metadata("feature").base_commit == result.integrated_head
 
 
@@ -117,6 +118,14 @@ def test_authoring_agent_resolves_rebase_conflict(
     assert git(worktree.path, "rev-parse", "HEAD") == result.integrated_head
     assert git(repository, "status", "--porcelain") == ""
     assert (repository / "README.md").read_text() == "main version\ntask version\n"
+    assert len(result.resolution_run_ids) == 1
+    resolution_result = json.loads(
+        (
+            repository / ".aop" / "runs" / result.resolution_run_ids[0] / "result.json"
+        ).read_text()
+    )
+    command = resolution_result["command"]
+    assert command[command.index("--sandbox") + 1] == "workspace-write"
 
 
 def test_checkpoint_refuses_an_active_task(repository: Path) -> None:

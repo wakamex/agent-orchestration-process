@@ -366,7 +366,6 @@ class AgentRunner:
         run_id: str,
         prompt: str,
         timeout_seconds: float | None = None,
-        sandbox: str | None = None,
         _task_lock_held: bool = False,
     ) -> RunResult:
         parent_request = self.store.load_request(run_id)
@@ -380,7 +379,7 @@ class AgentRunner:
             base=parent_request.base,
             model=parent_request.model,
             effort=parent_request.effort,
-            sandbox=sandbox if sandbox is not None else parent_request.sandbox,
+            sandbox=parent_request.sandbox,
             timeout_seconds=(
                 timeout_seconds
                 if timeout_seconds is not None

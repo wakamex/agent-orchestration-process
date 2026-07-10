@@ -12,6 +12,63 @@ AOP is a methodology and a set of interfaces, not a universal orchestration libr
 frame is portable; the evaluator, candidate format, mutation mechanism, and domain guards belong to
 each project.
 
+## Reference implementation
+
+This repository now includes the first executable slice of AOP: a dependency-free Python CLI for
+running concurrent tasks in isolated Git worktrees. It intentionally implements only the workspace
+boundary needed today; normalized model runners, evaluator adapters, and build-system integration
+will be added when a real project exercises those interfaces.
+
+Install the CLI from this checkout:
+
+```sh
+uv tool install /code/aop
+```
+
+For development, let uv create and synchronize the local environment. The default `dev` dependency
+group contains pytest and Ruff:
+
+```sh
+uv sync
+uv run pytest
+uv run ruff check src tests
+```
+
+Prepare a Git repository and create two isolated tasks:
+
+```sh
+cd /path/to/project
+aop init
+aop worktree create task-a
+aop worktree create task-b
+```
+
+Run any command in a task worktree:
+
+```sh
+aop exec task-a -- <agent-command>
+aop worktree list
+aop worktree path task-a
+aop worktree remove task-a
+```
+
+Task worktrees are detached at the selected base commit, so one worker cannot move another worker's
+branch. `aop exec` supplies `AOP_ROOT`, `AOP_TASK`, `AOP_WORKTREE`, and the shared `AOP_CACHE_DIR` to
+the child process. Dirty worktrees cannot be removed unless `--force` is explicit.
+
+Runtime state lives under the ignored `.aop/` directory:
+
+```text
+.aop/
+├── cache/              shared cache root for future build and runner adapters
+├── worktrees/          one isolated checkout per task
+└── worktrees.lock      lifecycle-operation lock
+```
+
+The current CLI does not launch models, merge task commits, or configure language-specific build
+caches. For now, pass an existing agent command through `aop exec` and integrate its resulting
+commit explicitly.
+
 ## 1. Core contract
 
 An AOP project follows five rules:

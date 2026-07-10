@@ -120,20 +120,26 @@ unresolved conflicts, whitespace errors, empty changes, missing Git author ident
 that still has an active AOP agent run. The checkpoint record includes its base and parent commits,
 the resulting commit, and successful AOP run IDs associated with the task.
 
-`integrate` is intentionally conservative. It requires clean main and task worktrees, an attached
-main branch, linear task history, and both histories to descend from the base recorded when the
-task was created. It runs Git's merge-tree conflict check without changing either checkout, then
-cherry-picks every task commit in one sequence. If that sequence fails, AOP aborts it and verifies
-that main returned to its original commit. A successful integration writes an audit record mapping
-source commits to the new commits on main. Keep the task worktree by default for inspection, or
-remove it only after success with:
+`integrate` resumes the task's latest Codex session and makes the author responsible for the whole
+integration. The author rebases exactly the task commits onto current main, resolves any conflicts
+inside its isolated worktree, runs the relevant tests, and then fast-forwards the current main
+branch to the rebased task head. It is instructed not to finish until the rebase and fast-forward
+succeed and both worktrees are clean at the same commit.
+
+AOP serializes this operation with task and integration locks. It verifies the recorded base,
+linear history, clean starting state, unchanged main branch, fast-forward ancestry, and identical
+final task/main heads. Because the trusted author must write Git metadata and main itself, this
+continuation runs with Codex's `danger-full-access` sandbox. Use `--timeout` to override the
+authoring run's timeout. A successful integration updates the task's recorded base and writes an
+audit record linking the original commits, rebased commits, and author continuation run. Keep the
+task worktree by default for further work, or remove it only after success with:
 
 ```sh
 aop integrate task-a --remove-worktree
 ```
 
-AOP never stashes changes, force-updates a branch, auto-resolves conflicts, or deletes a task after
-a failed integration.
+AOP itself never stashes changes, force-updates a branch, or auto-resolves conflicts. Conflict
+judgment belongs to the authoring agent, and a task is never deleted after a failed integration.
 
 Run any other command in a task worktree with the lower-level escape hatch:
 
@@ -164,9 +170,8 @@ Runtime state lives under the ignored `.aop/` directory:
 └── worktrees.lock      lifecycle-operation lock
 ```
 
-The current CLI does not auto-select task commits, merge conflicting work, configure
-language-specific build caches, or launch providers other than Codex. Those interfaces will be
-added when a real project needs them.
+The current CLI does not configure language-specific build caches or launch providers other than
+Codex. Those interfaces will be added when a real project needs them.
 
 ## 1. Core contract
 

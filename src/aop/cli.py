@@ -30,9 +30,14 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint.add_argument("-m", "--message", required=True)
 
     integrate = commands.add_parser(
-        "integrate", help="replay a clean task's commits onto the current branch"
+        "integrate", help="have the author rebase and fast-forward the task onto main"
     )
     integrate.add_argument("task")
+    integrate.add_argument(
+        "--timeout",
+        type=_positive_timeout,
+        help="author integration wall-clock seconds",
+    )
     integrate.add_argument(
         "--remove-worktree",
         action="store_true",
@@ -114,12 +119,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "integrate":
             result = IntegrationManager(manager).integrate(
-                args.task, remove_worktree=args.remove_worktree
+                args.task,
+                remove_worktree=args.remove_worktree,
+                timeout_seconds=args.timeout,
             )
+            if result.author_run.final_message:
+                print(
+                    result.author_run.final_message,
+                    end=(
+                        "" if result.author_run.final_message.endswith("\n") else "\n"
+                    ),
+                )
             print(result.integrated_head)
             print(
                 f"aop: integrated={len(result.integrated_commits)} "
-                f"record={result.record_path}",
+                f"author_run_id={result.author_run.run_id} record={result.record_path}",
                 file=sys.stderr,
             )
             return 0

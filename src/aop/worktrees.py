@@ -176,6 +176,21 @@ class WorktreeManager:
         except TypeError as error:
             raise AOPError(f"invalid task metadata {path}: {error}") from error
 
+    def update_base(self, task: str, base_ref: str, base_commit: str) -> TaskMetadata:
+        metadata = self.metadata(task)
+        resolved = git(
+            self.root, "rev-parse", "--verify", f"{base_commit}^{{commit}}"
+        ).stdout.strip()
+        updated = TaskMetadata(
+            task=metadata.task,
+            path=metadata.path,
+            base_ref=base_ref,
+            base_commit=resolved,
+            created_at=metadata.created_at,
+        )
+        self._write_metadata(updated)
+        return updated
+
     def run(self, task: str, command: Sequence[str]) -> int:
         from .locks import exclusive_lock, task_lock_path
 

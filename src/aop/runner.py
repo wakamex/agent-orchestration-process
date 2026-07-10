@@ -366,6 +366,8 @@ class AgentRunner:
         run_id: str,
         prompt: str,
         timeout_seconds: float | None = None,
+        sandbox: str | None = None,
+        _task_lock_held: bool = False,
     ) -> RunResult:
         parent_request = self.store.load_request(run_id)
         parent_result = self.store.load_result(run_id)
@@ -378,7 +380,7 @@ class AgentRunner:
             base=parent_request.base,
             model=parent_request.model,
             effort=parent_request.effort,
-            sandbox=parent_request.sandbox,
+            sandbox=sandbox if sandbox is not None else parent_request.sandbox,
             timeout_seconds=(
                 timeout_seconds
                 if timeout_seconds is not None
@@ -387,27 +389,38 @@ class AgentRunner:
             session_id=parent_result.session_id,
             parent_run_id=run_id,
         )
-        return self._execute(request, worktree)
+        return self._execute(request, worktree, task_lock_held=_task_lock_held)
 
-    def _execute(self, request: RunRequest, worktree: Worktree) -> RunResult:
+    def _execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        *,
+        task_lock_held: bool = False,
+    ) -> RunResult:
+        if task_lock_held:
+            return self._execute_unlocked(request, worktree)
         with exclusive_lock(
             task_lock_path(self.manager.state_dir, request.task),
             f"task {request.task}",
         ):
-            run_dir = self.store.create(request)
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "AOP_ROOT": os.fspath(self.manager.root),
-                    "AOP_TASK": request.task,
-                    "AOP_WORKTREE": os.fspath(worktree.path),
-                    "AOP_CACHE_DIR": os.fspath(self.manager.cache_dir),
-                    "AOP_RUN_ID": request.run_id,
-                }
-            )
-            result = self.adapter.execute(request, worktree, run_dir, environment)
-            self.store.write_json(run_dir / "result.json", result.to_dict())
-            return result
+            return self._execute_unlocked(request, worktree)
+
+    def _execute_unlocked(self, request: RunRequest, worktree: Worktree) -> RunResult:
+        run_dir = self.store.create(request)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "AOP_ROOT": os.fspath(self.manager.root),
+                "AOP_TASK": request.task,
+                "AOP_WORKTREE": os.fspath(worktree.path),
+                "AOP_CACHE_DIR": os.fspath(self.manager.cache_dir),
+                "AOP_RUN_ID": request.run_id,
+            }
+        )
+        result = self.adapter.execute(request, worktree, run_dir, environment)
+        self.store.write_json(run_dir / "result.json", result.to_dict())
+        return result
 
     def _request(
         self,

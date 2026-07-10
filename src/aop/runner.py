@@ -122,8 +122,15 @@ class CodexAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        last_message_path = run_dir / "last-message.txt"
-        command = self._command(request, worktree, last_message_path)
+        last_message_path = (
+            Path(tempfile.gettempdir()) / f"aop-codex-{request.run_id}.txt"
+        )
+        command = _provider_command(
+            self._command(request, worktree, last_message_path),
+            request,
+            worktree,
+            environment,
+        )
         started_at = _now()
         started = time.monotonic()
         timed_out = False
@@ -222,6 +229,8 @@ class CodexAdapter:
         final_message = None
         if last_message_path.exists():
             final_message = last_message_path.read_text()
+            _atomic_write(run_dir / "last-message.txt", final_message)
+            last_message_path.unlink()
 
         return RunResult(
             run_id=request.run_id,
@@ -253,8 +262,7 @@ class CodexAdapter:
             "--json",
             "--color",
             "never",
-            "--sandbox",
-            request.sandbox,
+            "--dangerously-bypass-approvals-and-sandbox",
             "--output-last-message",
             os.fspath(last_message_path),
             "-C",
@@ -762,6 +770,7 @@ def _provider_command(
     root = Path(environment["AOP_ROOT"])
     cache = Path(environment["AOP_CACHE_DIR"])
     bwrap = os.environ.get("AOP_BWRAP_BIN", "bwrap")
+    scratch = Path(environment["AOP_SCRATCH_DIR"])
     wrapped = [
         bwrap,
         "--die-with-parent",
@@ -771,16 +780,15 @@ def _provider_command(
         "--ro-bind",
         os.fspath(root),
         os.fspath(root),
-        "--bind",
-        os.fspath(worktree.path),
-        os.fspath(worktree.path),
-        "--bind",
-        os.fspath(cache),
-        os.fspath(cache),
     ]
-    git_marker = worktree.path / ".git"
-    if git_marker.exists():
-        wrapped.extend(["--ro-bind", os.fspath(git_marker), os.fspath(git_marker)])
+    if request.sandbox == "workspace-write":
+        wrapped.extend(["--bind", os.fspath(worktree.path), os.fspath(worktree.path)])
+        git_marker = worktree.path / ".git"
+        if git_marker.exists():
+            wrapped.extend(["--ro-bind", os.fspath(git_marker), os.fspath(git_marker)])
+    else:
+        wrapped.extend(["--bind", os.fspath(scratch), os.fspath(scratch)])
+    wrapped.extend(["--bind", os.fspath(cache), os.fspath(cache)])
     wrapped.extend(["--chdir", os.fspath(worktree.path), "--", *command])
     return wrapped
 
@@ -884,6 +892,8 @@ class AgentRunner:
             return self._execute_unlocked(request, worktree)
 
     def _execute_unlocked(self, request: RunRequest, worktree: Worktree) -> RunResult:
+        scratch_dir = worktree.path / "scratch"
+        scratch_dir.mkdir(exist_ok=True)
         run_dir = self.store.create(request)
         environment = os.environ.copy()
         environment.update(
@@ -892,6 +902,7 @@ class AgentRunner:
                 "AOP_TASK": request.task,
                 "AOP_WORKTREE": os.fspath(worktree.path),
                 "AOP_CACHE_DIR": os.fspath(self.manager.cache_dir),
+                "AOP_SCRATCH_DIR": os.fspath(scratch_dir),
                 "AOP_RUN_ID": request.run_id,
             }
         )

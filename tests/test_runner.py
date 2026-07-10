@@ -41,9 +41,9 @@ def test_run_persists_structured_codex_artifacts(
     assert result.api_equivalent_cost.amount_usd == 0.000035
     assert result.time_to_first_event_seconds is not None
     assert result.time_to_first_response_seconds is not None
-    assert "--dangerously-bypass-approvals-and-sandbox" not in result.command
+    assert result.command[0] == "bwrap"
+    assert "--dangerously-bypass-approvals-and-sandbox" in result.command
     assert result.command[-1] == "-"
-    assert ["--sandbox", "workspace-write"] == result.command[5:7]
 
     run_dir = repository / ".aop" / "runs" / result.run_id
     request = json.loads((run_dir / "request.json").read_text())

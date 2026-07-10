@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--sandbox",
-        choices=["workspace-write", "danger-full-access"],
+        choices=["workspace-write", "scratch-write", "danger-full-access"],
         default="workspace-write",
     )
     run.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")

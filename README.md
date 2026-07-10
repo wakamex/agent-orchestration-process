@@ -62,14 +62,14 @@ artifact directory to stderr. Resume the exact session using the AOP run ID:
 aop resume <run-id> --prompt "Address the review findings"
 ```
 
-Authoring runs use `workspace-write` by default. Codex uses its native workspace sandbox. Claude and
-agy run inside `bwrap`: the main repository is rebound read-only, only the isolated task worktree is
-rebound writable, the shared `AOP_CACHE_DIR` remains writable, and the worktree's `.git` pointer
-remains read-only. Their provider permission prompts are bypassed because the OS mount boundary is
-the enforcement layer. Use
-`danger-full-access` only to skip this boundary explicitly. Configured authentication and user
-instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`, `AOP_AGY_BIN`, and
-`AOP_BWRAP_BIN` may override their respective executables.
+All providers run inside `bwrap` by default, with their own permission prompts bypassed because the
+OS mount boundary is the enforcement layer. `workspace-write` mounts the main repository read-only,
+rebinds only the isolated task worktree and shared `AOP_CACHE_DIR` writable, and keeps the
+worktree's `.git` pointer read-only. `scratch-write` leaves the task read-only and rebinds only its
+`scratch/` directory plus the shared cache writable; use it for agents whose deliverable is stdout
+rather than repository edits. `danger-full-access` explicitly skips `bwrap`. Configured
+authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`,
+`AOP_AGY_BIN`, and `AOP_BWRAP_BIN` may override their respective executables.
 
 Claude accepts its normal model aliases and effort levels `low`, `medium`, `high`, `xhigh`, and
 `max`. Agy encodes effort in the model selection. AOP provides ergonomic aliases for the currently

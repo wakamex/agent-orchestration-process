@@ -135,6 +135,21 @@ if prompt == "CHECK_SANDBOX":
             pass
         else:
             raise RuntimeError(f"sandbox allowed write to {{protected}}")
+if prompt == "CHECK_SCRATCH":
+    pathlib.Path(os.environ["AOP_SCRATCH_DIR"]).joinpath("analysis.txt").write_text(
+        "allowed"
+    )
+    for protected in [
+        pathlib.Path("agent-write.txt"),
+        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path(".git"),
+    ]:
+        try:
+            protected.write_text("forbidden")
+        except OSError:
+            pass
+        else:
+            raise RuntimeError(f"scratch sandbox allowed write to {{protected}}")
 session_id = (
     args[args.index("--resume") + 1]
     if "--resume" in args

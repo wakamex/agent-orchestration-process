@@ -119,3 +119,23 @@ def test_claude_workspace_uses_bwrap_to_protect_main_and_git_metadata(
     assert (manager.cache_dir / "provider-cache.txt").read_text() == "shared"
     assert not (repository / "main-write.txt").exists()
     assert (worktree.path / ".git").read_text().startswith("gitdir:")
+
+
+def test_scratch_write_only_mounts_the_task_scratch_directory(
+    repository: Path, fake_claude: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude)))
+
+    result = runner.run(
+        task="proposal",
+        prompt="CHECK_SCRATCH",
+        sandbox="scratch-write",
+        timeout_seconds=5,
+    )
+    worktree = manager.get("proposal")
+
+    assert result.succeeded
+    assert (worktree.path / "scratch" / "analysis.txt").read_text() == "allowed"
+    assert not (worktree.path / "agent-write.txt").exists()
+    assert not (repository / "main-write.txt").exists()

@@ -14,10 +14,9 @@ each project.
 
 ## Reference implementation
 
-This repository now includes the first executable slice of AOP: a dependency-free Python CLI for
-running concurrent tasks in isolated Git worktrees. It intentionally implements only the workspace
-boundary needed today; normalized model runners, evaluator adapters, and build-system integration
-will be added when a real project exercises those interfaces.
+This repository includes a dependency-free Python CLI for running concurrent tasks in isolated Git
+worktrees. Its first normalized model adapter runs Codex non-interactively, records the full result,
+and resumes the exact Codex session associated with an earlier run.
 
 Install the CLI from this checkout:
 
@@ -43,7 +42,26 @@ aop worktree create task-a
 aop worktree create task-b
 ```
 
-Run any command in a task worktree:
+Run Codex in a new or existing task worktree:
+
+```sh
+aop run task-a --prompt-file task.md --timeout 1800
+aop run task-b --prompt "Implement the parser and its tests"
+```
+
+`aop run` prints the agent's final message to stdout and the AOP run ID, Codex session ID, and
+artifact directory to stderr. Resume the exact session using the AOP run ID:
+
+```sh
+aop resume <run-id> --prompt "Address the review findings"
+```
+
+The default Codex sandbox is `workspace-write`, scoped to the isolated task worktree. The configured
+Codex model, reasoning effort, authentication, and user instructions are preserved unless `--model`
+or `--effort` is supplied. `AOP_CODEX_BIN` may override the Codex executable for testing or a custom
+installation.
+
+Run any other command in a task worktree with the lower-level escape hatch:
 
 ```sh
 aop exec task-a -- <agent-command>
@@ -61,13 +79,14 @@ Runtime state lives under the ignored `.aop/` directory:
 ```text
 .aop/
 ├── cache/              shared cache root for future build and runner adapters
+├── runs/<run-id>/      request, result, JSONL events, stderr, and final message
 ├── worktrees/          one isolated checkout per task
 └── worktrees.lock      lifecycle-operation lock
 ```
 
-The current CLI does not launch models, merge task commits, or configure language-specific build
-caches. For now, pass an existing agent command through `aop exec` and integrate its resulting
-commit explicitly.
+The current CLI does not merge task commits, configure language-specific build caches, schedule
+batches, or launch providers other than Codex. Those interfaces will be added when a real project
+needs them.
 
 ## 1. Core contract
 
@@ -103,14 +122,18 @@ It is responsible for:
 - session creation, capture, and resumption;
 - normalized stdout, stderr, and exit status.
 
-A useful environment contract is:
+AOP supplies this environment contract to child processes:
 
 ```text
-AGENT_SESSION   optional session identifier
-AGENT_RESUME    whether to resume the supplied session
-AGENT_SIDFILE   path where a newly created session identifier is written
-AGENT_TIMEOUT   wall-clock limit enforced outside the agent
+AOP_ROOT        main Git worktree
+AOP_TASK        stable task identifier
+AOP_WORKTREE    isolated task worktree
+AOP_CACHE_DIR   shared cache root
+AOP_RUN_ID      current structured run identifier (model runs only)
 ```
+
+Model session identifiers, parent runs, timeouts, and terminal status live in each run's JSON
+artifacts instead of mutable environment variables.
 
 The other layers should not need to know which model or CLI is running.
 

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .models import RunResult
+from .runner import AgentRunner
 from .worktrees import AOPError, WorktreeManager
 
 
@@ -18,6 +20,29 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("init", help="prepare the current Git repository for AOP")
+
+    run = commands.add_parser("run", help="run Codex in an isolated task worktree")
+    run.add_argument("task")
+    run.add_argument("--agent", choices=["codex"], default="codex")
+    run.add_argument("--base", default="HEAD", help="commit for a new task worktree")
+    run.add_argument("--model", help="override the configured Codex model")
+    run.add_argument(
+        "--effort",
+        choices=["minimal", "low", "medium", "high", "xhigh"],
+        help="override Codex model reasoning effort",
+    )
+    run.add_argument(
+        "--sandbox",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+        default="workspace-write",
+    )
+    run.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
+    _add_prompt_arguments(run)
+
+    resume = commands.add_parser("resume", help="resume the Codex session from a run")
+    resume.add_argument("run_id")
+    resume.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
+    _add_prompt_arguments(resume)
 
     worktree = commands.add_parser("worktree", help="manage task worktrees")
     worktree_commands = worktree.add_subparsers(dest="worktree_command", required=True)
@@ -65,6 +90,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 command = command[1:]
             return manager.run(args.task, command)
 
+        if args.command == "run":
+            result = AgentRunner(manager).run(
+                task=args.task,
+                prompt=_read_prompt(args),
+                base=args.base,
+                model=args.model,
+                effort=args.effort,
+                sandbox=args.sandbox,
+                timeout_seconds=args.timeout,
+            )
+            return _report_run(result, manager)
+
+        if args.command == "resume":
+            result = AgentRunner(manager).resume(
+                run_id=args.run_id,
+                prompt=_read_prompt(args),
+                timeout_seconds=args.timeout,
+            )
+            return _report_run(result, manager)
+
         if args.worktree_command == "create":
             created = manager.create(args.task, args.base)
             print(created.path)
@@ -90,6 +135,53 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("aop: interrupted", file=sys.stderr)
         return 130
+
+
+def _add_prompt_arguments(parser: argparse.ArgumentParser) -> None:
+    prompts = parser.add_mutually_exclusive_group(required=True)
+    prompts.add_argument("--prompt")
+    prompts.add_argument("--prompt-file", type=Path)
+
+
+def _read_prompt(args: argparse.Namespace) -> str:
+    if args.prompt is not None:
+        return args.prompt
+    try:
+        return args.prompt_file.read_text()
+    except OSError as error:
+        raise AOPError(
+            f"could not read prompt file {args.prompt_file}: {error}"
+        ) from error
+
+
+def _positive_timeout(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("timeout must be a number") from error
+    if timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be greater than zero")
+    return timeout
+
+
+def _report_run(result: RunResult, manager: WorktreeManager) -> int:
+    if result.final_message:
+        print(
+            result.final_message,
+            end="" if result.final_message.endswith("\n") else "\n",
+        )
+    print(
+        f"aop: run_id={result.run_id} session_id={result.session_id or '-'} "
+        f"artifacts={manager.state_dir / 'runs' / result.run_id}",
+        file=sys.stderr,
+    )
+    if result.succeeded:
+        return 0
+    if result.error:
+        print(f"aop: {result.error}", file=sys.stderr)
+    if result.timed_out:
+        return 124
+    return result.exit_code if 0 < result.exit_code < 126 else 1
 
 
 if __name__ == "__main__":

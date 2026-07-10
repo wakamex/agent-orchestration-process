@@ -31,12 +31,16 @@ def test_worktree_lifecycle(repository: Path) -> None:
         repository, "rev-parse", "HEAD"
     )
     assert manager.get("task-one").path == created.path
+    metadata = manager.metadata("task-one")
+    assert metadata.base_commit == created.head
+    assert metadata.path == os.fspath(created.path)
     assert [item.task for item in manager.list()] == ["task-one"]
     assert (repository / ".gitignore").read_text().count("/.aop/") == 1
 
     manager.remove("task-one")
     assert manager.list() == []
     assert not created.path.exists()
+    assert not (repository / ".aop" / "tasks" / "task-one.json").exists()
 
 
 def test_dirty_worktree_requires_force(repository: Path) -> None:

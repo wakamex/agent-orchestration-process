@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import subprocess
@@ -29,7 +30,16 @@ class Worktree:
     created_at: str | None = None
 
 
-def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+@dataclass(frozen=True)
+class TaskMetadata:
+    task: str
+    path: str
+    base_ref: str
+    base_commit: str
+    created_at: str
+
+
+def git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     process = subprocess.run(
         ["git", "-C", os.fspath(cwd), *args],
         text=True,
@@ -57,7 +67,7 @@ class WorktreeManager:
     @classmethod
     def discover(cls, start: Path | None = None) -> WorktreeManager:
         cwd = (start or Path.cwd()).resolve()
-        listing = _git(cwd, "worktree", "list", "--porcelain").stdout
+        listing = git(cwd, "worktree", "list", "--porcelain").stdout
         first = next(
             (line for line in listing.splitlines() if line.startswith("worktree ")),
             None,
@@ -69,6 +79,7 @@ class WorktreeManager:
     def initialize(self) -> None:
         self.worktrees_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "tasks").mkdir(parents=True, exist_ok=True)
         self._ensure_ignored()
 
     def create(self, task: str, base: str = "HEAD") -> Worktree:
@@ -80,20 +91,30 @@ class WorktreeManager:
             if path.exists() or any(item.task == task for item in self.list()):
                 raise AOPError(f"task worktree already exists: {task}")
 
-            head = _git(
+            head = git(
                 self.root, "rev-parse", "--verify", f"{base}^{{commit}}"
             ).stdout.strip()
-            _git(self.root, "worktree", "add", "--detach", os.fspath(path), head)
+            git(self.root, "worktree", "add", "--detach", os.fspath(path), head)
+            created_at = datetime.now(UTC).isoformat()
+            self._write_metadata(
+                TaskMetadata(
+                    task=task,
+                    path=os.fspath(path),
+                    base_ref=base,
+                    base_commit=head,
+                    created_at=created_at,
+                )
+            )
 
         return Worktree(
             task=task,
             path=path,
             head=head,
-            created_at=datetime.now(UTC).isoformat(),
+            created_at=created_at,
         )
 
     def list(self) -> list[Worktree]:
-        listing = _git(self.root, "worktree", "list", "--porcelain").stdout
+        listing = git(self.root, "worktree", "list", "--porcelain").stdout
         worktrees: list[Worktree] = []
 
         for block in listing.strip().split("\n\n"):
@@ -125,15 +146,39 @@ class WorktreeManager:
         raise AOPError(f"unknown task worktree: {task}")
 
     def remove(self, task: str, *, force: bool = False) -> None:
-        worktree = self.get(task)
-        with self._lock():
-            args = ["worktree", "remove"]
-            if force:
-                args.append("--force")
-            args.append(os.fspath(worktree.path))
-            _git(self.root, *args)
+        from .locks import exclusive_lock, task_lock_path
+
+        with exclusive_lock(task_lock_path(self.state_dir, task), f"task {task}"):
+            worktree = self.get(task)
+            with self._lock():
+                args = ["worktree", "remove"]
+                if force:
+                    args.append("--force")
+                args.append(os.fspath(worktree.path))
+                git(self.root, *args)
+                metadata_path = self._metadata_path(task)
+                if metadata_path.exists():
+                    metadata_path.unlink()
+
+    def metadata(self, task: str) -> TaskMetadata:
+        self._validate_task(task)
+        path = self._metadata_path(task)
+        try:
+            value = json.loads(path.read_text())
+        except FileNotFoundError as error:
+            raise AOPError(
+                f"task metadata is missing for {task}; recreate the worktree with AOP"
+            ) from error
+        except json.JSONDecodeError as error:
+            raise AOPError(f"invalid task metadata {path}: {error}") from error
+        try:
+            return TaskMetadata(**value)
+        except TypeError as error:
+            raise AOPError(f"invalid task metadata {path}: {error}") from error
 
     def run(self, task: str, command: Sequence[str]) -> int:
+        from .locks import exclusive_lock, task_lock_path
+
         if not command:
             raise AOPError("a command is required after --")
         worktree = self.get(task)
@@ -146,9 +191,10 @@ class WorktreeManager:
                 "AOP_CACHE_DIR": os.fspath(self.cache_dir),
             }
         )
-        return subprocess.run(
-            command, cwd=worktree.path, env=environment, check=False
-        ).returncode
+        with exclusive_lock(task_lock_path(self.state_dir, task), f"task {task}"):
+            return subprocess.run(
+                command, cwd=worktree.path, env=environment, check=False
+            ).returncode
 
     def _ensure_ignored(self) -> None:
         ignore_file = self.root / ".gitignore"
@@ -157,6 +203,17 @@ class WorktreeManager:
             return
         prefix = "" if not content or content.endswith("\n") else "\n"
         ignore_file.write_text(f"{content}{prefix}{IGNORE_ENTRY}\n")
+
+    def _metadata_path(self, task: str) -> Path:
+        return self.state_dir / "tasks" / f"{task}.json"
+
+    def _write_metadata(self, metadata: TaskMetadata) -> None:
+        path = self._metadata_path(metadata.task)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
+            f"{json.dumps(metadata.__dict__, indent=2, sort_keys=True)}\n"
+        )
+        os.replace(temporary, path)
 
     @staticmethod
     def _validate_task(task: str) -> None:

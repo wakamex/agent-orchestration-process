@@ -42,6 +42,9 @@ aop worktree create task-a
 aop worktree create task-b
 ```
 
+`aop init` adds `/.aop/` to `.gitignore`. Commit that project-level change before integrating
+tasks so the main worktree is clean.
+
 Run Codex in a new or existing task worktree:
 
 ```sh
@@ -104,6 +107,34 @@ durations, exit codes, and errors. A batch exits nonzero if any task fails, with
 successful sibling results. Its terminal summary compares task, model, effort, wall time, total
 tokens, and estimated API-equivalent cost.
 
+Checkpoint a completed task, then integrate its commits onto the branch currently checked out in
+the main worktree:
+
+```sh
+aop checkpoint task-a -m "Implement parser"
+aop integrate task-a
+```
+
+`checkpoint` commits all tracked, staged, and untracked changes in the task worktree. It refuses
+unresolved conflicts, whitespace errors, empty changes, missing Git author identity, and any task
+that still has an active AOP agent run. The checkpoint record includes its base and parent commits,
+the resulting commit, and successful AOP run IDs associated with the task.
+
+`integrate` is intentionally conservative. It requires clean main and task worktrees, an attached
+main branch, linear task history, and both histories to descend from the base recorded when the
+task was created. It runs Git's merge-tree conflict check without changing either checkout, then
+cherry-picks every task commit in one sequence. If that sequence fails, AOP aborts it and verifies
+that main returned to its original commit. A successful integration writes an audit record mapping
+source commits to the new commits on main. Keep the task worktree by default for inspection, or
+remove it only after success with:
+
+```sh
+aop integrate task-a --remove-worktree
+```
+
+AOP never stashes changes, force-updates a branch, auto-resolves conflicts, or deletes a task after
+a failed integration.
+
 Run any other command in a task worktree with the lower-level escape hatch:
 
 ```sh
@@ -123,13 +154,19 @@ Runtime state lives under the ignored `.aop/` directory:
 .aop/
 ├── batches/            structured batch summaries
 ├── cache/              shared cache root for future build and runner adapters
+├── checkpoints/        task checkpoint records
+├── integrations/       successful integration audit records
+├── locks/              per-task execution/checkpoint locks
 ├── runs/<run-id>/      request, result, JSONL events, stderr, and final message
+├── tasks/               recorded task bases and worktree paths
 ├── worktrees/          one isolated checkout per task
+├── integration.lock    single-writer main-branch integration lock
 └── worktrees.lock      lifecycle-operation lock
 ```
 
-The current CLI does not merge task commits, configure language-specific build caches, or launch
-providers other than Codex. Those interfaces will be added when a real project needs them.
+The current CLI does not auto-select task commits, merge conflicting work, configure
+language-specific build caches, or launch providers other than Codex. Those interfaces will be
+added when a real project needs them.
 
 ## 1. Core contract
 

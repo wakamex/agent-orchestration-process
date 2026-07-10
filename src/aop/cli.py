@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .batch import BatchResult, BatchRunner
+from .integration import CheckpointManager, IntegrationManager
 from .models import RunResult
 from .runner import AgentRunner
 from .worktrees import AOPError, WorktreeManager
@@ -21,6 +22,22 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("init", help="prepare the current Git repository for AOP")
+
+    checkpoint = commands.add_parser(
+        "checkpoint", help="commit all current changes in a task worktree"
+    )
+    checkpoint.add_argument("task")
+    checkpoint.add_argument("-m", "--message", required=True)
+
+    integrate = commands.add_parser(
+        "integrate", help="replay a clean task's commits onto the current branch"
+    )
+    integrate.add_argument("task")
+    integrate.add_argument(
+        "--remove-worktree",
+        action="store_true",
+        help="remove the task worktree after successful integration",
+    )
 
     batch = commands.add_parser("batch", help="run a TOML task manifest in parallel")
     batch.add_argument("manifest", type=Path)
@@ -87,6 +104,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "init":
             manager.initialize()
             print(f"initialized AOP state in {manager.state_dir}")
+            return 0
+
+        if args.command == "checkpoint":
+            result = CheckpointManager(manager).checkpoint(args.task, args.message)
+            print(result.commit)
+            print(f"aop: checkpoint={result.record_path}", file=sys.stderr)
+            return 0
+
+        if args.command == "integrate":
+            result = IntegrationManager(manager).integrate(
+                args.task, remove_worktree=args.remove_worktree
+            )
+            print(result.integrated_head)
+            print(
+                f"aop: integrated={len(result.integrated_commits)} "
+                f"record={result.record_path}",
+                file=sys.stderr,
+            )
             return 0
 
         if args.command == "exec":

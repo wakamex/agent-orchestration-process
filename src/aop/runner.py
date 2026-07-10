@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import RunRequest, RunResult
+from .locks import exclusive_lock, task_lock_path
 from .pricing import TokenUsage, estimate_api_cost
 from .worktrees import AOPError, Worktree, WorktreeManager
 
@@ -389,20 +390,24 @@ class AgentRunner:
         return self._execute(request, worktree)
 
     def _execute(self, request: RunRequest, worktree: Worktree) -> RunResult:
-        run_dir = self.store.create(request)
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "AOP_ROOT": os.fspath(self.manager.root),
-                "AOP_TASK": request.task,
-                "AOP_WORKTREE": os.fspath(worktree.path),
-                "AOP_CACHE_DIR": os.fspath(self.manager.cache_dir),
-                "AOP_RUN_ID": request.run_id,
-            }
-        )
-        result = self.adapter.execute(request, worktree, run_dir, environment)
-        self.store.write_json(run_dir / "result.json", result.to_dict())
-        return result
+        with exclusive_lock(
+            task_lock_path(self.manager.state_dir, request.task),
+            f"task {request.task}",
+        ):
+            run_dir = self.store.create(request)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "AOP_ROOT": os.fspath(self.manager.root),
+                    "AOP_TASK": request.task,
+                    "AOP_WORKTREE": os.fspath(worktree.path),
+                    "AOP_CACHE_DIR": os.fspath(self.manager.cache_dir),
+                    "AOP_RUN_ID": request.run_id,
+                }
+            )
+            result = self.adapter.execute(request, worktree, run_dir, environment)
+            self.store.write_json(run_dir / "result.json", result.to_dict())
+            return result
 
     def _request(
         self,

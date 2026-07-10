@@ -54,6 +54,8 @@ def test_batch_runs_four_tasks_and_persists_summary(
 [[tasks]]
 id = "alpha"
 prompt = "one"
+model = "gpt-5.6-sol"
+effort = "high"
 
 [[tasks]]
 id = "beta"
@@ -78,6 +80,9 @@ prompt = "four"
     assert [task.task for task in result.tasks] == ["alpha", "beta", "gamma", "delta"]
     assert all(task.status == "succeeded" for task in result.tasks)
     assert all(task.run_id for task in result.tasks)
+    assert result.tasks[0].input_tokens == 1
+    assert result.tasks[0].output_tokens == 1
+    assert result.tasks[0].api_equivalent_cost_usd == 0.000035
     assert {item.task for item in manager.list()} == {"alpha", "beta", "gamma", "delta"}
     assert sum(message.endswith("started") for message in messages) == 4
 
@@ -85,6 +90,7 @@ prompt = "four"
     summary = json.loads(summary_path.read_text())
     assert summary["succeeded"] is True
     assert len(summary["tasks"]) == 4
+    assert summary["tasks"][0]["model"] == "gpt-5.6-sol"
 
 
 def test_cli_batch_returns_failure_and_keeps_other_results(

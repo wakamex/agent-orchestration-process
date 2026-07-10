@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import threading
 import time
 import uuid
 from datetime import UTC, datetime
@@ -13,11 +14,16 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import RunRequest, RunResult
+from .pricing import TokenUsage, estimate_api_cost
 from .worktrees import AOPError, Worktree, WorktreeManager
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _rounded(value: float | None) -> float | None:
+    return round(value, 6) if value is not None else None
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -107,6 +113,8 @@ class CodexAdapter:
         started_at = _now()
         started = time.monotonic()
         timed_out = False
+        first_event_seconds = None
+        first_response_seconds = None
 
         try:
             process = subprocess.Popen(
@@ -125,31 +133,67 @@ class CodexAdapter:
             stderr = f"command not found: {self.binary}\n"
             exit_code = 127
         else:
+            stdout_parts: list[str] = []
+            stderr_parts: list[str] = []
+
+            def read_stdout() -> None:
+                nonlocal first_event_seconds, first_response_seconds
+                assert process.stdout is not None
+                for line in process.stdout:
+                    elapsed = time.monotonic() - started
+                    if first_event_seconds is None:
+                        first_event_seconds = elapsed
+                    if first_response_seconds is None and self._is_agent_message(line):
+                        first_response_seconds = elapsed
+                    stdout_parts.append(line)
+
+            def read_stderr() -> None:
+                assert process.stderr is not None
+                stderr_parts.extend(process.stderr)
+
+            stdout_reader = threading.Thread(target=read_stdout, daemon=True)
+            stderr_reader = threading.Thread(target=read_stderr, daemon=True)
+            stdout_reader.start()
+            stderr_reader.start()
+
             try:
-                stdout, stderr = process.communicate(
-                    request.prompt, timeout=request.timeout_seconds
-                )
+                assert process.stdin is not None
+                try:
+                    process.stdin.write(request.prompt)
+                    process.stdin.flush()
+                except BrokenPipeError:
+                    pass
+                finally:
+                    process.stdin.close()
+                process.wait(timeout=request.timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
+                self._signal_process_group(process, signal.SIGTERM)
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    stdout, stderr = process.communicate(timeout=5)
+                    process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    stdout, stderr = process.communicate()
+                    self._signal_process_group(process, signal.SIGKILL)
+                    process.wait()
+            except KeyboardInterrupt:
+                self._signal_process_group(process, signal.SIGTERM)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._signal_process_group(process, signal.SIGKILL)
+                    process.wait()
+                raise
+            finally:
+                stdout_reader.join(timeout=5)
+                stderr_reader.join(timeout=5)
+            stdout = "".join(stdout_parts)
+            stderr = "".join(stderr_parts)
             exit_code = process.returncode
 
         duration = time.monotonic() - started
         _atomic_write(run_dir / "events.jsonl", stdout)
         _atomic_write(run_dir / "stderr.log", stderr)
 
-        session_id, event_error = self._parse_events(stdout)
+        session_id, event_error, usage = self._parse_events(stdout)
         if timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif event_error:
@@ -169,15 +213,21 @@ class CodexAdapter:
             run_id=request.run_id,
             provider=request.provider,
             task=request.task,
+            model=request.model,
+            effort=request.effort,
             session_id=session_id or request.session_id,
             command=command,
             started_at=started_at,
             finished_at=_now(),
             duration_seconds=round(duration, 6),
+            time_to_first_event_seconds=_rounded(first_event_seconds),
+            time_to_first_response_seconds=_rounded(first_response_seconds),
             exit_code=exit_code,
             timed_out=timed_out,
             error=error,
             final_message=final_message,
+            usage=usage,
+            api_equivalent_cost=estimate_api_cost(request.model, usage),
         )
 
     def _command(
@@ -196,9 +246,9 @@ class CodexAdapter:
             "-C",
             os.fspath(worktree.path),
         ]
-        if request.model:
+        if request.model and not request.session_id:
             command.extend(["--model", request.model])
-        if request.effort:
+        if request.effort and not request.session_id:
             command.extend(["--config", f"model_reasoning_effort={request.effort}"])
         if request.session_id:
             command.extend(["resume", request.session_id, "-"])
@@ -207,9 +257,12 @@ class CodexAdapter:
         return command
 
     @staticmethod
-    def _parse_events(output: str) -> tuple[str | None, str | None]:
+    def _parse_events(
+        output: str,
+    ) -> tuple[str | None, str | None, TokenUsage]:
         session_id = None
         error = None
+        usage = TokenUsage()
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -232,7 +285,43 @@ class CodexAdapter:
                     error = "Codex turn failed"
             elif event_type == "error" and isinstance(event.get("message"), str):
                 error = event["message"]
-        return session_id, error
+            elif event_type == "turn.completed" and isinstance(
+                event.get("usage"), dict
+            ):
+                current = TokenUsage.from_dict(event["usage"])
+                usage = TokenUsage(
+                    input_tokens=usage.input_tokens + current.input_tokens,
+                    cached_input_tokens=(
+                        usage.cached_input_tokens + current.cached_input_tokens
+                    ),
+                    output_tokens=usage.output_tokens + current.output_tokens,
+                    reasoning_output_tokens=(
+                        usage.reasoning_output_tokens + current.reasoning_output_tokens
+                    ),
+                )
+        return session_id, error, usage
+
+    @staticmethod
+    def _is_agent_message(line: str) -> bool:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        return (
+            isinstance(event, dict)
+            and event.get("type") in {"item.started", "item.updated", "item.completed"}
+            and isinstance(event.get("item"), dict)
+            and event["item"].get("type") == "agent_message"
+        )
+
+    @staticmethod
+    def _signal_process_group(
+        process: subprocess.Popen[str], signal_number: signal.Signals
+    ) -> None:
+        try:
+            os.killpg(process.pid, signal_number)
+        except ProcessLookupError:
+            pass
 
 
 class AgentRunner:
@@ -286,8 +375,8 @@ class AgentRunner:
             task=parent_request.task,
             prompt=prompt,
             base=parent_request.base,
-            model=None,
-            effort=None,
+            model=parent_request.model,
+            effort=parent_request.effort,
             sandbox=parent_request.sandbox,
             timeout_seconds=(
                 timeout_seconds

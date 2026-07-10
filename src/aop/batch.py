@@ -17,7 +17,7 @@ from .runner import AgentRunner
 from .worktrees import AOPError, TASK_ID, WorktreeManager
 
 
-EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
+EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 SANDBOXES = {"read-only", "workspace-write", "danger-full-access"}
 TASK_FIELDS = {
     "id",
@@ -52,9 +52,16 @@ class BatchTask:
 class BatchTaskResult:
     task: str
     status: str
+    model: str | None
+    effort: str | None
     run_id: str | None
     session_id: str | None
     duration_seconds: float | None
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    reasoning_output_tokens: int | None
+    api_equivalent_cost_usd: float | None
     exit_code: int | None
     error: str | None
 
@@ -146,9 +153,16 @@ class BatchRunner:
                 outcomes[task.id] = BatchTaskResult(
                     task=task.id,
                     status="not_started",
+                    model=task.model,
+                    effort=task.effort,
                     run_id=None,
                     session_id=None,
                     duration_seconds=None,
+                    input_tokens=None,
+                    cached_input_tokens=None,
+                    output_tokens=None,
+                    reasoning_output_tokens=None,
+                    api_equivalent_cost_usd=None,
                     exit_code=None,
                     error="batch interrupted before launch",
                 )
@@ -181,18 +195,36 @@ class BatchRunner:
             return BatchTaskResult(
                 task=task.id,
                 status="error",
+                model=task.model,
+                effort=task.effort,
                 run_id=None,
                 session_id=None,
                 duration_seconds=None,
+                input_tokens=None,
+                cached_input_tokens=None,
+                output_tokens=None,
+                reasoning_output_tokens=None,
+                api_equivalent_cost_usd=None,
                 exit_code=None,
                 error=str(error),
             )
         return BatchTaskResult(
             task=task.id,
             status="succeeded" if result.succeeded else "failed",
+            model=result.model,
+            effort=result.effort,
             run_id=result.run_id,
             session_id=result.session_id,
             duration_seconds=result.duration_seconds,
+            input_tokens=result.usage.input_tokens,
+            cached_input_tokens=result.usage.cached_input_tokens,
+            output_tokens=result.usage.output_tokens,
+            reasoning_output_tokens=result.usage.reasoning_output_tokens,
+            api_equivalent_cost_usd=(
+                result.api_equivalent_cost.amount_usd
+                if result.api_equivalent_cost
+                else None
+            ),
             exit_code=result.exit_code,
             error=result.error,
         )

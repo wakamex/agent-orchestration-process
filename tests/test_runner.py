@@ -24,14 +24,23 @@ def test_run_persists_structured_codex_artifacts(
     result = runner.run(
         task="implement",
         prompt="make the change",
-        model="test-model",
+        model="gpt-5.6-sol",
         effort="high",
         timeout_seconds=5,
     )
 
     assert result.succeeded
     assert result.session_id == SESSION_ID
+    assert result.model == "gpt-5.6-sol"
+    assert result.effort == "high"
     assert result.final_message == "answer:make the change"
+    assert result.usage.input_tokens == 1
+    assert result.usage.output_tokens == 1
+    assert result.usage.reasoning_output_tokens == 0
+    assert result.api_equivalent_cost is not None
+    assert result.api_equivalent_cost.amount_usd == 0.000035
+    assert result.time_to_first_event_seconds is not None
+    assert result.time_to_first_response_seconds is not None
     assert "--dangerously-bypass-approvals-and-sandbox" not in result.command
     assert result.command[-1] == "-"
     assert ["--sandbox", "workspace-write"] == result.command[5:7]
@@ -42,8 +51,9 @@ def test_run_persists_structured_codex_artifacts(
     events = (run_dir / "events.jsonl").read_text()
 
     assert request["prompt"] == "make the change"
-    assert request["model"] == "test-model"
+    assert request["model"] == "gpt-5.6-sol"
     assert persisted_result["succeeded"] is True
+    assert persisted_result["api_equivalent_cost"]["pricing_version"] == "2026-07-10"
     assert '"type": "thread.started"' in events
     assert (run_dir / "stderr.log").read_text() == ""
 
@@ -53,15 +63,25 @@ def test_resume_uses_recorded_session_and_links_runs(
 ) -> None:
     manager = WorktreeManager.discover(repository)
     runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
-    first = runner.run(task="review", prompt="first", timeout_seconds=5)
+    first = runner.run(
+        task="review",
+        prompt="first",
+        model="gpt-5.6-terra",
+        effort="medium",
+        timeout_seconds=5,
+    )
 
     resumed = runner.resume(run_id=first.run_id, prompt="second")
 
     assert resumed.succeeded
     assert resumed.session_id == SESSION_ID
+    assert resumed.model == "gpt-5.6-terra"
+    assert resumed.effort == "medium"
+    assert resumed.api_equivalent_cost is not None
     assert resumed.final_message == "answer:second"
     resume_index = resumed.command.index("resume")
     assert resumed.command[resume_index + 1 : resume_index + 3] == [SESSION_ID, "-"]
+    assert "--model" not in resumed.command
 
     request_path = repository / ".aop" / "runs" / resumed.run_id / "request.json"
     request = json.loads(request_path.read_text())

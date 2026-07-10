@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", help="override the configured Codex model")
     run.add_argument(
         "--effort",
-        choices=["minimal", "low", "medium", "high", "xhigh"],
+        choices=["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         help="override Codex model reasoning effort",
     )
     run.add_argument(
@@ -192,8 +192,13 @@ def _report_run(result: RunResult, manager: WorktreeManager) -> int:
             result.final_message,
             end="" if result.final_message.endswith("\n") else "\n",
         )
+    metrics = f"time={result.duration_seconds:.2f}s tokens={result.usage.total_tokens}"
+    if result.api_equivalent_cost:
+        metrics += f" api_equiv=${result.api_equivalent_cost.amount_usd:.6f}"
+    else:
+        metrics += " api_equiv=n/a"
     print(
-        f"aop: run_id={result.run_id} session_id={result.session_id or '-'} "
+        f"aop: run_id={result.run_id} session_id={result.session_id or '-'} {metrics} "
         f"artifacts={manager.state_dir / 'runs' / result.run_id}",
         file=sys.stderr,
     )
@@ -214,6 +219,28 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
         f"summary={summary}",
         file=sys.stderr,
     )
+    print("aop: task\tmodel\teffort\ttime\ttokens\tapi-equiv", file=sys.stderr)
+    for task in result.tasks:
+        duration = (
+            f"{task.duration_seconds:.2f}s"
+            if task.duration_seconds is not None
+            else "-"
+        )
+        tokens = (
+            str((task.input_tokens or 0) + (task.output_tokens or 0))
+            if task.input_tokens is not None
+            else "-"
+        )
+        cost = (
+            f"${task.api_equivalent_cost_usd:.6f}"
+            if task.api_equivalent_cost_usd is not None
+            else "n/a"
+        )
+        print(
+            f"aop: {task.task}\t{task.model or '(configured)'}\t"
+            f"{task.effort or '(configured)'}\t{duration}\t{tokens}\t{cost}",
+            file=sys.stderr,
+        )
     if result.interrupted:
         return 130
     return 0 if result.succeeded else 1

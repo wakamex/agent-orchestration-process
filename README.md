@@ -61,6 +61,18 @@ Codex model, reasoning effort, authentication, and user instructions are preserv
 or `--effort` is supplied. `AOP_CODEX_BIN` may override the Codex executable for testing or a custom
 installation.
 
+Every run records wall-clock time, time to first event, time to first agent response, input tokens,
+cached input tokens, output tokens, and reasoning-output tokens. When `--model` names a model in
+AOP's dated pricing table, the result also contains an estimated standard API-equivalent USD cost.
+This is a comparison metric for subscription runs, not an amount billed to the account. Reasoning
+tokens are reported separately but are already included in output tokens and are not charged twice.
+
+Pricing is versioned in each result. The built-in 2026-07-10 snapshot covers GPT-5.6 Sol, Terra, and
+Luna; GPT-5.5; GPT-5.4, mini, and nano; and GPT-5.3-Codex. It accounts for documented long-context
+multipliers but cannot account for GPT-5.6 cache-write premiums because Codex currently reports
+cached reads without identifying cache writes. If the model is implicit or unknown, token and timing
+metrics remain available while cost is reported as `n/a`.
+
 Run independent tasks concurrently from a TOML manifest:
 
 ```toml
@@ -89,7 +101,8 @@ waits for already-active tasks to finish.
 
 Every batch writes `.aop/batches/<batch-id>.json` with task-order-preserving run IDs, session IDs,
 durations, exit codes, and errors. A batch exits nonzero if any task fails, without discarding
-successful sibling results.
+successful sibling results. Its terminal summary compares task, model, effort, wall time, total
+tokens, and estimated API-equivalent cost.
 
 Run any other command in a task worktree with the lower-level escape hatch:
 

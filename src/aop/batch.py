@@ -18,7 +18,7 @@ from .worktrees import AOPError, TASK_ID, WorktreeManager
 
 
 EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
-SANDBOXES = {"read-only", "workspace-write", "danger-full-access"}
+SANDBOXES = {"workspace-write", "danger-full-access"}
 TASK_FIELDS = {
     "id",
     "agent",

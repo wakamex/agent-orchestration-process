@@ -22,7 +22,7 @@ agent = "agy"
 prompt_file = "prompt.md"
 model = "test-model"
 effort = "xhigh"
-sandbox = "read-only"
+sandbox = "workspace-write"
 timeout = 30
 
 [[tasks]]
@@ -39,7 +39,7 @@ prompt = "Add tests"
     assert tasks[0].agent == "agy"
     assert tasks[0].model == "test-model"
     assert tasks[0].effort == "xhigh"
-    assert tasks[0].sandbox == "read-only"
+    assert tasks[0].sandbox == "workspace-write"
     assert tasks[0].timeout_seconds == 30
     assert tasks[1].prompt_source == "inline"
 

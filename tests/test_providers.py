@@ -30,6 +30,8 @@ def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> Non
     assert first.usage.output_tokens == 40
     assert first.api_equivalent_cost is not None
     assert first.api_equivalent_cost.amount_usd == 0.0123
+    assert first.command[0] == "bwrap"
+    assert "--dangerously-skip-permissions" in first.command
     assert ["--model", "opus"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
     ]
@@ -101,3 +103,19 @@ def test_agy_defaults_to_gemini_35_flash_medium(
     assert result.succeeded
     assert result.model == "Gemini 3.5 Flash (Medium)"
     assert result.effort == "medium"
+
+
+def test_claude_workspace_uses_bwrap_to_protect_main_and_git_metadata(
+    repository: Path, fake_claude: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude)))
+
+    result = runner.run(task="sandboxed", prompt="CHECK_SANDBOX", timeout_seconds=5)
+    worktree = manager.get("sandboxed")
+
+    assert result.succeeded
+    assert (worktree.path / "agent-write.txt").read_text() == "allowed"
+    assert (manager.cache_dir / "provider-cache.txt").read_text() == "shared"
+    assert not (repository / "main-write.txt").exists()
+    assert (worktree.path / ".git").read_text().startswith("gitdir:")

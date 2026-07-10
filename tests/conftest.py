@@ -114,10 +114,27 @@ def fake_claude(tmp_path: Path) -> Path:
     executable.write_text(
         f"""#!{sys.executable}
 import json
+import os
+import pathlib
 import sys
 
 args = sys.argv[1:]
 prompt = sys.stdin.read()
+if prompt == "CHECK_SANDBOX":
+    pathlib.Path("agent-write.txt").write_text("allowed")
+    (pathlib.Path(os.environ["AOP_CACHE_DIR"]) / "provider-cache.txt").write_text(
+        "shared"
+    )
+    for protected in [
+        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path(".git"),
+    ]:
+        try:
+            protected.write_text("forbidden")
+        except OSError:
+            pass
+        else:
+            raise RuntimeError(f"sandbox allowed write to {{protected}}")
 session_id = (
     args[args.index("--resume") + 1]
     if "--resume" in args

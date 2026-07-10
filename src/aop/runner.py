@@ -10,6 +10,7 @@ import signal
 import subprocess
 import threading
 import time
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -470,7 +471,9 @@ class ClaudeAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        command = self._command(request, worktree)
+        command = _provider_command(
+            self._command(request, worktree), request, worktree, environment
+        )
         started_at = _now()
         capture = _capture_process(
             command,
@@ -521,11 +524,6 @@ class ClaudeAdapter:
         )
 
     def _command(self, request: RunRequest, worktree: Worktree) -> list[str]:
-        permission = {
-            "read-only": "plan",
-            "workspace-write": "acceptEdits",
-            "danger-full-access": "bypassPermissions",
-        }[request.sandbox]
         command = [
             self.binary,
             "-p",
@@ -533,12 +531,11 @@ class ClaudeAdapter:
             "stream-json",
             "--verbose",
             "--permission-mode",
-            permission,
+            "bypassPermissions",
+            "--dangerously-skip-permissions",
             "--add-dir",
             os.fspath(worktree.path),
         ]
-        if request.sandbox == "danger-full-access":
-            command.append("--dangerously-skip-permissions")
         if request.session_id:
             command.extend(["--resume", request.session_id])
         else:
@@ -667,8 +664,10 @@ class AgyAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        log_path = run_dir / "agy.log"
-        command = self._command(request, worktree, log_path)
+        log_path = Path(tempfile.gettempdir()) / f"aop-agy-{request.run_id}.log"
+        command = _provider_command(
+            self._command(request, worktree, log_path), request, worktree, environment
+        )
         started_at = _now()
         capture = _capture_process(
             command,
@@ -684,6 +683,8 @@ class AgyAdapter:
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
         log = log_path.read_text(errors="replace") if log_path.exists() else ""
+        _atomic_write(run_dir / "agy.log", log)
+        log_path.unlink(missing_ok=True)
         session_id = request.session_id or _agy_session_id(log)
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
@@ -719,7 +720,6 @@ class AgyAdapter:
     def _command(
         self, request: RunRequest, worktree: Worktree, log_path: Path
     ) -> list[str]:
-        mode = "plan" if request.sandbox == "read-only" else "accept-edits"
         command = [
             self.binary,
             "--log-file",
@@ -727,7 +727,8 @@ class AgyAdapter:
             "--add-dir",
             os.fspath(worktree.path),
             "--mode",
-            mode,
+            "accept-edits",
+            "--dangerously-skip-permissions",
             "--print-timeout",
             (
                 f"{max(1, math.ceil(request.timeout_seconds))}s"
@@ -735,8 +736,6 @@ class AgyAdapter:
                 else "24h"
             ),
         ]
-        if request.sandbox == "danger-full-access":
-            command.append("--dangerously-skip-permissions")
         if request.session_id:
             command.extend(["--conversation", request.session_id])
         elif request.model:
@@ -750,6 +749,40 @@ def _agy_session_id(log: str) -> str | None:
         r"(?:Created conversation\s+|conversation=)([0-9a-f-]{36})", log
     )
     return matches[-1] if matches else None
+
+
+def _provider_command(
+    command: list[str],
+    request: RunRequest,
+    worktree: Worktree,
+    environment: dict[str, str],
+) -> list[str]:
+    if request.sandbox == "danger-full-access":
+        return command
+    root = Path(environment["AOP_ROOT"])
+    cache = Path(environment["AOP_CACHE_DIR"])
+    bwrap = os.environ.get("AOP_BWRAP_BIN", "bwrap")
+    wrapped = [
+        bwrap,
+        "--die-with-parent",
+        "--dev-bind",
+        "/",
+        "/",
+        "--ro-bind",
+        os.fspath(root),
+        os.fspath(root),
+        "--bind",
+        os.fspath(worktree.path),
+        os.fspath(worktree.path),
+        "--bind",
+        os.fspath(cache),
+        os.fspath(cache),
+    ]
+    git_marker = worktree.path / ".git"
+    if git_marker.exists():
+        wrapped.extend(["--ro-bind", os.fspath(git_marker), os.fspath(git_marker)])
+    wrapped.extend(["--chdir", os.fspath(worktree.path), "--", *command])
+    return wrapped
 
 
 def adapter_for(agent: str) -> AgentAdapter:

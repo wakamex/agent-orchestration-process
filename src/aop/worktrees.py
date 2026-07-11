@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -159,6 +160,7 @@ class WorktreeManager:
                 metadata_path = self._metadata_path(task)
                 if metadata_path.exists():
                     metadata_path.unlink()
+                shutil.rmtree(self.state_dir / "overlays" / task, ignore_errors=True)
 
     def metadata(self, task: str) -> TaskMetadata:
         self._validate_task(task)
@@ -191,7 +193,13 @@ class WorktreeManager:
         self._write_metadata(updated)
         return updated
 
-    def run(self, task: str, command: Sequence[str]) -> int:
+    def run(
+        self,
+        task: str,
+        command: Sequence[str],
+        *,
+        overlays: Sequence[str] = (),
+    ) -> int:
         from .locks import exclusive_lock, task_lock_path
 
         if not command:
@@ -207,9 +215,70 @@ class WorktreeManager:
             }
         )
         with exclusive_lock(task_lock_path(self.state_dir, task), f"task {task}"):
-            return subprocess.run(
-                command, cwd=worktree.path, env=environment, check=False
-            ).returncode
+            with self._overlays(worktree, overlays):
+                return subprocess.run(
+                    command, cwd=worktree.path, env=environment, check=False
+                ).returncode
+
+    @contextmanager
+    def _overlays(
+        self, worktree: Worktree, paths: Sequence[str]
+    ) -> Iterator[None]:
+        mounted: list[tuple[Path, bool]] = []
+        try:
+            for value in paths:
+                relative = self._validate_overlay(value)
+                lower = self.root / relative
+                mountpoint = worktree.path / relative
+                if not lower.is_dir():
+                    raise AOPError(f"overlay source is not a directory: {relative}")
+                if mountpoint.is_symlink():
+                    raise AOPError(f"overlay target is a symlink: {relative}")
+                if mountpoint.exists() and any(mountpoint.iterdir()):
+                    raise AOPError(f"overlay target is not empty: {relative}")
+
+                created = not mountpoint.exists()
+                mountpoint.mkdir(parents=True, exist_ok=True)
+                overlay_root = self.state_dir / "overlays" / worktree.task / relative
+                upper = overlay_root / "upper"
+                overlay_work = overlay_root / "work"
+                upper.mkdir(parents=True, exist_ok=True)
+                overlay_work.mkdir(parents=True, exist_ok=True)
+                command = [
+                    os.environ.get("AOP_FUSE_OVERLAYFS_BIN", "fuse-overlayfs"),
+                    "-o",
+                    f"lowerdir={lower},upperdir={upper},workdir={overlay_work}",
+                    os.fspath(mountpoint),
+                ]
+                process = subprocess.run(command, text=True, capture_output=True)
+                if process.returncode:
+                    detail = process.stderr.strip() or "fuse-overlayfs failed"
+                    raise AOPError(f"could not mount overlay {relative}: {detail}")
+                mounted.append((mountpoint, created))
+            yield
+        finally:
+            for mountpoint, created in reversed(mounted):
+                subprocess.run(
+                    [
+                        os.environ.get("AOP_FUSERMOUNT_BIN", "fusermount3"),
+                        "-u",
+                        os.fspath(mountpoint),
+                    ],
+                    check=False,
+                    capture_output=True,
+                )
+                if created:
+                    try:
+                        mountpoint.rmdir()
+                    except OSError:
+                        pass
+
+    @staticmethod
+    def _validate_overlay(value: str) -> Path:
+        path = Path(value)
+        if not value or path.is_absolute() or ".." in path.parts or path == Path("."):
+            raise AOPError("overlay paths must be non-empty repository-relative directories")
+        return path
 
     def _ensure_ignored(self) -> None:
         ignore_file = self.root / ".gitignore"

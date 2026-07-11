@@ -79,6 +79,46 @@ def test_exec_exposes_task_environment(repository: Path) -> None:
     manager.remove("exec-task", force=True)
 
 
+def test_exec_overlay_is_private_and_persists_until_task_removal(
+    repository: Path,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    (repository / "build").mkdir()
+    (repository / "build" / "shared.txt").write_text("shared\n")
+    manager.create("overlay-task")
+
+    result = manager.run(
+        "overlay-task",
+        [
+            "python3",
+            "-c",
+            (
+                "from pathlib import Path; "
+                "assert Path('build/shared.txt').read_text() == 'shared\\n'; "
+                "Path('build/private.txt').write_text('private\\n')"
+            ),
+        ],
+        overlays=["build"],
+    )
+
+    assert result == 0
+    assert not (repository / "build" / "private.txt").exists()
+    upper = repository / ".aop" / "overlays" / "overlay-task" / "build" / "upper"
+    assert (upper / "private.txt").read_text() == "private\n"
+
+    manager.remove("overlay-task")
+    assert not upper.exists()
+
+
+@pytest.mark.parametrize("path", ["", ".", "../build", "/tmp/build"])
+def test_exec_rejects_unsafe_overlay_paths(repository: Path, path: str) -> None:
+    manager = WorktreeManager.discover(repository)
+    manager.create("unsafe-overlay")
+
+    with pytest.raises(AOPError, match="repository-relative"):
+        manager.run("unsafe-overlay", ["true"], overlays=[path])
+
+
 def test_parallel_worktree_creation_is_serialized(repository: Path) -> None:
     tasks = ["parallel-a", "parallel-b", "parallel-c", "parallel-d"]
 

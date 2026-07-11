@@ -171,10 +171,13 @@ aop integrate task-a --remove-worktree
 AOP never stashes changes, force-updates a branch, or decides conflict content. Conflict judgment
 belongs to the sandboxed authoring agent, and a task is never deleted after a failed integration.
 
-Run any other command in a task worktree with the lower-level escape hatch:
+Run any other command in a task worktree with the lower-level escape hatch. Large ignored build or
+data directories can be exposed as private copy-on-write overlays: reads reuse the main worktree's
+files, while writes remain task-local without an up-front copy.
 
 ```sh
 aop exec task-a -- <agent-command>
+aop exec task-a --overlay target --overlay cache -- <evaluator-command>
 aop worktree list
 aop worktree path task-a
 aop worktree remove task-a
@@ -182,7 +185,8 @@ aop worktree remove task-a
 
 Task worktrees are detached at the selected base commit, so one worker cannot move another worker's
 branch. `aop exec` supplies `AOP_ROOT`, `AOP_TASK`, `AOP_WORKTREE`, and the shared `AOP_CACHE_DIR` to
-the child process. Dirty worktrees cannot be removed unless `--force` is explicit.
+the child process. Overlays require `fuse-overlayfs`; their private upper layers persist across exec
+calls and are deleted with the task. Dirty worktrees cannot be removed unless `--force` is explicit.
 
 Runtime state lives under the ignored `.aop/` directory:
 
@@ -193,6 +197,7 @@ Runtime state lives under the ignored `.aop/` directory:
 ├── checkpoints/        task checkpoint records
 ├── integrations/       successful integration audit records
 ├── locks/              per-task execution/checkpoint locks
+├── overlays/<task>/    private copy-on-write upper layers for aop exec
 ├── runs/<run-id>/      request, result, JSONL events, stderr, and final message
 ├── tasks/               recorded task bases and worktree paths
 ├── worktrees/          one isolated checkout per task

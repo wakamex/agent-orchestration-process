@@ -95,6 +95,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     execute = commands.add_parser("exec", help="run a command inside a task worktree")
     execute.add_argument("task")
+    execute.add_argument(
+        "--overlay",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="give PATH a private copy-on-write view of the main worktree directory",
+    )
     execute.add_argument("exec_command", nargs=argparse.REMAINDER, metavar="-- COMMAND")
 
     return parser
@@ -140,9 +147,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "exec":
             command = list(args.exec_command)
+            while command[:1] == ["--overlay"]:
+                if len(command) < 2:
+                    raise AOPError("--overlay requires a path")
+                args.overlay.append(command[1])
+                del command[:2]
             if command[:1] == ["--"]:
                 command = command[1:]
-            return manager.run(args.task, command)
+            return manager.run(args.task, command, overlays=args.overlay)
 
         if args.command == "batch":
             result = BatchRunner(manager, jobs=args.jobs).run(

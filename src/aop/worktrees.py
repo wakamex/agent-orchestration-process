@@ -210,6 +210,7 @@ class WorktreeManager:
             {
                 "AOP_ROOT": os.fspath(self.root),
                 "AOP_TASK": task,
+                "AOP_TASK_LOCK_HELD": task,
                 "AOP_WORKTREE": os.fspath(worktree.path),
                 "AOP_CACHE_DIR": os.fspath(self.cache_dir),
             }

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from aop.cli import main
+from aop.locks import exclusive_lock, task_lock_path
 from aop.runner import AgentRunner, CodexAdapter
 from aop.worktrees import WorktreeManager
 
@@ -88,6 +89,23 @@ def test_resume_uses_recorded_session_and_links_runs(
     assert request["parent_run_id"] == first.run_id
     assert request["session_id"] == SESSION_ID
     assert request["timeout_seconds"] == 5
+
+
+def test_resume_reuses_lock_held_by_aop_exec(
+    repository: Path, fake_codex: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+    first = runner.run(task="nested-resume", prompt="first", timeout_seconds=5)
+    monkeypatch.setenv("AOP_TASK_LOCK_HELD", "nested-resume")
+
+    with exclusive_lock(
+        task_lock_path(manager.state_dir, "nested-resume"), "task nested-resume"
+    ):
+        resumed = runner.resume(run_id=first.run_id, prompt="inside exec")
+
+    assert resumed.succeeded
+    assert resumed.final_message == "answer:inside exec"
 
 
 def test_timeout_terminates_process_and_records_result(

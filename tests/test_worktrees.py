@@ -67,14 +67,19 @@ def test_exec_exposes_task_environment(repository: Path) -> None:
             (
                 "import os, pathlib; "
                 "pathlib.Path('environment.txt').write_text("
-                "os.environ['AOP_TASK'] + '\\n' + os.environ['AOP_CACHE_DIR'])"
+                "os.environ['AOP_TASK'] + '\\n' + os.environ['AOP_CACHE_DIR'] + "
+                "'\\n' + os.environ['AOP_TASK_LOCK_HELD'])"
             ),
         ],
     )
 
     assert result == 0
     lines = (worktree.path / "environment.txt").read_text().splitlines()
-    assert lines == ["exec-task", os.fspath(repository / ".aop" / "cache")]
+    assert lines == [
+        "exec-task",
+        os.fspath(repository / ".aop" / "cache"),
+        "exec-task",
+    ]
 
     manager.remove("exec-task", force=True)
 

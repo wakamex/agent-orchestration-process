@@ -186,7 +186,9 @@ aop worktree remove task-a
 Task worktrees are detached at the selected base commit, so one worker cannot move another worker's
 branch. `aop exec` supplies `AOP_ROOT`, `AOP_TASK`, `AOP_WORKTREE`, and the shared `AOP_CACHE_DIR` to
 the child process. Overlays require `fuse-overlayfs`; their private upper layers persist across exec
-calls and are deleted with the task. Dirty worktrees cannot be removed unless `--force` is explicit.
+calls and are deleted with the task. A command may resume the task's agent while it runs; AOP treats
+that nested resume as part of the already locked exec transaction. Dirty worktrees cannot be removed
+unless `--force` is explicit.
 
 Runtime state lives under the ignored `.aop/` directory:
 

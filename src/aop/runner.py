@@ -858,6 +858,9 @@ class AgentRunner:
             self.adapter = adapter_for(parent_request.provider)
         if not parent_result.session_id:
             raise AOPError(f"run has no resumable agent session: {run_id}")
+        _task_lock_held = _task_lock_held or (
+            os.environ.get("AOP_TASK_LOCK_HELD") == parent_request.task
+        )
         worktree = self.manager.get(parent_request.task)
         request = self._request(
             task=parent_request.task,

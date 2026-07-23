@@ -21,6 +21,7 @@ class RunRequest:
     timeout_seconds: float | None
     session_id: str | None
     parent_run_id: str | None
+    artifacts: tuple[str, ...]
     created_at: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -28,7 +29,17 @@ class RunRequest:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> RunRequest:
-        return cls(**value)
+        fields = dict(value)
+        fields["artifacts"] = tuple(fields.get("artifacts", ()))
+        return cls(**fields)
+
+
+@dataclass(frozen=True)
+class RunArtifact:
+    logical_path: str
+    archive_path: str
+    size_bytes: int
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -51,6 +62,7 @@ class RunResult:
     final_message: str | None
     usage: TokenUsage
     api_equivalent_cost: EstimatedCost | None
+    artifacts: tuple[RunArtifact, ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -78,5 +90,8 @@ class RunResult:
         fields["usage"] = TokenUsage.from_dict(fields.get("usage"))
         fields["api_equivalent_cost"] = EstimatedCost.from_dict(
             fields.get("api_equivalent_cost")
+        )
+        fields["artifacts"] = tuple(
+            RunArtifact(**artifact) for artifact in fields.get("artifacts", ())
         )
         return cls(**fields)

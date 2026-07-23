@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
-from .runner import AgentRunner, adapter_for
+from .runner import AgentRunner, adapter_for, normalize_artifacts
 from .worktrees import AOPError, TASK_ID, WorktreeManager
 
 
@@ -29,6 +29,7 @@ TASK_FIELDS = {
     "effort",
     "sandbox",
     "timeout",
+    "artifacts",
 }
 
 
@@ -47,6 +48,7 @@ class BatchTask:
     effort: str | None = None
     sandbox: str = "workspace-write"
     timeout_seconds: float | None = None
+    artifacts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,7 @@ class BatchRunner:
                 effort=task.effort,
                 sandbox=task.sandbox,
                 timeout_seconds=task.timeout_seconds,
+                artifacts=task.artifacts,
             )
         except Exception as error:
             return BatchTaskResult(
@@ -331,6 +334,12 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
             raise AOPError(f"{label}.timeout must be a number greater than zero")
         timeout = float(timeout)
 
+    artifacts = value.get("artifacts", [])
+    if not isinstance(artifacts, list) or not all(
+        isinstance(artifact, str) and artifact for artifact in artifacts
+    ):
+        raise AOPError(f"{label}.artifacts must be an array of non-empty strings")
+
     return BatchTask(
         id=task_id,
         prompt=prompt_text,
@@ -341,6 +350,7 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
         effort=effort,
         sandbox=sandbox,
         timeout_seconds=timeout,
+        artifacts=normalize_artifacts(artifacts),
     )
 
 

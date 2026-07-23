@@ -64,11 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="workspace-write",
     )
     run.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
+    _add_artifact_arguments(run)
     _add_prompt_arguments(run)
 
     resume = commands.add_parser("resume", help="resume the Codex session from a run")
     resume.add_argument("run_id")
     resume.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
+    _add_artifact_arguments(resume)
     _add_prompt_arguments(resume)
 
     worktree = commands.add_parser("worktree", help="manage task worktrees")
@@ -172,6 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 effort=args.effort,
                 sandbox=args.sandbox,
                 timeout_seconds=args.timeout,
+                artifacts=args.artifact,
             )
             return _report_run(result, manager)
 
@@ -180,6 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 prompt=_read_prompt(args),
                 timeout_seconds=args.timeout,
+                artifacts=args.artifact,
             )
             return _report_run(result, manager)
 
@@ -214,6 +218,16 @@ def _add_prompt_arguments(parser: argparse.ArgumentParser) -> None:
     prompts = parser.add_mutually_exclusive_group(required=True)
     prompts.add_argument("--prompt")
     prompts.add_argument("--prompt-file", type=Path)
+
+
+def _add_artifact_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="require and archive PATH relative to this run's output directory",
+    )
 
 
 def _read_prompt(args: argparse.Namespace) -> str:

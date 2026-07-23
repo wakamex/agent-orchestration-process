@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import shutil
 import signal
+import stat
 import subprocess
+import tempfile
 import threading
 import time
-import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Callable, Protocol
+from pathlib import Path, PurePosixPath
+from typing import Callable, Protocol, Sequence
 
-from .models import RunRequest, RunResult
+from .models import RunArtifact, RunRequest, RunResult
 from .locks import exclusive_lock, task_lock_path
 from .pricing import EstimatedCost, TokenUsage, estimate_api_cost
 from .worktrees import AOPError, Worktree, WorktreeManager
@@ -826,9 +829,9 @@ class AgentRunner:
         effort: str | None = None,
         sandbox: str = "workspace-write",
         timeout_seconds: float | None = None,
+        artifacts: Sequence[str] = (),
     ) -> RunResult:
         model, effort = self.adapter.normalize_options(model, effort)
-        worktree = self._get_or_create_worktree(task, base)
         request = self._request(
             task=task,
             prompt=prompt,
@@ -837,7 +840,9 @@ class AgentRunner:
             effort=effort,
             sandbox=sandbox,
             timeout_seconds=timeout_seconds,
+            artifacts=artifacts,
         )
+        worktree = self._get_or_create_worktree(task, base)
         return self._execute(request, worktree)
 
     def resume(
@@ -846,6 +851,7 @@ class AgentRunner:
         run_id: str,
         prompt: str,
         timeout_seconds: float | None = None,
+        artifacts: Sequence[str] = (),
         _task_lock_held: bool = False,
     ) -> RunResult:
         parent_request = self.store.load_request(run_id)
@@ -876,6 +882,7 @@ class AgentRunner:
             ),
             session_id=parent_result.session_id,
             parent_run_id=run_id,
+            artifacts=artifacts,
         )
         return self._execute(request, worktree, task_lock_held=_task_lock_held)
 
@@ -897,6 +904,12 @@ class AgentRunner:
     def _execute_unlocked(self, request: RunRequest, worktree: Worktree) -> RunResult:
         scratch_dir = worktree.path / "scratch"
         scratch_dir.mkdir(exist_ok=True)
+        output_dir = scratch_dir / "outputs" / request.run_id
+        output_dir.mkdir(parents=True, exist_ok=False)
+        request = replace(
+            request,
+            prompt=_artifact_prompt(request.prompt, request.artifacts, output_dir),
+        )
         run_dir = self.store.create(request)
         environment = os.environ.copy()
         environment.update(
@@ -906,10 +919,13 @@ class AgentRunner:
                 "AOP_WORKTREE": os.fspath(worktree.path),
                 "AOP_CACHE_DIR": os.fspath(self.manager.cache_dir),
                 "AOP_SCRATCH_DIR": os.fspath(scratch_dir),
+                "AOP_OUTPUT_DIR": os.fspath(output_dir),
                 "AOP_RUN_ID": request.run_id,
             }
         )
         result = self.adapter.execute(request, worktree, run_dir, environment)
+        if result.succeeded and request.artifacts:
+            result = _archive_artifacts(result, request.artifacts, output_dir, run_dir)
         self.store.write_json(run_dir / "result.json", result.to_dict())
         return result
 
@@ -925,6 +941,7 @@ class AgentRunner:
         timeout_seconds: float | None,
         session_id: str | None = None,
         parent_run_id: str | None = None,
+        artifacts: Sequence[str] = (),
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -938,6 +955,7 @@ class AgentRunner:
             timeout_seconds=timeout_seconds,
             session_id=session_id,
             parent_run_id=parent_run_id,
+            artifacts=normalize_artifacts(artifacts),
             created_at=_now(),
         )
 
@@ -946,3 +964,113 @@ class AgentRunner:
             if worktree.task == task:
                 return worktree
         return self.manager.create(task, base)
+
+
+def normalize_artifacts(artifacts: Sequence[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in artifacts:
+        if not value:
+            raise AOPError("artifact path must not be empty")
+        if "\0" in value:
+            raise AOPError("artifact path must not contain a null byte")
+        path = PurePosixPath(value)
+        if path.is_absolute() or path == PurePosixPath(".") or ".." in path.parts:
+            raise AOPError(f"artifact path must be relative and contained: {value}")
+        logical_path = path.as_posix()
+        if logical_path in normalized:
+            raise AOPError(f"duplicate artifact path: {logical_path}")
+        normalized.append(logical_path)
+    return tuple(normalized)
+
+
+def _artifact_prompt(prompt: str, artifacts: tuple[str, ...], output_dir: Path) -> str:
+    if not artifacts:
+        return prompt
+    paths = "\n".join(f"- {artifact}" for artifact in artifacts)
+    return (
+        f"{prompt.rstrip()}\n\n"
+        "AOP artifact contract:\n"
+        f"Write the following deliverables beneath {output_dir}:\n"
+        f"{paths}\n"
+        "Stdout and stderr are logs, not deliverables. AOP will reject missing, "
+        "empty, or unsafe files."
+    )
+
+
+def _archive_artifacts(
+    result: RunResult,
+    declarations: tuple[str, ...],
+    output_dir: Path,
+    run_dir: Path,
+) -> RunResult:
+    try:
+        sources = tuple(
+            _validate_artifact(logical_path, output_dir)
+            for logical_path in declarations
+        )
+        artifacts = tuple(
+            _archive_artifact(logical_path, source, run_dir)
+            for logical_path, source in zip(declarations, sources, strict=True)
+        )
+    except (AOPError, OSError) as error:
+        shutil.rmtree(run_dir / "artifacts", ignore_errors=True)
+        diagnostic = (
+            str(error)
+            if isinstance(error, AOPError)
+            else f"could not archive artifacts: {error}"
+        )
+        return replace(result, error=diagnostic, artifacts=())
+    return replace(result, artifacts=artifacts)
+
+
+def _validate_artifact(logical_path: str, output_dir: Path) -> Path:
+    scratch_dir = output_dir.parent.parent
+    for directory in (scratch_dir, output_dir.parent, output_dir):
+        try:
+            status = directory.lstat()
+        except FileNotFoundError as error:
+            raise AOPError(
+                f"artifact {logical_path}: output directory is missing"
+            ) from error
+        if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
+            raise AOPError(f"artifact {logical_path}: unsafe output directory")
+
+    source = output_dir.joinpath(*PurePosixPath(logical_path).parts)
+    current = output_dir
+    for part in PurePosixPath(logical_path).parts:
+        current /= part
+        try:
+            status = current.lstat()
+        except (FileNotFoundError, NotADirectoryError) as error:
+            raise AOPError(f"artifact {logical_path}: missing") from error
+        if stat.S_ISLNK(status.st_mode):
+            raise AOPError(f"artifact {logical_path}: symlinks are not allowed")
+    if not stat.S_ISREG(status.st_mode):
+        raise AOPError(f"artifact {logical_path}: not a regular file")
+    if status.st_size == 0:
+        raise AOPError(f"artifact {logical_path}: empty")
+    try:
+        source.resolve(strict=True).relative_to(output_dir.resolve(strict=True))
+    except ValueError as error:
+        raise AOPError(
+            f"artifact {logical_path}: escapes the output directory"
+        ) from error
+    return source
+
+
+def _archive_artifact(logical_path: str, source: Path, run_dir: Path) -> RunArtifact:
+    archive_path = PurePosixPath("artifacts") / logical_path
+    destination = run_dir.joinpath(*archive_path.parts)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    shutil.copyfile(source, temporary)
+    os.replace(temporary, destination)
+    size_bytes = destination.stat().st_size
+    with destination.open("rb") as artifact:
+        digest = hashlib.file_digest(artifact, "sha256").hexdigest()
+    return RunArtifact(
+        logical_path=logical_path,
+        archive_path=archive_path.as_posix(),
+        size_bytes=size_bytes,
+        sha256=digest,
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -10,7 +11,7 @@ import pytest
 from aop.cli import main
 from aop.locks import exclusive_lock, task_lock_path
 from aop.runner import AgentRunner, CodexAdapter
-from aop.worktrees import WorktreeManager
+from aop.worktrees import AOPError, WorktreeManager
 
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
@@ -53,10 +54,116 @@ def test_run_persists_structured_codex_artifacts(
 
     assert request["prompt"] == "make the change"
     assert request["model"] == "gpt-5.6-sol"
+    assert request["artifacts"] == []
     assert persisted_result["succeeded"] is True
+    assert persisted_result["artifacts"] == []
     assert persisted_result["api_equivalent_cost"]["pricing_version"] == "2026-07-10"
     assert '"type": "thread.started"' in events
     assert (run_dir / "stderr.log").read_text() == ""
+
+
+def test_declared_artifact_is_validated_and_archived(
+    repository: Path, fake_codex: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+
+    result = runner.run(
+        task="extract",
+        prompt="WRITE_ARTIFACT",
+        sandbox="scratch-write",
+        artifacts=["paper.md"],
+    )
+
+    assert result.succeeded
+    assert len(result.artifacts) == 1
+    artifact = result.artifacts[0]
+    content = b"# Extracted\n"
+    assert artifact.logical_path == "paper.md"
+    assert artifact.archive_path == "artifacts/paper.md"
+    assert artifact.size_bytes == len(content)
+    assert artifact.sha256 == hashlib.sha256(content).hexdigest()
+
+    run_dir = manager.state_dir / "runs" / result.run_id
+    assert (run_dir / artifact.archive_path).read_bytes() == content
+    assert "narrating before writing" in (run_dir / "events.jsonl").read_text()
+    request = json.loads((run_dir / "request.json").read_text())
+    output_dir = manager.get("extract").path / "scratch" / "outputs" / result.run_id
+    assert os.fspath(output_dir) in request["prompt"]
+    assert request["artifacts"] == ["paper.md"]
+
+
+@pytest.mark.parametrize(
+    ("prompt", "diagnostic"),
+    [
+        ("MISSING_ARTIFACT", "missing"),
+        ("EMPTY_ARTIFACT", "empty"),
+        ("SYMLINK_ARTIFACT", "symlinks are not allowed"),
+    ],
+)
+def test_invalid_declared_artifact_fails(
+    repository: Path,
+    fake_codex: Path,
+    prompt: str,
+    diagnostic: str,
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    result = runner.run(
+        task=f"invalid-{diagnostic.split()[0]}",
+        prompt=prompt,
+        sandbox="scratch-write",
+        artifacts=["paper.md"],
+    )
+
+    assert not result.succeeded
+    assert result.exit_code == 0
+    assert result.error == f"artifact paper.md: {diagnostic}"
+    assert result.artifacts == ()
+    run_dir = repository / ".aop" / "runs" / result.run_id
+    assert not (run_dir / "artifacts" / "paper.md").exists()
+
+
+def test_previous_run_artifact_cannot_satisfy_a_new_run(
+    repository: Path, fake_codex: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+    first = runner.run(
+        task="repeat-extract",
+        prompt="WRITE_ARTIFACT",
+        sandbox="scratch-write",
+        artifacts=["paper.md"],
+    )
+
+    second = runner.run(
+        task="repeat-extract",
+        prompt="MISSING_ARTIFACT",
+        sandbox="scratch-write",
+        artifacts=["paper.md"],
+    )
+
+    assert first.succeeded
+    assert not second.succeeded
+    assert second.error == "artifact paper.md: missing"
+    assert first.run_id != second.run_id
+
+
+@pytest.mark.parametrize("path", ["../paper.md", "/tmp/paper.md", "."])
+def test_unsafe_artifact_declarations_fail_before_launch(
+    repository: Path, fake_codex: Path, path: str
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    with pytest.raises(AOPError, match="relative and contained"):
+        runner.run(task="unsafe-path", prompt="unused", artifacts=[path])
+
+    assert not (repository / ".aop" / "worktrees" / "unsafe-path").exists()
 
 
 def test_resume_uses_recorded_session_and_links_runs(
@@ -89,6 +196,31 @@ def test_resume_uses_recorded_session_and_links_runs(
     assert request["parent_run_id"] == first.run_id
     assert request["session_id"] == SESSION_ID
     assert request["timeout_seconds"] == 5
+
+
+def test_resume_uses_a_fresh_explicit_artifact_contract(
+    repository: Path, fake_codex: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+    first = runner.run(
+        task="artifact-resume",
+        prompt="WRITE_ARTIFACT",
+        sandbox="scratch-write",
+        artifacts=["paper.md"],
+    )
+
+    resumed = runner.resume(run_id=first.run_id, prompt="MISSING_ARTIFACT")
+
+    assert first.succeeded
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert resumed.artifacts == ()
+    request = json.loads(
+        (manager.state_dir / "runs" / resumed.run_id / "request.json").read_text()
+    )
+    assert request["artifacts"] == []
+    assert request["parent_run_id"] == first.run_id
 
 
 def test_resume_reuses_lock_held_by_aop_exec(
@@ -155,3 +287,35 @@ def test_cli_runs_codex_and_reports_resumable_ids(
     run_id = re.search(r"run_id=([0-9a-f-]+)", captured.err)
     assert run_id is not None
     assert (repository / ".aop" / "runs" / run_id.group(1) / "result.json").exists()
+
+
+def test_cli_accepts_artifact_declarations(
+    repository: Path,
+    fake_codex: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+
+    exit_code = main(
+        [
+            "run",
+            "cli-artifact",
+            "--sandbox",
+            "scratch-write",
+            "--artifact",
+            "paper.md",
+            "--prompt",
+            "WRITE_ARTIFACT",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    run_id = re.search(r"run_id=([0-9a-f-]+)", captured.err)
+    assert run_id is not None
+    result = json.loads(
+        (repository / ".aop" / "runs" / run_id.group(1) / "result.json").read_text()
+    )
+    assert result["artifacts"][0]["logical_path"] == "paper.md"

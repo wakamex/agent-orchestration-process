@@ -39,6 +39,7 @@ def fake_codex(tmp_path: Path) -> Path:
     executable.write_text(
         f"""#!{sys.executable}
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -50,6 +51,17 @@ output_path = pathlib.Path(args[args.index("--output-last-message") + 1])
 
 if prompt == "SLEEP":
     time.sleep(10)
+
+output_dir = pathlib.Path(os.environ["AOP_OUTPUT_DIR"])
+if prompt.startswith("WRITE_ARTIFACT"):
+    print("narrating before writing the deliverable", flush=True)
+    output_dir.joinpath("paper.md").write_text("# Extracted\\n")
+elif prompt.startswith("EMPTY_ARTIFACT"):
+    output_dir.joinpath("paper.md").write_text("")
+elif prompt.startswith("SYMLINK_ARTIFACT"):
+    target = pathlib.Path(os.environ["AOP_CACHE_DIR"]) / "escaped.md"
+    target.write_text("escaped")
+    output_dir.joinpath("paper.md").symlink_to(target)
 
 session_id = {SESSION_ID!r}
 if "resume" in args:
@@ -191,6 +203,7 @@ def fake_agy(tmp_path: Path) -> Path:
     executable = tmp_path / "agy"
     executable.write_text(
         f"""#!{sys.executable}
+import os
 import pathlib
 import sys
 
@@ -203,6 +216,10 @@ session_id = (
 )
 log_path.write_text(f"Created conversation {{session_id}}\\n")
 prompt = args[args.index("-p") + 1]
+if prompt.startswith("WRITE_ARTIFACT"):
+    pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("paper.md").write_text(
+        "# Extracted by agy\\n"
+    )
 print(f"answer:{{prompt}}", flush=True)
 """
     )

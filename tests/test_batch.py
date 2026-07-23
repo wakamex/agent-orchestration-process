@@ -24,6 +24,7 @@ model = "test-model"
 effort = "xhigh"
 sandbox = "workspace-write"
 timeout = 30
+artifacts = ["paper.md"]
 
 [[tasks]]
 id = "tests"
@@ -41,6 +42,7 @@ prompt = "Add tests"
     assert tasks[0].effort == "xhigh"
     assert tasks[0].sandbox == "workspace-write"
     assert tasks[0].timeout_seconds == 30
+    assert tasks[0].artifacts == ("paper.md",)
     assert tasks[1].prompt_source == "inline"
 
 
@@ -93,6 +95,38 @@ prompt = "four"
     assert summary["succeeded"] is True
     assert len(summary["tasks"]) == 4
     assert summary["tasks"][0]["model"] == "gpt-5.6-sol"
+
+
+def test_batch_archives_declared_artifacts(
+    repository: Path,
+    fake_codex: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+    manifest = repository / "artifacts.toml"
+    manifest.write_text(
+        """
+[[tasks]]
+id = "extract"
+prompt = "WRITE_ARTIFACT"
+sandbox = "scratch-write"
+artifacts = ["paper.md"]
+"""
+    )
+    manager = WorktreeManager.discover(repository)
+
+    result = BatchRunner(manager).run(manifest)
+
+    assert result.succeeded
+    run_id = result.tasks[0].run_id
+    assert run_id is not None
+    run_result = json.loads(
+        (manager.state_dir / "runs" / run_id / "result.json").read_text()
+    )
+    assert run_result["artifacts"][0]["logical_path"] == "paper.md"
+    assert (
+        manager.state_dir / "runs" / run_id / run_result["artifacts"][0]["archive_path"]
+    ).read_text() == "# Extracted\n"
 
 
 def test_cli_batch_returns_failure_and_keeps_other_results(

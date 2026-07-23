@@ -105,6 +105,24 @@ def test_agy_defaults_to_gemini_35_flash_medium(
     assert result.effort == "medium"
 
 
+def test_agy_can_produce_a_declared_artifact(repository: Path, fake_agy: Path) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, AgyAdapter(os.fspath(fake_agy)))
+
+    result = runner.run(
+        task="agy-artifact",
+        prompt="WRITE_ARTIFACT",
+        sandbox="scratch-write",
+        artifacts=["paper.md"],
+    )
+
+    assert result.succeeded
+    artifact = result.artifacts[0]
+    assert (
+        manager.state_dir / "runs" / result.run_id / artifact.archive_path
+    ).read_text() == "# Extracted by agy\n"
+
+
 def test_claude_workspace_uses_bwrap_to_protect_main_and_git_metadata(
     repository: Path, fake_claude: Path
 ) -> None:

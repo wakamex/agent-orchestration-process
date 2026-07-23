@@ -56,7 +56,7 @@ aop run task-c --agent agy --model gemini-3.5-flash --effort low \
 ```
 
 `aop run` prints the agent's final message to stdout and its AOP run ID, provider session ID, and
-artifact directory to stderr. Resume the exact session using the AOP run ID:
+run artifact directory to stderr. Resume the exact session using the AOP run ID:
 
 ```sh
 aop resume <run-id> --prompt "Address the review findings"
@@ -66,10 +66,33 @@ All providers run inside `bwrap` by default, with their own permission prompts b
 OS mount boundary is the enforcement layer. `workspace-write` mounts the main repository read-only,
 rebinds only the isolated task worktree and shared `AOP_CACHE_DIR` writable, and keeps the
 worktree's `.git` pointer read-only. `scratch-write` leaves the task read-only and rebinds only its
-`scratch/` directory plus the shared cache writable; use it for agents whose deliverable is stdout
-rather than repository edits. `danger-full-access` explicitly skips `bwrap`. Configured
+`scratch/` directory plus the shared cache writable; use it for agents that need working space but
+must not edit the repository. `danger-full-access` explicitly skips `bwrap`. Configured
 authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`,
 `AOP_AGY_BIN`, and `AOP_BWRAP_BIN` may override their respective executables.
+
+For a file-producing task, declare each expected path relative to the run's output directory:
+
+```sh
+aop run extraction \
+  --agent agy \
+  --model gemini-3.5-flash \
+  --sandbox scratch-write \
+  --artifact paper.md \
+  --prompt "Extract the source document as Markdown"
+```
+
+AOP gives the agent a fresh, prompt-visible `AOP_OUTPUT_DIR` for every invocation. Stdout and stderr
+remain logs; deliverables belong in that output directory. After a successful provider exit, AOP
+requires every declared artifact to be a nonempty regular file beneath the output directory, rejects
+symlinks and path escapes, and copies accepted files into
+`.aop/runs/<run-id>/artifacts/`. The normalized result records each artifact's declared path,
+archived path, byte size, and SHA-256. A failed validation makes the run unsuccessful, and AOP never
+copies artifacts into the main worktree.
+
+Artifact declarations are per invocation. A resume keeps the exact provider session and reusable
+task scratch, but receives a fresh output directory and only validates artifacts declared on that
+`aop resume` command.
 
 Claude accepts its normal model aliases and effort levels `low`, `medium`, `high`, `xhigh`, and
 `max`. Agy encodes effort in the model selection. AOP provides ergonomic aliases for the currently
@@ -111,6 +134,7 @@ prompt_file = "tasks/parser.md"
 model = "sonnet"
 effort = "high"
 timeout = 1800
+artifacts = ["parser-report.md"]
 
 [[tasks]]
 id = "tests"
@@ -125,10 +149,10 @@ aop batch tasks.toml --jobs 4
 ```
 
 Prompt-file paths are resolved relative to the manifest. Each task may set `agent`, `base`, `model`,
-`effort`, `sandbox`, and `timeout`; unspecified values use the same defaults as `aop run`. The
-scheduler keeps at most `--jobs` tasks active, prints only concise lifecycle status, and stores full
-agent output in the normal per-run directories. On interruption it launches no additional tasks and
-waits for already-active tasks to finish.
+`effort`, `sandbox`, `timeout`, and an `artifacts` array; unspecified values use the same defaults as
+`aop run`. The scheduler keeps at most `--jobs` tasks active, prints only concise lifecycle status,
+and stores full agent output in the normal per-run directories. On interruption it launches no
+additional tasks and waits for already-active tasks to finish.
 
 Every batch writes `.aop/batches/<batch-id>.json` with task-order-preserving run IDs, session IDs,
 durations, exit codes, and errors. A batch exits nonzero if any task fails, without discarding
@@ -200,7 +224,7 @@ Runtime state lives under the ignored `.aop/` directory:
 ├── integrations/       successful integration audit records
 ├── locks/              per-task execution/checkpoint locks
 ├── overlays/<task>/    private copy-on-write upper layers for aop exec
-├── runs/<run-id>/      request, result, JSONL events, stderr, and final message
+├── runs/<run-id>/      request, result, logs, final message, and accepted artifacts
 ├── tasks/               recorded task bases and worktree paths
 ├── worktrees/          one isolated checkout per task
 ├── integration.lock    single-writer main-branch integration lock

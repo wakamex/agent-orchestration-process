@@ -43,6 +43,7 @@ def test_run_persists_structured_codex_artifacts(
     assert result.api_equivalent_cost.amount_usd == 0.000035
     assert result.time_to_first_event_seconds is not None
     assert result.time_to_first_response_seconds is not None
+    assert result.provider_duration_seconds is None
     assert result.command[0] == "bwrap"
     assert "--dangerously-bypass-approvals-and-sandbox" in result.command
     assert result.command[-1] == "-"

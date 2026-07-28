@@ -203,6 +203,7 @@ def fake_agy(tmp_path: Path) -> Path:
     executable = tmp_path / "agy"
     executable.write_text(
         f"""#!{sys.executable}
+import json
 import os
 import pathlib
 import sys
@@ -214,13 +215,61 @@ session_id = (
     if "--conversation" in args
     else "49f2a36e-43e4-4ba9-9f4f-817bee57f64c"
 )
+model = (
+    args[args.index("--model") + 1]
+    if "--model" in args
+    else "gemini-3.5-flash-low"
+)
 log_path.write_text(f"Created conversation {{session_id}}\\n")
 prompt = args[args.index("-p") + 1]
 if prompt.startswith("WRITE_ARTIFACT"):
     pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("paper.md").write_text(
         "# Extracted by agy\\n"
     )
-print(f"answer:{{prompt}}", flush=True)
+print(json.dumps({{
+    "event": "init",
+    "init": {{
+        "conversation_id": session_id,
+        "model": model,
+    }},
+}}), flush=True)
+print(json.dumps({{
+    "event": "step_update",
+    "step_update": {{
+        "conversation_id": session_id,
+        "step_type": "agent_response",
+        "text_delta": "working",
+        "duration_seconds": 0.25,
+        "usage": {{
+            "input_tokens": 40,
+            "output_tokens": 5,
+            "thinking_tokens": 2,
+            "cache_read_tokens": 10,
+            "total_tokens": 45,
+        }},
+    }},
+}}), flush=True)
+result = {{
+    "conversation_id": session_id,
+    "status": "SUCCESS",
+    "response": f"answer:{{prompt}}",
+    "duration_seconds": 1.25,
+    "num_turns": 1,
+    "usage": {{
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "thinking_tokens": 7,
+        "cache_read_tokens": 30,
+        "total_tokens": 120,
+    }},
+}}
+if prompt.startswith("AGY_ERROR"):
+    result.update({{
+        "status": "ERROR",
+        "response": None,
+        "error": "synthetic agy failure",
+    }})
+print(json.dumps({{"event": "result", "result": result}}), flush=True)
 """
     )
     executable.chmod(0o755)

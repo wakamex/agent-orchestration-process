@@ -677,23 +677,28 @@ class AgyAdapter:
             environment=environment,
             prompt=None,
             timeout_seconds=request.timeout_seconds,
-            is_response=lambda line: bool(line.strip()),
+            is_response=self._is_response,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
-        final_message = capture.stdout.strip() or None
+        parsed = self._parse(capture.stdout)
+        final_message = parsed["final_message"]
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
         log = log_path.read_text(errors="replace") if log_path.exists() else ""
         _atomic_write(run_dir / "agy.log", log)
         log_path.unlink(missing_ok=True)
-        session_id = request.session_id or _agy_session_id(log)
+        session_id = parsed["session_id"] or request.session_id or _agy_session_id(log)
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif parsed["error"]:
+            error = parsed["error"]
         elif capture.exit_code:
             error = (
                 capture.stderr.strip() or f"agy exited with status {capture.exit_code}"
             )
+        elif not parsed["has_result"]:
+            error = "agy did not emit a terminal result"
         elif session_id is None:
             error = "agy did not report a conversation ID"
         else:
@@ -702,7 +707,7 @@ class AgyAdapter:
             run_id=request.run_id,
             provider=self.provider,
             task=request.task,
-            model=request.model,
+            model=parsed["model"] or request.model,
             effort=request.effort,
             session_id=session_id,
             command=command,
@@ -715,8 +720,9 @@ class AgyAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=TokenUsage(),
+            usage=parsed["usage"],
             api_equivalent_cost=None,
+            provider_duration_seconds=parsed["duration_seconds"],
         )
 
     def _command(
@@ -731,6 +737,8 @@ class AgyAdapter:
             "--mode",
             "accept-edits",
             "--dangerously-skip-permissions",
+            "--output-format",
+            "stream-json",
             "--print-timeout",
             (
                 f"{max(1, math.ceil(request.timeout_seconds))}s"
@@ -744,6 +752,88 @@ class AgyAdapter:
             command.extend(["--model", request.model])
         command.extend(["-p", request.prompt])
         return command
+
+    @staticmethod
+    def _is_response(line: str) -> bool:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(event, dict):
+            return False
+        event_type = event.get("event")
+        payload = event.get(event_type)
+        if not isinstance(payload, dict):
+            return False
+        if event_type == "result":
+            return bool(payload.get("response"))
+        return (
+            event_type == "step_update"
+            and payload.get("step_type") == "agent_response"
+            and bool(payload.get("text_delta"))
+        )
+
+    @staticmethod
+    def _parse(output: str) -> dict[str, object]:
+        session_id = None
+        model = None
+        final_message = None
+        error = None
+        duration_seconds = None
+        usage = TokenUsage()
+        has_result = False
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("event")
+            payload = event.get(event_type)
+            if not isinstance(payload, dict):
+                continue
+            conversation_id = payload.get("conversation_id")
+            if isinstance(conversation_id, str):
+                session_id = conversation_id
+            if event_type == "init" and isinstance(payload.get("model"), str):
+                model = payload["model"]
+            if event_type != "result":
+                continue
+            has_result = True
+            response = payload.get("response")
+            final_message = response if isinstance(response, str) else None
+            status = payload.get("status")
+            if status != "SUCCESS":
+                detail = payload.get("error")
+                error = (
+                    detail
+                    if isinstance(detail, str) and detail
+                    else f"agy ended with status {status or 'unknown'}"
+                )
+            duration = payload.get("duration_seconds")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                duration_seconds = round(float(duration), 6)
+            raw_usage = (
+                payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+            )
+            usage = TokenUsage.from_dict(
+                {
+                    "input_tokens": raw_usage.get("input_tokens"),
+                    "cached_input_tokens": raw_usage.get("cache_read_tokens"),
+                    "output_tokens": raw_usage.get("output_tokens"),
+                    "reasoning_output_tokens": raw_usage.get("thinking_tokens"),
+                }
+            )
+        return {
+            "session_id": session_id,
+            "model": model,
+            "final_message": final_message,
+            "error": error,
+            "duration_seconds": duration_seconds,
+            "usage": usage,
+            "has_result": has_result,
+        }
 
 
 def _agy_session_id(log: str) -> str | None:

@@ -63,6 +63,7 @@ class RunResult:
     usage: TokenUsage
     api_equivalent_cost: EstimatedCost | None
     artifacts: tuple[RunArtifact, ...] = ()
+    provider_duration_seconds: float | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -87,6 +88,7 @@ class RunResult:
         fields.setdefault("effort", None)
         fields.setdefault("time_to_first_event_seconds", None)
         fields.setdefault("time_to_first_response_seconds", None)
+        fields.setdefault("provider_duration_seconds", None)
         fields["usage"] = TokenUsage.from_dict(fields.get("usage"))
         fields["api_equivalent_cost"] = EstimatedCost.from_dict(
             fields.get("api_equivalent_cost")

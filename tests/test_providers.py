@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -65,9 +66,27 @@ def test_agy_translates_model_effort_and_resumes_exact_conversation(
     assert ["--model", "gemini-3.5-flash-low"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
     ]
-    assert first.usage.total_tokens == 0
+    assert ["--output-format", "stream-json"] == first.command[
+        first.command.index("--output-format") : first.command.index("--output-format")
+        + 2
+    ]
+    assert first.final_message == "answer:first"
+    assert first.usage.input_tokens == 100
+    assert first.usage.cached_input_tokens == 30
+    assert first.usage.output_tokens == 20
+    assert first.usage.reasoning_output_tokens == 7
+    assert first.provider_duration_seconds == 1.25
+    assert first.time_to_first_response_seconds is not None
     assert first.api_equivalent_cost is None
+    events_path = manager.state_dir / "runs" / first.run_id / "events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert [event["event"] for event in events] == [
+        "init",
+        "step_update",
+        "result",
+    ]
     assert resumed.succeeded
+    assert resumed.session_id == first.session_id
     assert ["--conversation", first.session_id] == resumed.command[
         resumed.command.index("--conversation") : resumed.command.index(
             "--conversation"
@@ -75,6 +94,24 @@ def test_agy_translates_model_effort_and_resumes_exact_conversation(
         + 2
     ]
     assert "--model" not in resumed.command
+
+
+def test_agy_terminal_error_status_fails_even_with_zero_exit(
+    repository: Path, fake_agy: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), AgyAdapter(os.fspath(fake_agy))
+    )
+
+    result = runner.run(
+        task="agy-error",
+        prompt="AGY_ERROR",
+        timeout_seconds=5,
+    )
+
+    assert result.exit_code == 0
+    assert not result.succeeded
+    assert result.error == "synthetic agy failure"
 
 
 def test_agy_rejects_an_unavailable_effort(repository: Path, fake_agy: Path) -> None:

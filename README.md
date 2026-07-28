@@ -123,7 +123,9 @@ multipliers but cannot account for GPT-5.6 cache-write premiums because Codex cu
 cached reads without identifying cache writes. If the model is implicit or unknown, token and timing
 metrics remain available while cost is reported as `n/a`. Claude's result stream supplies its
 resolved model, token usage, and CLI-reported USD API-equivalent cost. Agy currently supplies timing
-and its selected model but no token or cost accounting, so those fields remain `0` and `n/a`.
+and token usage from its structured result stream. AOP records Agy's provider-reported duration
+separately from its own wall-clock duration. Agy does not report API-equivalent cost, so that field
+remains `n/a`.
 
 Run independent tasks concurrently from a TOML manifest:
 

@@ -629,16 +629,10 @@ class ClaudeAdapter:
         }
 
 
-AGY_MODELS = {
-    "gemini-3.5-flash": {
-        "low": "Gemini 3.5 Flash (Low)",
-        "medium": "Gemini 3.5 Flash (Medium)",
-        "high": "Gemini 3.5 Flash (High)",
-    },
-    "gemini-3.1-pro": {
-        "low": "Gemini 3.1 Pro (Low)",
-        "high": "Gemini 3.1 Pro (High)",
-    },
+AGY_MODEL_EFFORTS = {
+    "gemini-3.6-flash": ("low", "medium", "high"),
+    "gemini-3.5-flash": ("low", "medium", "high"),
+    "gemini-3.1-pro": ("low", "high"),
 }
 
 
@@ -652,19 +646,16 @@ class AgyAdapter:
         self, model: str | None, effort: str | None
     ) -> tuple[str | None, str | None]:
         selected = model or "gemini-3.5-flash"
-        if selected in AGY_MODELS:
+        if selected in AGY_MODEL_EFFORTS:
             level = effort or "medium"
-            try:
-                return AGY_MODELS[selected][level], level
-            except KeyError as error:
-                supported = ", ".join(AGY_MODELS[selected])
-                raise AOPError(
-                    f"agy model {selected} supports effort: {supported}"
-                ) from error
+            if level not in AGY_MODEL_EFFORTS[selected]:
+                supported = ", ".join(AGY_MODEL_EFFORTS[selected])
+                raise AOPError(f"agy model {selected} supports effort: {supported}")
+            return f"{selected}-{level}", level
         if effort is not None:
             raise AOPError(
-                "agy effort is encoded in its model label; use a known model alias or pass "
-                "an exact label from `agy models` without --effort"
+                "agy effort is encoded in its model slug; use a known model alias or pass "
+                "an exact slug from `agy models` without --effort"
             )
         return selected, None
 

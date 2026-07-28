@@ -60,9 +60,9 @@ def test_agy_translates_model_effort_and_resumes_exact_conversation(
 
     assert first.succeeded
     assert first.provider == "agy"
-    assert first.model == "Gemini 3.5 Flash (Low)"
+    assert first.model == "gemini-3.5-flash-low"
     assert first.effort == "low"
-    assert ["--model", "Gemini 3.5 Flash (Low)"] == first.command[
+    assert ["--model", "gemini-3.5-flash-low"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
     ]
     assert first.usage.total_tokens == 0
@@ -101,8 +101,27 @@ def test_agy_defaults_to_gemini_35_flash_medium(
     result = runner.run(task="default-agy", prompt="test", timeout_seconds=5)
 
     assert result.succeeded
-    assert result.model == "Gemini 3.5 Flash (Medium)"
+    assert result.model == "gemini-3.5-flash-medium"
     assert result.effort == "medium"
+
+
+def test_agy_supports_the_gemini_36_flash_alias(
+    repository: Path, fake_agy: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), AgyAdapter(os.fspath(fake_agy))
+    )
+
+    result = runner.run(
+        task="agy-36",
+        prompt="test",
+        model="gemini-3.6-flash",
+        effort="high",
+    )
+
+    assert result.succeeded
+    assert result.model == "gemini-3.6-flash-high"
+    assert result.effort == "high"
 
 
 def test_agy_can_produce_a_declared_artifact(repository: Path, fake_agy: Path) -> None:

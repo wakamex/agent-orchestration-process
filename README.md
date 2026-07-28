@@ -99,14 +99,15 @@ Claude accepts its normal model aliases and effort levels `low`, `medium`, `high
 advertised Gemini choices:
 
 ```text
+gemini-3.6-flash  low | medium | high
 gemini-3.5-flash  low | medium | high
 gemini-3.1-pro    low | high
 ```
 
 The agy default is `gemini-3.5-flash` at `medium` effort.
 
-For example, `--model gemini-3.5-flash --effort low` is sent to agy as the exact label
-`Gemini 3.5 Flash (Low)`. Any exact label printed by `agy models` can instead be passed without
+For example, `--model gemini-3.5-flash --effort low` is sent to agy as the stable slug
+`gemini-3.5-flash-low`. Any exact slug printed by `agy models` can instead be passed without
 `--effort`.
 
 Every run records wall-clock time and time to first event and agent response. Adapters also record

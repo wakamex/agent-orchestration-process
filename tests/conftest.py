@@ -209,7 +209,6 @@ import pathlib
 import sys
 
 args = sys.argv[1:]
-log_path = pathlib.Path(args[args.index("--log-file") + 1])
 session_id = (
     args[args.index("--conversation") + 1]
     if "--conversation" in args
@@ -218,9 +217,8 @@ session_id = (
 model = (
     args[args.index("--model") + 1]
     if "--model" in args
-    else "gemini-3.5-flash-low"
+    else "gemini-3.5-flash"
 )
-log_path.write_text(f"Created conversation {{session_id}}\\n")
 prompt = args[args.index("-p") + 1]
 if prompt.startswith("WRITE_ARTIFACT"):
     pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("paper.md").write_text(

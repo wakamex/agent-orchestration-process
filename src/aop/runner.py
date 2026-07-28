@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
-import re
 import shutil
 import signal
 import stat
@@ -629,15 +627,9 @@ class ClaudeAdapter:
         }
 
 
-AGY_MODEL_EFFORTS = {
-    "gemini-3.6-flash": ("low", "medium", "high"),
-    "gemini-3.5-flash": ("low", "medium", "high"),
-    "gemini-3.1-pro": ("low", "high"),
-}
-
-
 class AgyAdapter:
     provider = "agy"
+    EFFORTS = {"low", "medium", "high"}
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_AGY_BIN", "agy")
@@ -646,18 +638,12 @@ class AgyAdapter:
         self, model: str | None, effort: str | None
     ) -> tuple[str | None, str | None]:
         selected = model or "gemini-3.5-flash"
-        if selected in AGY_MODEL_EFFORTS:
-            level = effort or "medium"
-            if level not in AGY_MODEL_EFFORTS[selected]:
-                supported = ", ".join(AGY_MODEL_EFFORTS[selected])
-                raise AOPError(f"agy model {selected} supports effort: {supported}")
-            return f"{selected}-{level}", level
-        if effort is not None:
+        level = effort if effort is not None else ("medium" if model is None else None)
+        if level is not None and level not in self.EFFORTS:
             raise AOPError(
-                "agy effort is encoded in its model slug; use a known model alias or pass "
-                "an exact slug from `agy models` without --effort"
+                f"agy effort must be one of: {', '.join(sorted(self.EFFORTS))}"
             )
-        return selected, None
+        return selected, level
 
     def execute(
         self,
@@ -666,9 +652,8 @@ class AgyAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        log_path = Path(tempfile.gettempdir()) / f"aop-agy-{request.run_id}.log"
         command = _provider_command(
-            self._command(request, worktree, log_path), request, worktree, environment
+            self._command(request), request, worktree, environment
         )
         started_at = _now()
         capture = _capture_process(
@@ -685,10 +670,7 @@ class AgyAdapter:
         final_message = parsed["final_message"]
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
-        log = log_path.read_text(errors="replace") if log_path.exists() else ""
-        _atomic_write(run_dir / "agy.log", log)
-        log_path.unlink(missing_ok=True)
-        session_id = parsed["session_id"] or request.session_id or _agy_session_id(log)
+        session_id = parsed["session_id"] or request.session_id
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif parsed["error"]:
@@ -725,31 +707,24 @@ class AgyAdapter:
             provider_duration_seconds=parsed["duration_seconds"],
         )
 
-    def _command(
-        self, request: RunRequest, worktree: Worktree, log_path: Path
-    ) -> list[str]:
+    def _command(self, request: RunRequest) -> list[str]:
         command = [
             self.binary,
-            "--log-file",
-            os.fspath(log_path),
-            "--add-dir",
-            os.fspath(worktree.path),
             "--mode",
             "accept-edits",
             "--dangerously-skip-permissions",
             "--output-format",
             "stream-json",
             "--print-timeout",
-            (
-                f"{max(1, math.ceil(request.timeout_seconds))}s"
-                if request.timeout_seconds is not None
-                else "24h"
-            ),
+            "24h",
         ]
         if request.session_id:
             command.extend(["--conversation", request.session_id])
-        elif request.model:
-            command.extend(["--model", request.model])
+        else:
+            if request.model:
+                command.extend(["--model", request.model])
+            if request.effort:
+                command.extend(["--effort", request.effort])
         command.extend(["-p", request.prompt])
         return command
 
@@ -834,13 +809,6 @@ class AgyAdapter:
             "usage": usage,
             "has_result": has_result,
         }
-
-
-def _agy_session_id(log: str) -> str | None:
-    matches = re.findall(
-        r"(?:Created conversation\s+|conversation=)([0-9a-f-]{36})", log
-    )
-    return matches[-1] if matches else None
 
 
 def _provider_command(

@@ -196,7 +196,7 @@ prompt = "two"
     assert result.succeeded
     assert [task.agent for task in result.tasks] == ["claude", "agy"]
     assert result.tasks[0].model == "claude-test-model"
-    assert result.tasks[1].model == "gemini-3.1-pro-low"
+    assert result.tasks[1].model == "gemini-3.1-pro"
 
 
 @pytest.mark.parametrize(

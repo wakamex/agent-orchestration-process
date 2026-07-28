@@ -95,20 +95,12 @@ task scratch, but receives a fresh output directory and only validates artifacts
 `aop resume` command.
 
 Claude accepts its normal model aliases and effort levels `low`, `medium`, `high`, `xhigh`, and
-`max`. Agy encodes effort in the model selection. AOP provides ergonomic aliases for the currently
-advertised Gemini choices:
-
-```text
-gemini-3.6-flash  low | medium | high
-gemini-3.5-flash  low | medium | high
-gemini-3.1-pro    low | high
-```
+`max`. Agy accepts its native model names and effort levels `low`, `medium`, and `high`.
 
 The agy default is `gemini-3.5-flash` at `medium` effort.
 
-For example, `--model gemini-3.5-flash --effort low` is sent to agy as the stable slug
-`gemini-3.5-flash-low`. Any exact slug printed by `agy models` can instead be passed without
-`--effort`.
+For example, `--model gemini-3.5-flash --effort low` is passed directly to agy. An exact model
+printed by `agy models` can instead be passed without `--effort`.
 
 Every run records wall-clock time and time to first event and agent response. Adapters also record
 input, cached-input, output, and reasoning-output tokens when the provider exposes them. When

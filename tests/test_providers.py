@@ -44,7 +44,7 @@ def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> Non
     assert "--model" not in resumed.command
 
 
-def test_agy_translates_model_effort_and_resumes_exact_conversation(
+def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     repository: Path, fake_agy: Path
 ) -> None:
     manager = WorktreeManager.discover(repository)
@@ -61,15 +61,24 @@ def test_agy_translates_model_effort_and_resumes_exact_conversation(
 
     assert first.succeeded
     assert first.provider == "agy"
-    assert first.model == "gemini-3.5-flash-low"
+    assert first.model == "gemini-3.5-flash"
     assert first.effort == "low"
-    assert ["--model", "gemini-3.5-flash-low"] == first.command[
+    assert ["--model", "gemini-3.5-flash"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
+    ]
+    assert ["--effort", "low"] == first.command[
+        first.command.index("--effort") : first.command.index("--effort") + 2
     ]
     assert ["--output-format", "stream-json"] == first.command[
         first.command.index("--output-format") : first.command.index("--output-format")
         + 2
     ]
+    assert ["--print-timeout", "24h"] == first.command[
+        first.command.index("--print-timeout") : first.command.index("--print-timeout")
+        + 2
+    ]
+    assert "--log-file" not in first.command
+    assert "--add-dir" not in first.command
     assert first.final_message == "answer:first"
     assert first.usage.input_tokens == 100
     assert first.usage.cached_input_tokens == 30
@@ -94,6 +103,7 @@ def test_agy_translates_model_effort_and_resumes_exact_conversation(
         + 2
     ]
     assert "--model" not in resumed.command
+    assert "--effort" not in resumed.command
 
 
 def test_agy_terminal_error_status_fails_even_with_zero_exit(
@@ -114,17 +124,16 @@ def test_agy_terminal_error_status_fails_even_with_zero_exit(
     assert result.error == "synthetic agy failure"
 
 
-def test_agy_rejects_an_unavailable_effort(repository: Path, fake_agy: Path) -> None:
+def test_agy_rejects_an_unsupported_effort(repository: Path, fake_agy: Path) -> None:
     runner = AgentRunner(
         WorktreeManager.discover(repository), AgyAdapter(os.fspath(fake_agy))
     )
 
-    with pytest.raises(AOPError, match="supports effort: low, high"):
+    with pytest.raises(AOPError, match="agy effort must be one of: high, low, medium"):
         runner.run(
             task="bad-agy",
             prompt="test",
-            model="gemini-3.1-pro",
-            effort="medium",
+            effort="xhigh",
         )
 
 
@@ -138,11 +147,17 @@ def test_agy_defaults_to_gemini_35_flash_medium(
     result = runner.run(task="default-agy", prompt="test", timeout_seconds=5)
 
     assert result.succeeded
-    assert result.model == "gemini-3.5-flash-medium"
+    assert result.model == "gemini-3.5-flash"
     assert result.effort == "medium"
+    assert ["--model", "gemini-3.5-flash"] == result.command[
+        result.command.index("--model") : result.command.index("--model") + 2
+    ]
+    assert ["--effort", "medium"] == result.command[
+        result.command.index("--effort") : result.command.index("--effort") + 2
+    ]
 
 
-def test_agy_supports_the_gemini_36_flash_alias(
+def test_agy_passes_an_exact_model_without_adding_effort(
     repository: Path, fake_agy: Path
 ) -> None:
     runner = AgentRunner(
@@ -152,13 +167,13 @@ def test_agy_supports_the_gemini_36_flash_alias(
     result = runner.run(
         task="agy-36",
         prompt="test",
-        model="gemini-3.6-flash",
-        effort="high",
+        model="gemini-3.6-flash-high",
     )
 
     assert result.succeeded
     assert result.model == "gemini-3.6-flash-high"
-    assert result.effort == "high"
+    assert result.effort is None
+    assert "--effort" not in result.command
 
 
 def test_agy_can_produce_a_declared_artifact(repository: Path, fake_agy: Path) -> None:

@@ -8,13 +8,29 @@ from pathlib import Path
 
 import pytest
 
-from aop.cli import main
+from aop import __version__
+from aop.cli import build_parser, main
 from aop.locks import exclusive_lock, task_lock_path
 from aop.runner import AgentRunner, CodexAdapter
 from aop.worktrees import AOPError, WorktreeManager
 
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
+
+
+def test_cli_reports_version_and_provider_neutral_resume_help(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as exit_info:
+        parser.parse_args(["--version"])
+
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out == f"aop {__version__}\n"
+    help_text = parser.format_help()
+    assert "resume an agent session from a run" in help_text
+    assert "resume the Codex session" not in help_text
 
 
 def test_run_persists_structured_codex_artifacts(

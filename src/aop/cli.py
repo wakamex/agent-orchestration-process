@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from . import __version__
 from .batch import BatchResult, BatchRunner
 from .integration import CheckpointManager, IntegrationManager
 from .models import RunResult
@@ -18,6 +19,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aop",
         description="Run concurrent agent tasks in isolated Git worktrees.",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -67,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_artifact_arguments(run)
     _add_prompt_arguments(run)
 
-    resume = commands.add_parser("resume", help="resume the Codex session from a run")
+    resume = commands.add_parser("resume", help="resume an agent session from a run")
     resume.add_argument("run_id")
     resume.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
     _add_artifact_arguments(resume)

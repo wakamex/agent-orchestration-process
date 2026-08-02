@@ -12,7 +12,7 @@ from . import __version__
 from .batch import BatchResult, BatchRunner
 from .integration import CheckpointManager, IntegrationManager
 from .models import RunResult
-from .runner import AgentRunner, adapter_for
+from .runner import AgentRunner, RunStore, adapter_for
 from .worktrees import AOPError, WorktreeManager
 
 
@@ -27,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("init", help="prepare the current Git repository for AOP")
+
+    cleanup = commands.add_parser(
+        "cleanup", help="discard the task worktree associated with a run"
+    )
+    cleanup.add_argument("run_id")
 
     checkpoint = commands.add_parser(
         "checkpoint", help="commit all current changes in a task worktree"
@@ -129,6 +134,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "init":
             manager.initialize()
             print(f"initialized AOP state in {manager.state_dir}")
+            return 0
+
+        if args.command == "cleanup":
+            request = RunStore(manager.state_dir / "runs").load_request(args.run_id)
+            if any(item.task == request.task for item in manager.list()):
+                manager.remove(request.task, force=True)
+            print(request.task)
             return 0
 
         if args.command == "checkpoint":

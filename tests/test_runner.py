@@ -334,6 +334,30 @@ def test_cli_prints_machine_readable_run_and_resume_results(
     assert resumed["final_message"] == "answer:second"
 
 
+def test_cli_cleanup_discards_a_run_worktree_but_keeps_run_records(
+    repository: Path,
+    fake_codex: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+    manager = WorktreeManager.discover(repository)
+    result = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+        task="disposable", prompt="first"
+    )
+    run_dir = manager.state_dir / "runs" / result.run_id
+
+    assert main(["cleanup", result.run_id]) == 0
+    assert capsys.readouterr().out == "disposable\n"
+    assert not any(item.task == "disposable" for item in manager.list())
+    assert (run_dir / "request.json").exists()
+    assert (run_dir / "result.json").exists()
+
+    assert main(["cleanup", result.run_id]) == 0
+    assert capsys.readouterr().out == "disposable\n"
+
+
 def test_cli_accepts_artifact_declarations(
     repository: Path,
     fake_codex: Path,

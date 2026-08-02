@@ -66,6 +66,16 @@ Callers that need a stable machine interface can add `--json` to `run` or `resum
 only the normalized result object to stdout, including its run ID, provider session ID, terminal
 status, metrics, final message, and artifacts.
 
+When a run is no longer resumable or integrable, discard its task worktree by run ID:
+
+```sh
+aop cleanup <run-id>
+```
+
+Cleanup force-removes that task's disposable worktree, scratch directory, and overlays, but retains
+the immutable request, result, logs, and archived artifacts under `.aop/runs/`. Repeating cleanup is
+safe. An active task cannot be cleaned while it holds its execution lock.
+
 All providers run inside `bwrap` by default, with their own permission prompts bypassed because the
 OS mount boundary is the enforcement layer. `workspace-write` mounts the main repository read-only,
 rebinds only the isolated task worktree and shared `AOP_CACHE_DIR` writable, and keeps the

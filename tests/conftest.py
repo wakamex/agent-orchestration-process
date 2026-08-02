@@ -53,7 +53,30 @@ if prompt == "SLEEP":
     time.sleep(10)
 
 output_dir = pathlib.Path(os.environ["AOP_OUTPUT_DIR"])
-if prompt.startswith("WRITE_ARTIFACT"):
+if prompt.startswith("WRITE_ARTIFACT_TREE_SYMLINK"):
+    output_dir.joinpath("assets").mkdir()
+    target = pathlib.Path(os.environ["AOP_CACHE_DIR"]) / "escaped.png"
+    target.write_bytes(b"escaped")
+    output_dir.joinpath("assets", "figure-1.png").symlink_to(target)
+elif prompt.startswith("WRITE_ARTIFACT_TREE_EMPTY_FILE"):
+    output_dir.joinpath("assets").mkdir()
+    output_dir.joinpath("assets", "figure-1.png").write_bytes(b"")
+elif prompt.startswith("WRITE_ARTIFACT_TREE_SPECIAL_FILE"):
+    output_dir.joinpath("assets").mkdir()
+    os.mkfifo(output_dir.joinpath("assets", "figure-1.png"))
+elif prompt.startswith("WRITE_ARTIFACT_TREE"):
+    print("narrating before writing linked deliverables", flush=True)
+    output_dir.joinpath("paper.md").write_text(
+        "# Extracted\\n\\n![Figure](assets/figure-1.png)\\n"
+    )
+    output_dir.joinpath("assets", "nested").mkdir(parents=True)
+    output_dir.joinpath("assets", "figure-1.png").write_bytes(b"PNG figure 1")
+    output_dir.joinpath("assets", "nested", "figure-2.svg").write_text(
+        "<svg>figure 2</svg>\\n"
+    )
+elif prompt.startswith("WRITE_EMPTY_ARTIFACT_DIRECTORY"):
+    output_dir.joinpath("assets").mkdir()
+elif prompt.startswith("WRITE_ARTIFACT"):
     print("narrating before writing the deliverable", flush=True)
     output_dir.joinpath("paper.md").write_text("# Extracted\\n")
 elif prompt.startswith("EMPTY_ARTIFACT"):

@@ -110,6 +110,105 @@ def test_declared_artifact_is_validated_and_archived(
     assert request["artifacts"] == ["paper.md"]
 
 
+def test_declared_artifact_directory_is_recursively_archived(
+    repository: Path, fake_codex: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+
+    result = runner.run(
+        task="linked-extract",
+        prompt="WRITE_ARTIFACT_TREE",
+        sandbox="scratch-write",
+        artifacts=["paper.md", "assets"],
+    )
+
+    assert result.succeeded
+    assert [artifact.logical_path for artifact in result.artifacts] == [
+        "paper.md",
+        "assets/figure-1.png",
+        "assets/nested/figure-2.svg",
+    ]
+    expected = {
+        "paper.md": b"# Extracted\n\n![Figure](assets/figure-1.png)\n",
+        "assets/figure-1.png": b"PNG figure 1",
+        "assets/nested/figure-2.svg": b"<svg>figure 2</svg>\n",
+    }
+    run_dir = manager.state_dir / "runs" / result.run_id
+    for artifact in result.artifacts:
+        content = expected[artifact.logical_path]
+        assert (run_dir / artifact.archive_path).read_bytes() == content
+        assert artifact.size_bytes == len(content)
+        assert artifact.sha256 == hashlib.sha256(content).hexdigest()
+
+
+def test_declared_empty_artifact_directory_is_valid(
+    repository: Path, fake_codex: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    result = runner.run(
+        task="empty-assets",
+        prompt="WRITE_EMPTY_ARTIFACT_DIRECTORY",
+        sandbox="scratch-write",
+        artifacts=["assets"],
+    )
+
+    assert result.succeeded
+    assert result.artifacts == ()
+
+
+@pytest.mark.parametrize(
+    ("prompt", "diagnostic"),
+    [
+        ("WRITE_ARTIFACT_TREE_SYMLINK", "symlinks are not allowed"),
+        ("WRITE_ARTIFACT_TREE_EMPTY_FILE", "empty"),
+        ("WRITE_ARTIFACT_TREE_SPECIAL_FILE", "not a regular file"),
+    ],
+)
+def test_unsafe_file_in_declared_artifact_directory_fails_the_run(
+    repository: Path,
+    fake_codex: Path,
+    prompt: str,
+    diagnostic: str,
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    result = runner.run(
+        task=f"unsafe-tree-{diagnostic.split()[0]}",
+        prompt=prompt,
+        sandbox="scratch-write",
+        artifacts=["assets"],
+    )
+
+    assert not result.succeeded
+    assert result.error == f"artifact assets/figure-1.png: {diagnostic}"
+    assert result.artifacts == ()
+
+
+def test_overlapping_artifact_declarations_fail_before_launch(
+    repository: Path, fake_codex: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    with pytest.raises(
+        AOPError,
+        match="overlapping artifact paths: assets and assets/figure-1.png",
+    ):
+        runner.run(
+            task="overlapping-artifacts",
+            prompt="WRITE_ARTIFACT_TREE",
+            sandbox="scratch-write",
+            artifacts=["assets", "assets/figure-1.png"],
+        )
+
+
 @pytest.mark.parametrize(
     ("prompt", "diagnostic"),
     [

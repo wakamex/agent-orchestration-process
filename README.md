@@ -93,16 +93,19 @@ aop run extraction \
   --model gemini-3.5-flash \
   --sandbox scratch-write \
   --artifact paper.md \
+  --artifact assets \
   --prompt "Extract the source document as Markdown"
 ```
 
 AOP gives the agent a fresh, prompt-visible `AOP_OUTPUT_DIR` for every invocation. Stdout and stderr
 remain logs; deliverables belong in that output directory. After a successful provider exit, AOP
-requires every declared artifact to be a nonempty regular file beneath the output directory, rejects
-symlinks and path escapes, and copies accepted files into
-`.aop/runs/<run-id>/artifacts/`. The normalized result records each artifact's declared path,
-archived path, byte size, and SHA-256. A failed validation makes the run unsuccessful, and AOP never
-copies artifacts into the main worktree.
+accepts each declared artifact as either a file or directory. Files must be nonempty and regular;
+directories are collected recursively in deterministic path order and may be empty. AOP rejects
+missing declarations, overlapping declarations, symlinks, special files, empty files, and path
+escapes, then copies accepted files into `.aop/runs/<run-id>/artifacts/` with their hierarchy intact.
+The normalized result records each collected file's logical path, archived path, byte size, and
+SHA-256. A failed validation makes the run unsuccessful, and AOP never copies artifacts into the
+main worktree.
 
 Artifact declarations are per invocation. A resume keeps the exact provider session and reusable
 task scratch, but receives a fresh output directory and only validates artifacts declared on that

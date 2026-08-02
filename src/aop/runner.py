@@ -1028,6 +1028,11 @@ def normalize_artifacts(artifacts: Sequence[str]) -> tuple[str, ...]:
         logical_path = path.as_posix()
         if logical_path in normalized:
             raise AOPError(f"duplicate artifact path: {logical_path}")
+        for existing in map(PurePosixPath, normalized):
+            if path in existing.parents or existing in path.parents:
+                raise AOPError(
+                    f"overlapping artifact paths: {existing.as_posix()} and {logical_path}"
+                )
         normalized.append(logical_path)
     return tuple(normalized)
 
@@ -1041,8 +1046,9 @@ def _artifact_prompt(prompt: str, artifacts: tuple[str, ...], output_dir: Path) 
         "AOP artifact contract:\n"
         f"Write the following deliverables beneath {output_dir}:\n"
         f"{paths}\n"
-        "Stdout and stderr are logs, not deliverables. AOP will reject missing, "
-        "empty, or unsafe files."
+        "Declared paths may be files or directories; directories are collected recursively. "
+        "Stdout and stderr are logs, not deliverables. AOP will reject missing, empty, or "
+        "unsafe files."
     )
 
 
@@ -1053,13 +1059,12 @@ def _archive_artifacts(
     run_dir: Path,
 ) -> RunResult:
     try:
-        sources = tuple(
-            _validate_artifact(logical_path, output_dir)
-            for logical_path in declarations
-        )
+        sources: list[tuple[str, Path]] = []
+        for declaration in declarations:
+            sources.extend(_collect_artifact(declaration, output_dir))
         artifacts = tuple(
             _archive_artifact(logical_path, source, run_dir)
-            for logical_path, source in zip(declarations, sources, strict=True)
+            for logical_path, source in sources
         )
     except (AOPError, OSError) as error:
         shutil.rmtree(run_dir / "artifacts", ignore_errors=True)
@@ -1072,7 +1077,9 @@ def _archive_artifacts(
     return replace(result, artifacts=artifacts)
 
 
-def _validate_artifact(logical_path: str, output_dir: Path) -> Path:
+def _collect_artifact(
+    logical_path: str, output_dir: Path
+) -> tuple[tuple[str, Path], ...]:
     scratch_dir = output_dir.parent.parent
     for directory in (scratch_dir, output_dir.parent, output_dir):
         try:
@@ -1094,6 +1101,51 @@ def _validate_artifact(logical_path: str, output_dir: Path) -> Path:
             raise AOPError(f"artifact {logical_path}: missing") from error
         if stat.S_ISLNK(status.st_mode):
             raise AOPError(f"artifact {logical_path}: symlinks are not allowed")
+    if stat.S_ISDIR(status.st_mode):
+        return _collect_artifact_directory(
+            source, PurePosixPath(logical_path), output_dir
+        )
+    return (
+        (
+            logical_path,
+            _validate_artifact_file(logical_path, source, status, output_dir),
+        ),
+    )
+
+
+def _collect_artifact_directory(
+    directory: Path,
+    logical_directory: PurePosixPath,
+    output_dir: Path,
+) -> tuple[tuple[str, Path], ...]:
+    collected: list[tuple[str, Path]] = []
+    for child in sorted(directory.iterdir(), key=lambda path: path.name):
+        logical_path = (logical_directory / child.name).as_posix()
+        status = child.lstat()
+        if stat.S_ISLNK(status.st_mode):
+            raise AOPError(f"artifact {logical_path}: symlinks are not allowed")
+        if stat.S_ISDIR(status.st_mode):
+            collected.extend(
+                _collect_artifact_directory(
+                    child, PurePosixPath(logical_path), output_dir
+                )
+            )
+            continue
+        collected.append(
+            (
+                logical_path,
+                _validate_artifact_file(logical_path, child, status, output_dir),
+            )
+        )
+    return tuple(collected)
+
+
+def _validate_artifact_file(
+    logical_path: str,
+    source: Path,
+    status: os.stat_result,
+    output_dir: Path,
+) -> Path:
     if not stat.S_ISREG(status.st_mode):
         raise AOPError(f"artifact {logical_path}: not a regular file")
     if status.st_size == 0:

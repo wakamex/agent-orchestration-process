@@ -306,6 +306,34 @@ def test_cli_runs_codex_and_reports_resumable_ids(
     assert (repository / ".aop" / "runs" / run_id.group(1) / "result.json").exists()
 
 
+def test_cli_prints_machine_readable_run_and_resume_results(
+    repository: Path,
+    fake_codex: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+
+    assert main(["run", "json-task", "--prompt", "first", "--json"]) == 0
+    first_output = capsys.readouterr()
+    first = json.loads(first_output.out)
+
+    assert first_output.err == ""
+    assert first["succeeded"] is True
+    assert first["task"] == "json-task"
+    assert first["final_message"] == "answer:first"
+
+    assert main(["resume", first["run_id"], "--prompt", "second", "--json"]) == 0
+    resumed_output = capsys.readouterr()
+    resumed = json.loads(resumed_output.out)
+
+    assert resumed_output.err == ""
+    assert resumed["succeeded"] is True
+    assert resumed["session_id"] == first["session_id"]
+    assert resumed["final_message"] == "answer:second"
+
+
 def test_cli_accepts_artifact_declarations(
     repository: Path,
     fake_codex: Path,

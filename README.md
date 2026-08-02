@@ -62,6 +62,10 @@ run artifact directory to stderr. Resume the exact session using the AOP run ID:
 aop resume <run-id> --prompt "Address the review findings"
 ```
 
+Callers that need a stable machine interface can add `--json` to `run` or `resume`. AOP then prints
+only the normalized result object to stdout, including its run ID, provider session ID, terminal
+status, metrics, final message, and artifacts.
+
 All providers run inside `bwrap` by default, with their own permission prompts bypassed because the
 OS mount boundary is the enforcement layer. `workspace-write` mounts the main repository read-only,
 rebinds only the isolated task worktree and shared `AOP_CACHE_DIR` writable, and keeps the

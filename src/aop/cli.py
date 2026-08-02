@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -68,12 +69,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="workspace-write",
     )
     run.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
+    run.add_argument(
+        "--json", action="store_true", help="print the normalized result as JSON"
+    )
     _add_artifact_arguments(run)
     _add_prompt_arguments(run)
 
     resume = commands.add_parser("resume", help="resume an agent session from a run")
     resume.add_argument("run_id")
     resume.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
+    resume.add_argument(
+        "--json", action="store_true", help="print the normalized result as JSON"
+    )
     _add_artifact_arguments(resume)
     _add_prompt_arguments(resume)
 
@@ -180,7 +187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
             )
-            return _report_run(result, manager)
+            return _report_run(result, manager, json_output=args.json)
 
         if args.command == "resume":
             result = AgentRunner(manager).resume(
@@ -189,7 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
             )
-            return _report_run(result, manager)
+            return _report_run(result, manager, json_output=args.json)
 
         if args.worktree_command == "create":
             created = manager.create(args.task, args.base)
@@ -265,7 +272,15 @@ def _positive_integer(value: str) -> int:
     return integer
 
 
-def _report_run(result: RunResult, manager: WorktreeManager) -> int:
+def _report_run(
+    result: RunResult,
+    manager: WorktreeManager,
+    *,
+    json_output: bool = False,
+) -> int:
+    if json_output:
+        print(json.dumps(result.to_dict(), sort_keys=True))
+        return _run_exit_code(result)
     if result.final_message:
         print(
             result.final_message,
@@ -281,10 +296,14 @@ def _report_run(result: RunResult, manager: WorktreeManager) -> int:
         f"artifacts={manager.state_dir / 'runs' / result.run_id}",
         file=sys.stderr,
     )
-    if result.succeeded:
-        return 0
     if result.error:
         print(f"aop: {result.error}", file=sys.stderr)
+    return _run_exit_code(result)
+
+
+def _run_exit_code(result: RunResult) -> int:
+    if result.succeeded:
+        return 0
     if result.timed_out:
         return 124
     return result.exit_code if 0 < result.exit_code < 126 else 1

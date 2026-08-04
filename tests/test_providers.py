@@ -79,6 +79,7 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     ]
     assert "--log-file" not in first.command
     assert "--add-dir" not in first.command
+    assert "--gemini_dir" in first.command
     assert first.final_message == "answer:first"
     assert first.usage.input_tokens == 100
     assert first.usage.cached_input_tokens == 30
@@ -104,6 +105,125 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     ]
     assert "--model" not in resumed.command
     assert "--effort" not in resumed.command
+
+
+@pytest.mark.parametrize(
+    "sandbox", ["scratch-write", "workspace-write", "danger-full-access"]
+)
+def test_agy_uses_private_persistent_runtime_state_in_every_sandbox(
+    repository: Path,
+    fake_agy: Path,
+    sandbox: str,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, AgyAdapter(os.fspath(fake_agy)))
+    source_dir = Path(os.environ["AOP_AGY_SOURCE_DIR"])
+
+    first = runner.run(
+        task=f"private-agy-{sandbox}",
+        prompt="first",
+        sandbox=sandbox,
+        timeout_seconds=5,
+    )
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    private_dir = (
+        manager.state_dir
+        / "provider-state"
+        / f"private-agy-{sandbox}"
+        / "agy"
+        / "gemini"
+    )
+    assert first.succeeded
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert (private_dir / "oauth_creds.json").is_file()
+    assert (private_dir / "config" / "config.json").is_file()
+    assert (private_dir / "antigravity-cli" / "antigravity-oauth-token").is_file()
+    assert (private_dir / "antigravity-cli" / "fake-conversation.json").is_file()
+    assert not (
+        private_dir / "antigravity-cli" / "conversations" / "stale.json"
+    ).exists()
+    assert not (source_dir / "antigravity-cli" / "fake-conversation.json").exists()
+    first_dir_index = first.command.index("--gemini_dir")
+    resumed_dir_index = resumed.command.index("--gemini_dir")
+    assert first.command[first_dir_index + 1] == os.fspath(private_dir)
+    assert resumed.command[resumed_dir_index + 1] == os.fspath(private_dir)
+    if sandbox == "danger-full-access":
+        assert first.command[0] == os.fspath(fake_agy)
+    else:
+        assert first.command[0] == "bwrap"
+        assert ["--ro-bind", os.fspath(source_dir), os.fspath(source_dir)] == (
+            first.command[
+                first.command.index(os.fspath(source_dir)) - 1 : first.command.index(
+                    os.fspath(source_dir)
+                )
+                + 2
+            ]
+        )
+        assert ["--bind", os.fspath(private_dir.parent.parent)] == first.command[
+            first.command.index(os.fspath(private_dir.parent.parent))
+            - 1 : first.command.index(os.fspath(private_dir.parent.parent)) + 1
+        ]
+
+    manager.remove(f"private-agy-{sandbox}")
+    assert not private_dir.exists()
+    assert (manager.state_dir / "runs" / first.run_id / "result.json").is_file()
+    assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("prompt", "error"),
+    [
+        (
+            "AGY_DIFFERENT_SESSION",
+            "agy resumed as conversation aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee "
+            "instead of the requested conversation",
+        ),
+        (
+            "AGY_MISSING_SESSION",
+            "agy resume result did not report the requested conversation ID",
+        ),
+    ],
+)
+def test_agy_resume_fails_closed_when_terminal_conversation_identity_is_not_exact(
+    repository: Path,
+    fake_agy: Path,
+    prompt: str,
+    error: str,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, AgyAdapter(os.fspath(fake_agy)))
+    first = runner.run(task="agy-identity", prompt="first", timeout_seconds=5)
+
+    resumed = runner.resume(run_id=first.run_id, prompt=prompt)
+
+    assert not resumed.succeeded
+    assert resumed.session_id is None
+    assert resumed.error is not None
+    assert resumed.error.startswith(error)
+    with pytest.raises(AOPError, match="run has no resumable agent session"):
+        runner.resume(run_id=resumed.run_id, prompt="third")
+
+
+def test_agy_requires_an_authenticated_source_profile(
+    repository: Path,
+    fake_agy: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing-agy-profile"
+    monkeypatch.setenv("AOP_AGY_SOURCE_DIR", os.fspath(missing))
+    manager = WorktreeManager.discover(repository)
+
+    with pytest.raises(AOPError, match="authenticate Agy first"):
+        AgentRunner(manager, AgyAdapter(os.fspath(fake_agy))).run(
+            task="missing-agy-profile",
+            prompt="first",
+            timeout_seconds=5,
+        )
+
+    assert not (manager.state_dir / "runs").exists()
 
 
 def test_agy_terminal_error_status_fails_even_with_zero_exit(

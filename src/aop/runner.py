@@ -652,8 +652,9 @@ class AgyAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
+        gemini_dir = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "agy" / "gemini"
         command = _provider_command(
-            self._command(request), request, worktree, environment
+            self._command(request, gemini_dir), request, worktree, environment
         )
         started_at = _now()
         capture = _capture_process(
@@ -670,19 +671,32 @@ class AgyAdapter:
         final_message = parsed["final_message"]
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
-        session_id = parsed["session_id"] or request.session_id
+        reported_session_id = parsed["session_id"]
+        session_id = reported_session_id
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
-        elif parsed["error"]:
-            error = parsed["error"]
         elif capture.exit_code:
             error = (
                 capture.stderr.strip() or f"agy exited with status {capture.exit_code}"
             )
         elif not parsed["has_result"]:
             error = "agy did not emit a terminal result"
-        elif session_id is None:
-            error = "agy did not report a conversation ID"
+        elif request.session_id and reported_session_id != request.session_id:
+            session_id = None
+            if reported_session_id is None:
+                error = (
+                    "agy resume result did not report the requested conversation ID "
+                    f"{request.session_id}"
+                )
+            else:
+                error = (
+                    f"agy resumed as conversation {reported_session_id} instead of "
+                    f"the requested conversation {request.session_id}"
+                )
+        elif reported_session_id is None:
+            error = "agy result did not report a conversation ID"
+        elif parsed["error"]:
+            error = parsed["error"]
         else:
             error = None
         return RunResult(
@@ -707,9 +721,11 @@ class AgyAdapter:
             provider_duration_seconds=parsed["duration_seconds"],
         )
 
-    def _command(self, request: RunRequest) -> list[str]:
+    def _command(self, request: RunRequest, gemini_dir: Path) -> list[str]:
         command = [
             self.binary,
+            "--gemini_dir",
+            os.fspath(gemini_dir),
             "--mode",
             "accept-edits",
             "--dangerously-skip-permissions",
@@ -750,7 +766,7 @@ class AgyAdapter:
 
     @staticmethod
     def _parse(output: str) -> dict[str, object]:
-        session_id = None
+        result_session_id = None
         model = None
         final_message = None
         error = None
@@ -768,14 +784,14 @@ class AgyAdapter:
             payload = event.get(event_type)
             if not isinstance(payload, dict):
                 continue
-            conversation_id = payload.get("conversation_id")
-            if isinstance(conversation_id, str):
-                session_id = conversation_id
             if event_type == "init" and isinstance(payload.get("model"), str):
                 model = payload["model"]
             if event_type != "result":
                 continue
             has_result = True
+            conversation_id = payload.get("conversation_id")
+            if isinstance(conversation_id, str) and conversation_id:
+                result_session_id = conversation_id
             response = payload.get("response")
             final_message = response if isinstance(response, str) else None
             status = payload.get("status")
@@ -801,7 +817,7 @@ class AgyAdapter:
                 }
             )
         return {
-            "session_id": session_id,
+            "session_id": result_session_id,
             "model": model,
             "final_message": final_message,
             "error": error,
@@ -1128,6 +1144,11 @@ def _provider_command(
     else:
         wrapped.extend(["--bind", os.fspath(scratch), os.fspath(scratch)])
     wrapped.extend(["--bind", os.fspath(cache), os.fspath(cache)])
+    if request.provider in {"agy", "hermes"}:
+        wrapped.extend(["--bind", os.fspath(provider_state), os.fspath(provider_state)])
+    if request.provider == "agy":
+        source_dir = _agy_source_dir(environment)
+        wrapped.extend(["--ro-bind", os.fspath(source_dir), os.fspath(source_dir)])
     if request.provider == "hermes":
         source_home = _hermes_source_home(environment)
         if not source_home.is_dir():
@@ -1138,9 +1159,6 @@ def _provider_command(
         _prepare_hermes_home(source_home, isolated_home)
         wrapped.extend(
             [
-                "--bind",
-                os.fspath(provider_state),
-                os.fspath(provider_state),
                 "--ro-bind",
                 os.fspath(source_home),
                 os.fspath(source_home),
@@ -1151,6 +1169,64 @@ def _provider_command(
         )
     wrapped.extend(["--chdir", os.fspath(worktree.path), "--", *command])
     return wrapped
+
+
+_AGY_SEED_DIRECTORIES = {"config"}
+_AGY_NESTED_SEED_FILES = {
+    "antigravity": {
+        "browserAllowlist.txt",
+        "mcp_config.json",
+        "user_settings.pb",
+    },
+    "antigravity-cli": {
+        "antigravity-oauth-token",
+        "settings.json",
+    },
+}
+
+
+def _agy_source_dir(environment: dict[str, str]) -> Path:
+    configured = environment.get("AOP_AGY_SOURCE_DIR")
+    source = (
+        Path(configured).expanduser()
+        if configured
+        else Path(environment["HOME"]) / ".gemini"
+    )
+    try:
+        return source.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise AOPError(
+            f"Agy profile does not exist: {source}; authenticate Agy first"
+        ) from error
+
+
+def _prepare_agy_dir(source: Path, destination: Path) -> None:
+    if destination.is_dir():
+        return
+    if not source.is_dir():
+        raise AOPError(f"Agy profile is not a directory: {source}")
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    temporary.mkdir(parents=True, mode=0o700)
+    try:
+        for entry in source.iterdir():
+            target = temporary / entry.name
+            if entry.name in _AGY_SEED_DIRECTORIES and entry.is_dir():
+                shutil.copytree(entry, target)
+            elif entry.is_file():
+                shutil.copy2(entry, target)
+        for directory, names in _AGY_NESTED_SEED_FILES.items():
+            source_directory = source / directory
+            for name in names:
+                entry = source_directory / name
+                if not entry.is_file():
+                    continue
+                target = temporary / directory / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(entry, target)
+        os.replace(temporary, destination)
+    except OSError as error:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise AOPError(f"could not prepare isolated Agy profile: {error}") from error
 
 
 _HERMES_SEED_DIRECTORIES = {
@@ -1333,11 +1409,11 @@ class AgentRunner:
         output_dir.mkdir(parents=True, exist_ok=False)
         provider_state = self.manager.state_dir / "provider-state" / request.task
         provider_state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        provider_state.chmod(0o700)
         request = replace(
             request,
             prompt=_artifact_prompt(request.prompt, request.artifacts, output_dir),
         )
-        run_dir = self.store.create(request)
         environment = os.environ.copy()
         environment.update(
             {
@@ -1351,6 +1427,11 @@ class AgentRunner:
                 "AOP_RUN_ID": request.run_id,
             }
         )
+        if request.provider == "agy":
+            _prepare_agy_dir(
+                _agy_source_dir(environment), provider_state / "agy" / "gemini"
+            )
+        run_dir = self.store.create(request)
         result = self.adapter.execute(request, worktree, run_dir, environment)
         if result.succeeded and request.artifacts:
             result = _archive_artifacts(result, request.artifacts, output_dir, run_dir)

@@ -87,6 +87,15 @@ must not edit the repository. `danger-full-access` explicitly skips `bwrap`. Con
 authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`,
 `AOP_AGY_BIN`, `AOP_HERMES_BIN`, and `AOP_BWRAP_BIN` may override their respective executables.
 
+Every Agy task uses a persistent private Gemini profile under
+`.aop/provider-state/<task>/agy/gemini`, including with `danger-full-access`. AOP initializes it
+once from the authenticated `~/.gemini` profile, copying configuration and credentials but not
+conversations, history, caches, logs, scratch files, or databases. Agy writes all new runtime state
+to the private profile. `aop resume` requires the terminal Agy result to report exactly the requested
+conversation ID; a missing or different ID fails closed and is not resumable. Removing the task
+worktree removes its private profile while preserving run records. Set `AOP_AGY_SOURCE_DIR` only
+when the authenticated source profile is somewhere other than `~/.gemini`.
+
 For Hermes in either non-danger sandbox, AOP seeds a persistent task-local Hermes home under
 `.aop/provider-state/<task>/` from the authenticated profile. Hermes can read the existing
 configuration, credentials, skills, hooks, and memories even when their host filesystem is

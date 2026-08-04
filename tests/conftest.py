@@ -222,8 +222,22 @@ print(json.dumps({{
 
 
 @pytest.fixture
-def fake_agy(tmp_path: Path) -> Path:
+def fake_agy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     executable = tmp_path / "agy"
+    source_dir = tmp_path / "agy-source"
+    source_dir.mkdir()
+    (source_dir / "oauth_creds.json").write_text('{"token": "test"}\n')
+    (source_dir / "config").mkdir()
+    (source_dir / "config" / "config.json").write_text("{}\n")
+    (source_dir / "antigravity-cli").mkdir()
+    (source_dir / "antigravity-cli" / "antigravity-oauth-token").write_text(
+        "test-token\n"
+    )
+    (source_dir / "antigravity-cli" / "conversations").mkdir()
+    (source_dir / "antigravity-cli" / "conversations" / "stale.json").write_text(
+        "stale\n"
+    )
+    monkeypatch.setenv("AOP_AGY_SOURCE_DIR", os.fspath(source_dir))
     executable.write_text(
         f"""#!{sys.executable}
 import json
@@ -232,17 +246,33 @@ import pathlib
 import sys
 
 args = sys.argv[1:]
+gemini_dir = pathlib.Path(args[args.index("--gemini_dir") + 1])
+runtime_dir = gemini_dir / "antigravity-cli"
+runtime_dir.mkdir(parents=True, exist_ok=True)
+if not (runtime_dir / "antigravity-oauth-token").is_file():
+    print("missing private authentication", file=sys.stderr)
+    raise SystemExit(2)
+state_path = runtime_dir / "fake-conversation.json"
 session_id = (
     args[args.index("--conversation") + 1]
     if "--conversation" in args
     else "49f2a36e-43e4-4ba9-9f4f-817bee57f64c"
 )
+if "--conversation" in args:
+    state = json.loads(state_path.read_text())
+    if state["conversation_id"] != session_id:
+        print("conversation is absent from private state", file=sys.stderr)
+        raise SystemExit(3)
+else:
+    state_path.write_text(json.dumps({{"conversation_id": session_id}}))
 model = (
     args[args.index("--model") + 1]
     if "--model" in args
     else "gemini-3.5-flash"
 )
 prompt = args[args.index("-p") + 1]
+if prompt.startswith("AGY_DIFFERENT_SESSION"):
+    session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 if prompt.startswith("WRITE_ARTIFACT"):
     pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("paper.md").write_text(
         "# Extracted by agy\\n"
@@ -284,6 +314,8 @@ result = {{
         "total_tokens": 120,
     }},
 }}
+if prompt.startswith("AGY_MISSING_SESSION"):
+    result.pop("conversation_id")
 if prompt.startswith("AGY_ERROR"):
     result.update({{
         "status": "ERROR",

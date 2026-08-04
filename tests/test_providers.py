@@ -366,3 +366,54 @@ def test_hermes_nonzero_exit_is_a_normalized_failure(
     assert not result.succeeded
     assert result.exit_code == 3
     assert result.error == "Hermes exited with status 3"
+
+
+@pytest.mark.parametrize("sandbox", ["scratch-write", "workspace-write"])
+def test_hermes_run_and_resume_with_read_only_runtime_home(
+    repository: Path,
+    fake_hermes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    sandbox: str,
+) -> None:
+    hermes_home = tmp_path / f"managed-hermes-{sandbox}"
+    hermes_home.mkdir()
+    (hermes_home / "auth.json").write_text("{}\n")
+    state_path = hermes_home / "fake-state.json"
+    hermes_home.chmod(0o555)
+    monkeypatch.setenv("HERMES_HOME", os.fspath(hermes_home))
+    monkeypatch.setenv("AOP_FAKE_HERMES_STATE_IN_HOME", "1")
+    monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
+    manager = WorktreeManager.discover(repository)
+
+    try:
+        first = AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes))).run(
+            task=f"managed-{sandbox}",
+            prompt="first",
+            sandbox=sandbox,
+        )
+        resumed = AgentRunner(manager).resume(
+            run_id=first.run_id,
+            prompt="second",
+        )
+    finally:
+        hermes_home.chmod(0o755)
+
+    assert first.succeeded
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert resumed.final_message == "answer:second"
+    assert not state_path.exists()
+    isolated_home = (
+        manager.state_dir / "provider-state" / f"managed-{sandbox}" / "hermes" / "home"
+    )
+    assert (isolated_home / "fake-state.json").is_file()
+    assert (isolated_home / "auth.json").read_text() == "{}\n"
+    assert not (
+        manager.get(f"managed-{sandbox}").path / "scratch" / "provider-state"
+    ).exists()
+    assert "--setenv" in first.command
+    assert "--overlay" not in first.command
+    assert os.fspath(hermes_home) in first.command
+    assert os.fspath(isolated_home) in first.command
+    assert "--setenv" in resumed.command

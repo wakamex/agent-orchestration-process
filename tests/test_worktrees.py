@@ -36,11 +36,15 @@ def test_worktree_lifecycle(repository: Path) -> None:
     assert metadata.path == os.fspath(created.path)
     assert [item.task for item in manager.list()] == ["task-one"]
     assert (repository / ".gitignore").read_text().count("/.aop/") == 1
+    provider_state = repository / ".aop" / "provider-state" / "task-one"
+    provider_state.mkdir(parents=True)
+    (provider_state / "state.db").write_text("task state\n")
 
     manager.remove("task-one")
     assert manager.list() == []
     assert not created.path.exists()
     assert not (repository / ".aop" / "tasks" / "task-one.json").exists()
+    assert not provider_state.exists()
 
 
 def test_dirty_worktree_requires_force(repository: Path) -> None:

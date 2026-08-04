@@ -847,7 +847,7 @@ class HermesAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        before = self._session(request.session_id, worktree.path, environment)
+        before = self._session(request.session_id, request, worktree, environment)
         command = _provider_command(
             self._command(request), request, worktree, environment
         )
@@ -864,7 +864,7 @@ class HermesAdapter:
         _atomic_write(run_dir / "stderr.log", capture.stderr)
         reported_session_id = self._session_id(capture.stderr)
         session_id = reported_session_id or request.session_id
-        after = self._session(session_id, worktree.path, environment)
+        after = self._session(session_id, request, worktree, environment)
         final_message = self._final_message(before, after, capture.stdout)
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
@@ -926,13 +926,14 @@ class HermesAdapter:
     def _session(
         self,
         session_id: str | None,
-        cwd: Path,
+        request: RunRequest,
+        worktree: Worktree,
         environment: dict[str, str],
     ) -> _HermesSession | None:
         if session_id is None:
             return None
         try:
-            exported = subprocess.run(
+            command = _provider_command(
                 [
                     self.binary,
                     "sessions",
@@ -943,7 +944,13 @@ class HermesAdapter:
                     "--session-id",
                     session_id,
                 ],
-                cwd=cwd,
+                request,
+                worktree,
+                environment,
+            )
+            exported = subprocess.run(
+                command,
+                cwd=worktree.path,
                 env=environment,
                 text=True,
                 capture_output=True,
@@ -1100,6 +1107,7 @@ def _provider_command(
         return command
     root = Path(environment["AOP_ROOT"])
     cache = Path(environment["AOP_CACHE_DIR"])
+    provider_state = Path(environment["AOP_PROVIDER_STATE_DIR"])
     bwrap = os.environ.get("AOP_BWRAP_BIN", "bwrap")
     scratch = Path(environment["AOP_SCRATCH_DIR"])
     wrapped = [
@@ -1120,8 +1128,95 @@ def _provider_command(
     else:
         wrapped.extend(["--bind", os.fspath(scratch), os.fspath(scratch)])
     wrapped.extend(["--bind", os.fspath(cache), os.fspath(cache)])
+    if request.provider == "hermes":
+        source_home = _hermes_source_home(environment)
+        if not source_home.is_dir():
+            raise AOPError(
+                f"Hermes home does not exist: {source_home}; authenticate Hermes first"
+            )
+        isolated_home = provider_state / "hermes" / "home"
+        _prepare_hermes_home(source_home, isolated_home)
+        wrapped.extend(
+            [
+                "--bind",
+                os.fspath(provider_state),
+                os.fspath(provider_state),
+                "--ro-bind",
+                os.fspath(source_home),
+                os.fspath(source_home),
+                "--setenv",
+                "HERMES_HOME",
+                os.fspath(isolated_home),
+            ]
+        )
     wrapped.extend(["--chdir", os.fspath(worktree.path), "--", *command])
     return wrapped
+
+
+_HERMES_SEED_DIRECTORIES = {
+    "cron",
+    "hooks",
+    "local",
+    "memories",
+    "optional-mcps",
+    "optional-skills",
+    "plugins",
+    "shared",
+    "skills",
+}
+_HERMES_RUNTIME_FILES = {
+    ".hermes_history",
+    ".update_check",
+    "active_profile",
+    "auth.lock",
+    "gateway.pid",
+    "gateway_state.json",
+    "hermes_state.db",
+    "hermes_state.db-shm",
+    "hermes_state.db-wal",
+    "processes.json",
+    "response_store.db",
+    "response_store.db-shm",
+    "response_store.db-wal",
+    "state.db",
+    "state.db-shm",
+    "state.db-wal",
+}
+
+
+def _hermes_source_home(environment: dict[str, str]) -> Path:
+    configured = environment.get("HERMES_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    default = Path(environment["HOME"]) / ".hermes"
+    active_profile = default / "active_profile"
+    try:
+        active = active_profile.read_text().strip()
+    except OSError:
+        active = ""
+    if active and active != "default":
+        profile = default / "profiles" / active
+        if profile.is_dir():
+            return profile
+    return default
+
+
+def _prepare_hermes_home(source: Path, destination: Path) -> None:
+    if destination.is_dir():
+        return
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    temporary.mkdir(parents=True, mode=0o700)
+    try:
+        for entry in source.iterdir():
+            target = temporary / entry.name
+            if entry.name in _HERMES_SEED_DIRECTORIES and entry.is_dir():
+                shutil.copytree(entry, target, symlinks=True)
+            elif entry.is_file() and entry.name not in _HERMES_RUNTIME_FILES:
+                shutil.copy2(entry, target)
+        os.replace(temporary, destination)
+    except OSError as error:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise AOPError(f"could not prepare isolated Hermes home: {error}") from error
 
 
 def adapter_for(agent: str) -> AgentAdapter:
@@ -1236,6 +1331,8 @@ class AgentRunner:
         scratch_dir.mkdir(exist_ok=True)
         output_dir = scratch_dir / "outputs" / request.run_id
         output_dir.mkdir(parents=True, exist_ok=False)
+        provider_state = self.manager.state_dir / "provider-state" / request.task
+        provider_state.mkdir(parents=True, exist_ok=True, mode=0o700)
         request = replace(
             request,
             prompt=_artifact_prompt(request.prompt, request.artifacts, output_dir),
@@ -1248,6 +1345,7 @@ class AgentRunner:
                 "AOP_TASK": request.task,
                 "AOP_WORKTREE": os.fspath(worktree.path),
                 "AOP_CACHE_DIR": os.fspath(self.manager.cache_dir),
+                "AOP_PROVIDER_STATE_DIR": os.fspath(provider_state),
                 "AOP_SCRATCH_DIR": os.fspath(scratch_dir),
                 "AOP_OUTPUT_DIR": os.fspath(output_dir),
                 "AOP_RUN_ID": request.run_id,

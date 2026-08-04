@@ -87,6 +87,14 @@ must not edit the repository. `danger-full-access` explicitly skips `bwrap`. Con
 authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`,
 `AOP_AGY_BIN`, `AOP_HERMES_BIN`, and `AOP_BWRAP_BIN` may override their respective executables.
 
+For Hermes in either non-danger sandbox, AOP seeds a persistent task-local Hermes home under
+`.aop/provider-state/<task>/` from the authenticated profile. Hermes can read the existing
+configuration, credentials, skills, hooks, and memories even when their host filesystem is
+read-only, while new session databases, logs, token refreshes, and caches stay isolated from the
+global Hermes home. The same state is reused by `aop resume` and removed with the task worktree;
+it requires neither root access nor filesystem overlay support, and no preparation beyond normal
+Hermes authentication. `danger-full-access` keeps Hermes's native filesystem behavior.
+
 For a file-producing task, declare each expected path relative to the run's output directory:
 
 ```sh
@@ -254,6 +262,7 @@ Runtime state lives under the ignored `.aop/` directory:
 ├── integrations/       successful integration audit records
 ├── locks/              per-task execution/checkpoint locks
 ├── overlays/<task>/    private copy-on-write upper layers for aop exec
+├── provider-state/     task-local mutable provider profiles
 ├── runs/<run-id>/      request, result, logs, final message, and accepted artifacts
 ├── tasks/               recorded task bases and worktree paths
 ├── worktrees/          one isolated checkout per task
@@ -305,6 +314,7 @@ AOP_ROOT        main Git worktree
 AOP_TASK        stable task identifier
 AOP_WORKTREE    isolated task worktree
 AOP_CACHE_DIR   shared cache root
+AOP_PROVIDER_STATE_DIR  task-local provider runtime state
 AOP_RUN_ID      current structured run identifier (model runs only)
 ```
 

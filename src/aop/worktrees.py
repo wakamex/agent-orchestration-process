@@ -161,6 +161,9 @@ class WorktreeManager:
                 if metadata_path.exists():
                     metadata_path.unlink()
                 shutil.rmtree(self.state_dir / "overlays" / task, ignore_errors=True)
+                shutil.rmtree(
+                    self.state_dir / "provider-state" / task, ignore_errors=True
+                )
 
     def metadata(self, task: str) -> TaskMetadata:
         self._validate_task(task)

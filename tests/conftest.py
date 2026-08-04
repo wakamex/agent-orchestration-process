@@ -298,9 +298,13 @@ print(json.dumps({{"event": "result", "result": result}}), flush=True)
 
 
 @pytest.fixture
-def fake_hermes(tmp_path: Path) -> Path:
+def fake_hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     executable = tmp_path / "hermes"
     state_path = tmp_path / "hermes-session.json"
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    (hermes_home / "auth.json").write_text("{}\n")
+    monkeypatch.setenv("HERMES_HOME", os.fspath(hermes_home))
     executable.write_text(
         f"""#!{sys.executable}
 import json
@@ -309,7 +313,11 @@ import pathlib
 import sys
 
 args = sys.argv[1:]
-state_path = pathlib.Path({os.fspath(state_path)!r})
+state_path = (
+    pathlib.Path(os.environ["HERMES_HOME"]) / "fake-state.json"
+    if os.environ.get("AOP_FAKE_HERMES_STATE_IN_HOME")
+    else pathlib.Path({os.fspath(state_path)!r})
+)
 
 if args[:2] == ["sessions", "export"]:
     requested = args[args.index("--session-id") + 1]

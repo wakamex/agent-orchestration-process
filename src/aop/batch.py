@@ -287,8 +287,13 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
     if not TASK_ID.fullmatch(task_id):
         raise AOPError(f"{label}.id is not a valid task id: {task_id}")
     agent = value.get("agent", "codex")
-    if not isinstance(agent, str) or agent not in {"codex", "claude", "agy"}:
-        raise AOPError(f"{label}.agent must be one of: agy, claude, codex")
+    if not isinstance(agent, str) or agent not in {
+        "codex",
+        "claude",
+        "agy",
+        "hermes",
+    }:
+        raise AOPError(f"{label}.agent must be one of: agy, claude, codex, hermes")
 
     prompt = value.get("prompt")
     prompt_file = value.get("prompt_file")

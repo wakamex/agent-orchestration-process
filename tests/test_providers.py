@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from aop.runner import AgyAdapter, AgentRunner, ClaudeAdapter
+from aop.runner import AgyAdapter, AgentRunner, ClaudeAdapter, HermesAdapter
 from aop.worktrees import AOPError, WorktreeManager
 
 
@@ -228,3 +228,123 @@ def test_scratch_write_only_mounts_the_task_scratch_directory(
     assert (worktree.path / "scratch" / "analysis.txt").read_text() == "allowed"
     assert not (worktree.path / "agent-write.txt").exists()
     assert not (repository / "main-write.txt").exists()
+
+
+def test_hermes_run_and_exact_resume_report_per_turn_usage(
+    repository: Path,
+    fake_hermes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes)))
+
+    first = runner.run(
+        task="hermes-task",
+        prompt="first",
+        model="deepseek/deepseek-v4-flash-0731",
+        effort="high",
+        timeout_seconds=5,
+    )
+    resumed = AgentRunner(manager).resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded
+    assert first.provider == "hermes"
+    assert first.model == "deepseek/deepseek-v4-flash-0731"
+    assert first.effort == "high"
+    assert first.final_message == "answer:first"
+    assert first.command[0] == "bwrap"
+    assert ["--provider", "nous"] == first.command[
+        first.command.index("--provider") : first.command.index("--provider") + 2
+    ]
+    assert ["--model", "deepseek/deepseek-v4-flash-0731"] == first.command[
+        first.command.index("--model") : first.command.index("--model") + 2
+    ]
+    assert ["--reasoning", "high"] == first.command[
+        first.command.index("--reasoning") : first.command.index("--reasoning") + 2
+    ]
+    assert all(
+        option in first.command
+        for option in ["-Q", "--yolo", "--accept-hooks", "--source"]
+    )
+    assert first.usage.input_tokens == 15
+    assert first.usage.cached_input_tokens == 3
+    assert first.usage.output_tokens == 5
+    assert first.usage.reasoning_output_tokens == 1
+    assert first.api_equivalent_cost is not None
+    assert first.api_equivalent_cost.amount_usd == 0.000001
+    assert first.api_equivalent_cost.estimated
+
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert resumed.final_message == "answer:second"
+    assert ["--resume", first.session_id] == resumed.command[
+        resumed.command.index("--resume") : resumed.command.index("--resume") + 2
+    ]
+    assert "--no-restore-cwd" in resumed.command
+    assert ["--provider", "nous"] == resumed.command[
+        resumed.command.index("--provider") : resumed.command.index("--provider") + 2
+    ]
+    assert ["--model", "deepseek/deepseek-v4-flash-0731"] == resumed.command[
+        resumed.command.index("--model") : resumed.command.index("--model") + 2
+    ]
+    assert ["--reasoning", "high"] == resumed.command[
+        resumed.command.index("--reasoning") : resumed.command.index("--reasoning") + 2
+    ]
+    assert resumed.usage == first.usage
+    assert resumed.api_equivalent_cost is not None
+    assert resumed.api_equivalent_cost.amount_usd == 0.000001
+
+
+def test_hermes_supports_workspace_sandbox_and_artifacts(
+    repository: Path, fake_hermes: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes)))
+
+    result = runner.run(
+        task="hermes-artifact",
+        prompt="CHECK_HERMES_SANDBOX",
+        model="deepseek/deepseek-v4-flash-0731",
+        sandbox="workspace-write",
+        artifacts=["report.md"],
+    )
+
+    assert result.succeeded
+    assert (manager.get("hermes-artifact").path / "agent-write.txt").read_text() == (
+        "allowed"
+    )
+    assert not (repository / "main-write.txt").exists()
+    artifact = result.artifacts[0]
+    assert (
+        manager.state_dir / "runs" / result.run_id / artifact.archive_path
+    ).read_text() == "# Hermes artifact\n"
+
+
+def test_hermes_rejects_an_unsupported_effort(
+    repository: Path, fake_hermes: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), HermesAdapter(os.fspath(fake_hermes))
+    )
+
+    with pytest.raises(AOPError, match="Hermes effort must be one of"):
+        runner.run(task="bad-hermes", prompt="test", effort="extreme")
+
+
+def test_hermes_nonzero_exit_is_a_normalized_failure(
+    repository: Path, fake_hermes: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), HermesAdapter(os.fspath(fake_hermes))
+    )
+
+    result = runner.run(
+        task="failed-hermes",
+        prompt="FAIL",
+        model="deepseek/deepseek-v4-flash-0731",
+    )
+
+    assert not result.succeeded
+    assert result.exit_code == 3
+    assert result.error == "Hermes exited with status 3"

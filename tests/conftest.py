@@ -295,3 +295,100 @@ print(json.dumps({{"event": "result", "result": result}}), flush=True)
     )
     executable.chmod(0o755)
     return executable
+
+
+@pytest.fixture
+def fake_hermes(tmp_path: Path) -> Path:
+    executable = tmp_path / "hermes"
+    state_path = tmp_path / "hermes-session.json"
+    executable.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+state_path = pathlib.Path({os.fspath(state_path)!r})
+
+if args[:2] == ["sessions", "export"]:
+    requested = args[args.index("--session-id") + 1]
+    if not state_path.exists():
+        print(f"Session '{{requested}}' not found.")
+        raise SystemExit(0)
+    state = json.loads(state_path.read_text())
+    if state["id"] != requested:
+        print(f"Session '{{requested}}' not found.")
+        raise SystemExit(0)
+    print(json.dumps(state))
+    raise SystemExit(0)
+
+if args[0] != "chat" or "-Q" not in args:
+    raise RuntimeError(f"unexpected Hermes invocation: {{args}}")
+
+prompt = args[args.index("-q") + 1]
+session_id = (
+    args[args.index("--resume") + 1]
+    if "--resume" in args
+    else "44ad6c7c-5213-4af8-a1d5-4a742c85cbcf"
+)
+state = (
+    json.loads(state_path.read_text())
+    if state_path.exists()
+    else {{
+        "id": session_id,
+        "model": args[args.index("--model") + 1],
+        "billing_provider": "nous",
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "estimated_cost_usd": 0.0,
+        "actual_cost_usd": None,
+        "cost_source": "provider_models_api",
+        "pricing_version": "nous-models-2026-08-03",
+        "messages": [],
+    }}
+)
+
+if prompt.startswith("CHECK_HERMES_SANDBOX"):
+    pathlib.Path("agent-write.txt").write_text("allowed")
+    pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("report.md").write_text(
+        "# Hermes artifact\\n"
+    )
+    for protected in [
+        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path(".git"),
+    ]:
+        try:
+            protected.write_text("forbidden")
+        except OSError:
+            pass
+        else:
+            raise RuntimeError(f"sandbox allowed write to {{protected}}")
+
+state["input_tokens"] += 10
+state["cache_read_tokens"] += 3
+state["cache_write_tokens"] += 2
+state["output_tokens"] += 4
+state["reasoning_tokens"] += 1
+state["estimated_cost_usd"] += 0.000001
+state["messages"].extend([
+    {{"id": f"user-{{len(state['messages'])}}", "role": "user", "content": prompt}},
+    {{
+        "id": f"assistant-{{len(state['messages']) + 1}}",
+        "role": "assistant",
+        "content": f"answer:{{prompt}}",
+    }},
+])
+state_path.write_text(json.dumps(state))
+
+print(f"narrated reasoning for {{prompt}}\\nanswer:{{prompt}}", flush=True)
+print(f"session_id: {{session_id}}", file=sys.stderr, flush=True)
+if prompt == "FAIL":
+    raise SystemExit(3)
+"""
+    )
+    executable.chmod(0o755)
+    return executable

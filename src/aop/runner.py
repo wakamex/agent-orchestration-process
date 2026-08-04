@@ -811,6 +811,284 @@ class AgyAdapter:
         }
 
 
+@dataclass(frozen=True)
+class _HermesSession:
+    model: str | None
+    final_message: str | None
+    last_assistant_id: str | None
+    usage: TokenUsage
+    cost_usd: float | None
+    cost_estimated: bool
+    cost_source: str
+    pricing_version: str
+
+
+class HermesAdapter:
+    provider = "hermes"
+    EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_HERMES_BIN", "hermes")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        if effort is not None and effort not in self.EFFORTS:
+            raise AOPError(
+                f"Hermes effort must be one of: {', '.join(sorted(self.EFFORTS))}"
+            )
+        return model, effort
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        before = self._session(request.session_id, worktree.path, environment)
+        command = _provider_command(
+            self._command(request), request, worktree, environment
+        )
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=None,
+            timeout_seconds=request.timeout_seconds,
+            is_response=lambda line: bool(line.strip()),
+        )
+        _atomic_write(run_dir / "events.jsonl", capture.stdout)
+        _atomic_write(run_dir / "stderr.log", capture.stderr)
+        reported_session_id = self._session_id(capture.stderr)
+        session_id = reported_session_id or request.session_id
+        after = self._session(session_id, worktree.path, environment)
+        final_message = self._final_message(before, after, capture.stdout)
+        if final_message is not None:
+            _atomic_write(run_dir / "last-message.txt", final_message)
+        baseline = before if request.session_id == session_id else None
+        usage = self._usage_delta(baseline, after)
+        cost = self._cost_delta(baseline, after, request.model)
+
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif capture.exit_code:
+            error = self._exit_error(capture.stderr, capture.exit_code)
+        elif session_id is None:
+            error = "Hermes did not report a session ID"
+        elif final_message is None:
+            error = "Hermes did not emit a final response"
+        else:
+            error = None
+        return RunResult(
+            run_id=request.run_id,
+            provider=self.provider,
+            task=request.task,
+            model=(after.model if after else None) or request.model,
+            effort=request.effort,
+            session_id=session_id,
+            command=command,
+            started_at=started_at,
+            finished_at=_now(),
+            duration_seconds=capture.duration_seconds,
+            time_to_first_event_seconds=capture.first_event_seconds,
+            time_to_first_response_seconds=capture.first_response_seconds,
+            exit_code=capture.exit_code,
+            timed_out=capture.timed_out,
+            error=error,
+            final_message=final_message,
+            usage=usage,
+            api_equivalent_cost=cost,
+        )
+
+    def _command(self, request: RunRequest) -> list[str]:
+        command = [
+            self.binary,
+            "chat",
+            "-Q",
+            "--yolo",
+            "--accept-hooks",
+            "--source",
+            "tool",
+        ]
+        if request.session_id:
+            command.extend(["--resume", request.session_id, "--no-restore-cwd"])
+        command.extend(["--provider", "nous"])
+        if request.model:
+            command.extend(["--model", request.model])
+        if request.effort:
+            command.extend(["--reasoning", request.effort])
+        command.extend(["-q", request.prompt])
+        return command
+
+    def _session(
+        self,
+        session_id: str | None,
+        cwd: Path,
+        environment: dict[str, str],
+    ) -> _HermesSession | None:
+        if session_id is None:
+            return None
+        try:
+            exported = subprocess.run(
+                [
+                    self.binary,
+                    "sessions",
+                    "export",
+                    "-",
+                    "--format",
+                    "jsonl",
+                    "--session-id",
+                    session_id,
+                ],
+                cwd=cwd,
+                env=environment,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+        if exported.returncode:
+            return None
+        try:
+            raw = json.loads(exported.stdout)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(raw, dict) or raw.get("id") != session_id:
+            return None
+
+        uncached_input = self._integer(raw.get("input_tokens"))
+        cached_input = self._integer(raw.get("cache_read_tokens"))
+        cache_write = self._integer(raw.get("cache_write_tokens"))
+        visible_output = self._integer(raw.get("output_tokens"))
+        reasoning_output = self._integer(raw.get("reasoning_tokens"))
+        actual_cost = self._number(raw.get("actual_cost_usd"))
+        estimated_cost = self._number(raw.get("estimated_cost_usd"))
+        source = raw.get("cost_source")
+        version = raw.get("pricing_version")
+        model = raw.get("model")
+        final_message = None
+        last_assistant_id = None
+        messages = raw.get("messages")
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    final_message = content.rstrip()
+                    message_id = message.get("id")
+                    last_assistant_id = (
+                        message_id if isinstance(message_id, str) else None
+                    )
+                    break
+        return _HermesSession(
+            model=model if isinstance(model, str) else None,
+            final_message=final_message,
+            last_assistant_id=last_assistant_id,
+            usage=TokenUsage(
+                input_tokens=uncached_input + cached_input + cache_write,
+                cached_input_tokens=cached_input,
+                output_tokens=visible_output + reasoning_output,
+                reasoning_output_tokens=reasoning_output,
+            ),
+            cost_usd=actual_cost if actual_cost is not None else estimated_cost,
+            cost_estimated=actual_cost is None,
+            cost_source=source if isinstance(source, str) else "session_accounting",
+            pricing_version=(
+                version if isinstance(version, str) else "hermes-cli-reported"
+            ),
+        )
+
+    @staticmethod
+    def _final_message(
+        before: _HermesSession | None,
+        after: _HermesSession | None,
+        stdout: str,
+    ) -> str | None:
+        if after and after.final_message:
+            is_new = before is None or (
+                after.last_assistant_id is None
+                or after.last_assistant_id != before.last_assistant_id
+            )
+            if is_new:
+                return after.final_message
+        return stdout.rstrip() or None
+
+    @staticmethod
+    def _session_id(stderr: str) -> str | None:
+        for line in reversed(stderr.splitlines()):
+            key, separator, value = line.strip().partition(":")
+            if separator and key == "session_id" and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _exit_error(stderr: str, exit_code: int) -> str:
+        detail = "\n".join(
+            line
+            for line in stderr.splitlines()
+            if line.strip() and not line.strip().startswith("session_id:")
+        ).strip()
+        return detail or f"Hermes exited with status {exit_code}"
+
+    @staticmethod
+    def _usage_delta(
+        before: _HermesSession | None, after: _HermesSession | None
+    ) -> TokenUsage:
+        if after is None:
+            return TokenUsage()
+        previous = before.usage if before else TokenUsage()
+        return TokenUsage(
+            input_tokens=max(after.usage.input_tokens - previous.input_tokens, 0),
+            cached_input_tokens=max(
+                after.usage.cached_input_tokens - previous.cached_input_tokens, 0
+            ),
+            output_tokens=max(after.usage.output_tokens - previous.output_tokens, 0),
+            reasoning_output_tokens=max(
+                after.usage.reasoning_output_tokens - previous.reasoning_output_tokens,
+                0,
+            ),
+        )
+
+    @staticmethod
+    def _cost_delta(
+        before: _HermesSession | None,
+        after: _HermesSession | None,
+        requested_model: str | None,
+    ) -> EstimatedCost | None:
+        if after is None or after.cost_usd is None:
+            return None
+        previous = before.cost_usd if before and before.cost_usd is not None else 0.0
+        amount = max(after.cost_usd - previous, 0.0)
+        model = after.model or requested_model or "hermes"
+        return EstimatedCost(
+            amount_usd=round(amount, 8),
+            currency="USD",
+            estimated=after.cost_estimated,
+            model=model,
+            priced_as=model,
+            pricing_version=after.pricing_version,
+            pricing_source=f"Hermes CLI session accounting ({after.cost_source})",
+            long_context_pricing=False,
+        )
+
+    @staticmethod
+    def _integer(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(value, 0)
+
+    @staticmethod
+    def _number(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return max(float(value), 0.0)
+
+
 def _provider_command(
     command: list[str],
     request: RunRequest,
@@ -852,6 +1130,8 @@ def adapter_for(agent: str) -> AgentAdapter:
         return ClaudeAdapter()
     if agent == "agy":
         return AgyAdapter()
+    if agent == "hermes":
+        return HermesAdapter()
     raise AOPError(f"unknown agent: {agent}")
 
 

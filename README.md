@@ -14,9 +14,9 @@ each project.
 
 ## Reference implementation
 
-This repository includes a dependency-free Python CLI for running Codex, Claude Code, and
-Antigravity (`agy`) concurrently in isolated Git worktrees. Each adapter records a normalized
-result and resumes the exact provider session associated with an earlier run.
+This repository includes a dependency-free Python CLI for running Codex, Claude Code,
+Antigravity (`agy`), and Hermes concurrently in isolated Git worktrees. Each adapter records a
+normalized result and resumes the exact provider session associated with an earlier run.
 
 Install the CLI from this checkout:
 
@@ -53,6 +53,8 @@ aop run task-b --agent claude --model sonnet --effort high \
   --prompt "Implement the parser and its tests"
 aop run task-c --agent agy --model gemini-3.5-flash --effort low \
   --prompt "Add adversarial parser tests"
+aop run task-d --agent hermes --model deepseek/deepseek-v4-flash-0731 --effort high \
+  --prompt "Investigate and fix the failing benchmark"
 ```
 
 `aop run` prints the agent's final message to stdout and its AOP run ID, provider session ID, and
@@ -83,7 +85,7 @@ worktree's `.git` pointer read-only. `scratch-write` leaves the task read-only a
 `scratch/` directory plus the shared cache writable; use it for agents that need working space but
 must not edit the repository. `danger-full-access` explicitly skips `bwrap`. Configured
 authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`,
-`AOP_AGY_BIN`, and `AOP_BWRAP_BIN` may override their respective executables.
+`AOP_AGY_BIN`, `AOP_HERMES_BIN`, and `AOP_BWRAP_BIN` may override their respective executables.
 
 For a file-producing task, declare each expected path relative to the run's output directory:
 
@@ -114,6 +116,20 @@ task scratch, but receives a fresh output directory and only validates artifacts
 Claude accepts its normal model aliases and effort levels `low`, `medium`, `high`, `xhigh`, and
 `max`. Agy accepts its native model names and effort levels `low`, `medium`, and `high`.
 
+Hermes uses the Nous Portal provider. Install Hermes 0.20 or newer and authenticate once; on a
+headless host use:
+
+```sh
+hermes auth add nous --type oauth --no-browser
+```
+
+Pass a Nous model ID unchanged with `--model`; AOP passes `--effort` through as Hermes's native
+reasoning level. Supported levels are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+and `ultra`. AOP uses Hermes's quiet programmatic mode, tags sessions as tool-created, and resumes
+the exact session without restoring its old working directory. It reasserts the original Nous
+model and reasoning level on resume because Hermes otherwise falls back to its current configured
+defaults.
+
 The agy default is `gemini-3.5-flash` at `medium` effort.
 
 For example, `--model gemini-3.5-flash --effort low` is passed directly to agy. An exact model
@@ -131,10 +147,12 @@ Luna; GPT-5.5; GPT-5.4, mini, and nano; and GPT-5.3-Codex. It accounts for docum
 multipliers but cannot account for GPT-5.6 cache-write premiums because Codex currently reports
 cached reads without identifying cache writes. If the model is implicit or unknown, token and timing
 metrics remain available while cost is reported as `n/a`. Claude's result stream supplies its
-resolved model, token usage, and CLI-reported USD API-equivalent cost. Agy currently supplies timing
-and token usage from its structured result stream. AOP records Agy's provider-reported duration
-separately from its own wall-clock duration. Agy does not report API-equivalent cost, so that field
-remains `n/a`.
+resolved model, token usage, and CLI-reported USD API-equivalent cost. Hermes's session accounting
+supplies its resolved model, cache and reasoning token buckets, and provider-aware estimated or
+actual cost; AOP records the delta for each invocation so resumed turns are not double-counted. Agy
+currently supplies timing and token usage from its structured result stream. AOP records Agy's
+provider-reported duration separately from its own wall-clock duration. Agy does not report
+API-equivalent cost, so that field remains `n/a`.
 
 Run independent tasks concurrently from a TOML manifest:
 
@@ -150,9 +168,9 @@ artifacts = ["parser-report.md"]
 
 [[tasks]]
 id = "tests"
-agent = "agy"
+agent = "hermes"
 prompt = "Add adversarial parser tests"
-model = "gemini-3.1-pro"
+model = "deepseek/deepseek-v4-flash-0731"
 effort = "high"
 ```
 

@@ -60,7 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="run an agent in an isolated task worktree")
     run.add_argument("task")
-    run.add_argument("--agent", choices=["codex", "claude", "agy"], default="codex")
+    run.add_argument(
+        "--agent", choices=["codex", "claude", "agy", "hermes"], default="codex"
+    )
     run.add_argument("--base", default="HEAD", help="commit for a new task worktree")
     run.add_argument("--model", help="override the agent model")
     run.add_argument(

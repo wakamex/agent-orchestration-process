@@ -91,6 +91,7 @@ class RunStore:
 
 class AgentAdapter(Protocol):
     provider: str
+    modes: frozenset[str]
 
     def normalize_options(
         self, model: str | None, effort: str | None
@@ -107,6 +108,7 @@ class AgentAdapter(Protocol):
 
 class CodexAdapter:
     provider = "codex"
+    modes = frozenset({"agent"})
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_CODEX_BIN", "codex")
@@ -236,6 +238,7 @@ class CodexAdapter:
         return RunResult(
             run_id=request.run_id,
             provider=request.provider,
+            mode=request.mode,
             task=request.task,
             model=request.model,
             effort=request.effort,
@@ -459,6 +462,7 @@ def _capture_process(
 
 class ClaudeAdapter:
     provider = "claude"
+    modes = frozenset({"agent"})
     EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
     def __init__(self, binary: str | None = None):
@@ -514,6 +518,7 @@ class ClaudeAdapter:
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
+            mode=request.mode,
             task=request.task,
             model=parsed["model"] or request.model,
             effort=request.effort,
@@ -629,6 +634,7 @@ class ClaudeAdapter:
 
 class AgyAdapter:
     provider = "agy"
+    modes = frozenset({"agent"})
     EFFORTS = {"low", "medium", "high"}
 
     def __init__(self, binary: str | None = None):
@@ -702,6 +708,7 @@ class AgyAdapter:
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
+            mode=request.mode,
             task=request.task,
             model=parsed["model"] or request.model,
             effort=request.effort,
@@ -841,6 +848,7 @@ class _HermesSession:
 
 class HermesAdapter:
     provider = "hermes"
+    modes = frozenset({"agent", "participant"})
     DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
     EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
@@ -901,6 +909,7 @@ class HermesAdapter:
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
+            mode=request.mode,
             task=request.task,
             model=(after.model if after else None) or request.model,
             effort=request.effort,
@@ -920,15 +929,20 @@ class HermesAdapter:
         )
 
     def _command(self, request: RunRequest) -> list[str]:
-        command = [
-            self.binary,
-            "chat",
-            "-Q",
-            "--yolo",
-            "--accept-hooks",
-            "--source",
-            "tool",
-        ]
+        command = [self.binary, "chat", "-Q"]
+        if request.mode == "participant":
+            command.extend(
+                [
+                    "--safe-mode",
+                    "--toolsets",
+                    "__aop_no_tools__",
+                    "--max-turns",
+                    "1",
+                ]
+            )
+        else:
+            command.extend(["--yolo", "--accept-hooks"])
+        command.extend(["--source", "tool"])
         if request.session_id:
             command.extend(["--resume", request.session_id, "--no-restore-cwd"])
         command.extend(["--provider", "nous"])
@@ -1328,10 +1342,12 @@ class AgentRunner:
         base: str = "HEAD",
         model: str | None = None,
         effort: str | None = None,
+        mode: str = "agent",
         sandbox: str = "workspace-write",
         timeout_seconds: float | None = None,
         artifacts: Sequence[str] = (),
     ) -> RunResult:
+        self._validate_mode(mode)
         model, effort = self.adapter.normalize_options(model, effort)
         request = self._request(
             task=task,
@@ -1339,6 +1355,7 @@ class AgentRunner:
             base=base,
             model=model,
             effort=effort,
+            mode=mode,
             sandbox=sandbox,
             timeout_seconds=timeout_seconds,
             artifacts=artifacts,
@@ -1363,6 +1380,7 @@ class AgentRunner:
                     f"run uses {parent_request.provider}, not {self.adapter.provider}"
                 )
             self.adapter = adapter_for(parent_request.provider)
+        self._validate_mode(parent_request.mode)
         if not parent_result.session_id:
             raise AOPError(f"run has no resumable agent session: {run_id}")
         _task_lock_held = _task_lock_held or (
@@ -1375,6 +1393,7 @@ class AgentRunner:
             base=parent_request.base,
             model=parent_request.model,
             effort=parent_request.effort,
+            mode=parent_request.mode,
             sandbox=parent_request.sandbox,
             timeout_seconds=(
                 timeout_seconds
@@ -1427,6 +1446,10 @@ class AgentRunner:
                 "AOP_RUN_ID": request.run_id,
             }
         )
+        if request.provider == "hermes":
+            environment.pop("HERMES_NO_TOOLS", None)
+            if request.mode == "participant":
+                environment.pop("HERMES_KANBAN_TASK", None)
         if request.provider == "agy":
             _prepare_agy_dir(
                 _agy_source_dir(environment), provider_state / "agy" / "gemini"
@@ -1446,6 +1469,7 @@ class AgentRunner:
         base: str,
         model: str | None,
         effort: str | None,
+        mode: str,
         sandbox: str,
         timeout_seconds: float | None,
         session_id: str | None = None,
@@ -1455,6 +1479,7 @@ class AgentRunner:
         return RunRequest(
             run_id=str(uuid.uuid4()),
             provider=self.adapter.provider,
+            mode=mode,
             task=task,
             prompt=prompt,
             base=base,
@@ -1467,6 +1492,12 @@ class AgentRunner:
             artifacts=normalize_artifacts(artifacts),
             created_at=_now(),
         )
+
+    def _validate_mode(self, mode: str) -> None:
+        if mode not in {"agent", "participant"}:
+            raise AOPError(f"unknown agent mode: {mode}")
+        if mode not in self.adapter.modes:
+            raise AOPError(f"{self.adapter.provider} does not support {mode} mode")
 
     def _get_or_create_worktree(self, task: str, base: str) -> Worktree:
         for worktree in self.manager.list():

@@ -31,6 +31,19 @@ def test_cli_reports_version_and_provider_neutral_resume_help(
     help_text = parser.format_help()
     assert "resume an agent session from a run" in help_text
     assert "resume the Codex session" not in help_text
+    args = parser.parse_args(
+        [
+            "run",
+            "player",
+            "--agent",
+            "hermes",
+            "--mode",
+            "participant",
+            "--prompt",
+            "play",
+        ]
+    )
+    assert args.mode == "participant"
 
 
 def test_run_persists_structured_codex_artifacts(

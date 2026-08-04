@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from aop.runner import AgyAdapter, AgentRunner, ClaudeAdapter, HermesAdapter
+from aop.runner import (
+    AgyAdapter,
+    AgentRunner,
+    ClaudeAdapter,
+    CodexAdapter,
+    HermesAdapter,
+)
 from aop.worktrees import AOPError, WorktreeManager
 
 
@@ -414,6 +420,87 @@ def test_hermes_run_and_exact_resume_report_per_turn_usage(
     assert resumed.usage == first.usage
     assert resumed.api_equivalent_cost is not None
     assert resumed.api_equivalent_cost.amount_usd == 0.000001
+
+
+def test_hermes_participant_mode_is_tool_free_bounded_and_stable_across_resume(
+    repository: Path,
+    fake_hermes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "inherited-worker")
+    monkeypatch.setenv("HERMES_NO_TOOLS", "inherited-internal-override")
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes)))
+
+    first = runner.run(
+        task="hermes-participant",
+        prompt="CHECK_PARTICIPANT first",
+        mode="participant",
+        sandbox="scratch-write",
+        timeout_seconds=5,
+    )
+    resumed = AgentRunner(manager).resume(
+        run_id=first.run_id,
+        prompt="CHECK_PARTICIPANT second",
+    )
+
+    assert first.succeeded
+    assert resumed.succeeded
+    assert first.mode == "participant"
+    assert resumed.mode == "participant"
+    assert resumed.session_id == first.session_id
+    for result in (first, resumed):
+        assert "--safe-mode" in result.command
+        assert ["--toolsets", "__aop_no_tools__"] == result.command[
+            result.command.index("--toolsets") : result.command.index("--toolsets") + 2
+        ]
+        assert ["--max-turns", "1"] == result.command[
+            result.command.index("--max-turns") : result.command.index("--max-turns")
+            + 2
+        ]
+        assert "--yolo" not in result.command
+        assert "--accept-hooks" not in result.command
+        assert "--no-tools" not in result.command
+
+    first_request = json.loads(
+        (manager.state_dir / "runs" / first.run_id / "request.json").read_text()
+    )
+    resumed_request = json.loads(
+        (manager.state_dir / "runs" / resumed.run_id / "request.json").read_text()
+    )
+    assert first_request["mode"] == "participant"
+    assert resumed_request["mode"] == "participant"
+
+
+@pytest.mark.parametrize(
+    ("adapter", "provider"),
+    [
+        (CodexAdapter, "codex"),
+        (ClaudeAdapter, "claude"),
+        (AgyAdapter, "agy"),
+    ],
+)
+def test_unsupported_adapters_reject_participant_mode_before_creating_a_worktree(
+    repository: Path,
+    fake_codex: Path,
+    fake_claude: Path,
+    fake_agy: Path,
+    adapter: type[CodexAdapter] | type[ClaudeAdapter] | type[AgyAdapter],
+    provider: str,
+) -> None:
+    binaries = {"codex": fake_codex, "claude": fake_claude, "agy": fake_agy}
+    binary = binaries[provider]
+    manager = WorktreeManager.discover(repository)
+
+    with pytest.raises(AOPError, match=f"{provider} does not support participant mode"):
+        AgentRunner(manager, adapter(os.fspath(binary))).run(
+            task=f"unsupported-{provider}",
+            prompt="test",
+            mode="participant",
+        )
+
+    assert manager.list() == []
 
 
 def test_hermes_supports_workspace_sandbox_and_artifacts(

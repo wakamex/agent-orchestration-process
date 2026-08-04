@@ -367,6 +367,18 @@ if args[0] != "chat" or "-Q" not in args:
     raise RuntimeError(f"unexpected Hermes invocation: {{args}}")
 
 prompt = args[args.index("-q") + 1]
+if prompt.startswith("CHECK_PARTICIPANT"):
+    required = {{"-Q", "--safe-mode", "--toolsets", "--max-turns"}}
+    if not required.issubset(args):
+        raise RuntimeError(f"missing participant flags: {{args}}")
+    if args[args.index("--toolsets") + 1] != "__aop_no_tools__":
+        raise RuntimeError(f"unexpected participant toolset: {{args}}")
+    if args[args.index("--max-turns") + 1] != "1":
+        raise RuntimeError(f"participant turn limit is not one: {{args}}")
+    if "--yolo" in args or "--accept-hooks" in args:
+        raise RuntimeError(f"participant inherited coding-agent flags: {{args}}")
+    if os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_NO_TOOLS"):
+        raise RuntimeError("participant inherited internal Hermes mode state")
 session_id = (
     args[args.index("--resume") + 1]
     if "--resume" in args

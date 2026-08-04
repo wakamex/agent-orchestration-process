@@ -21,6 +21,7 @@ id = "parser"
 agent = "agy"
 prompt_file = "prompt.md"
 model = "test-model"
+mode = "agent"
 effort = "xhigh"
 sandbox = "workspace-write"
 timeout = 30
@@ -39,6 +40,7 @@ prompt = "Add tests"
     assert tasks[0].prompt_source == os.fspath(tmp_path / "prompt.md")
     assert tasks[0].agent == "agy"
     assert tasks[0].model == "test-model"
+    assert tasks[0].mode == "agent"
     assert tasks[0].effort == "xhigh"
     assert tasks[0].sandbox == "workspace-write"
     assert tasks[0].timeout_seconds == 30
@@ -207,6 +209,41 @@ prompt = "three"
     assert result.tasks[0].model == "claude-test-model"
     assert result.tasks[1].model == "gemini-3.1-pro"
     assert result.tasks[2].model == "deepseek/deepseek-v4-flash-0731"
+
+
+def test_batch_runs_hermes_participant_mode_and_records_provenance(
+    repository: Path,
+    fake_hermes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
+    manifest = repository / "participant.toml"
+    manifest.write_text(
+        """
+[[tasks]]
+id = "player"
+agent = "hermes"
+mode = "participant"
+prompt = "CHECK_PARTICIPANT batch"
+sandbox = "scratch-write"
+"""
+    )
+    manager = WorktreeManager.discover(repository)
+
+    result = BatchRunner(manager).run(manifest)
+
+    assert result.succeeded
+    assert result.tasks[0].mode == "participant"
+    run_id = result.tasks[0].run_id
+    assert run_id is not None
+    request = json.loads(
+        (manager.state_dir / "runs" / run_id / "request.json").read_text()
+    )
+    persisted = json.loads(
+        (manager.state_dir / "runs" / run_id / "result.json").read_text()
+    )
+    assert request["mode"] == "participant"
+    assert persisted["mode"] == "participant"
 
 
 @pytest.mark.parametrize(

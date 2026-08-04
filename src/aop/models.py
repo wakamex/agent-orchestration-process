@@ -12,6 +12,7 @@ from .pricing import EstimatedCost, TokenUsage
 class RunRequest:
     run_id: str
     provider: str
+    mode: str
     task: str
     prompt: str
     base: str
@@ -30,6 +31,7 @@ class RunRequest:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> RunRequest:
         fields = dict(value)
+        fields.setdefault("mode", "agent")
         fields["artifacts"] = tuple(fields.get("artifacts", ()))
         return cls(**fields)
 
@@ -46,6 +48,7 @@ class RunArtifact:
 class RunResult:
     run_id: str
     provider: str
+    mode: str
     task: str
     model: str | None
     effort: str | None
@@ -84,6 +87,7 @@ class RunResult:
     def from_dict(cls, value: dict[str, Any]) -> RunResult:
         fields = dict(value)
         fields.pop("succeeded", None)
+        fields.setdefault("mode", "agent")
         fields.setdefault("model", None)
         fields.setdefault("effort", None)
         fields.setdefault("time_to_first_event_seconds", None)

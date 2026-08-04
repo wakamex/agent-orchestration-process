@@ -7,9 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from aop.integration import CheckpointManager, IntegrationManager
+from aop.integration import (
+    CheckpointManager,
+    IntegrationManager,
+    _latest_resumable_run_id,
+    _source_run_ids,
+)
 from aop.locks import task_lock_path
-from aop.runner import AgentRunner, CodexAdapter
+from aop.runner import AgentRunner, CodexAdapter, HermesAdapter
 from aop.worktrees import AOPError, WorktreeManager
 
 from conftest import git
@@ -56,6 +61,33 @@ def test_checkpoint_and_integrate_linear_task(
     assert validation_request["sandbox"] == "workspace-write"
     assert result.resolution_run_ids == []
     assert manager.metadata("feature").base_commit == result.integrated_head
+
+
+def test_participant_runs_are_not_treated_as_authoring_provenance(
+    repository: Path,
+    fake_codex: Path,
+    fake_hermes: Path,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    author = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+        task="mixed-purpose",
+        prompt="author",
+        timeout_seconds=5,
+    )
+    participant = AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes))).run(
+        task="mixed-purpose",
+        prompt="participant",
+        mode="participant",
+        sandbox="scratch-write",
+        timeout_seconds=5,
+    )
+
+    assert author.succeeded
+    assert participant.succeeded
+    assert _latest_resumable_run_id(manager.state_dir, "mixed-purpose") == (
+        author.run_id
+    )
+    assert _source_run_ids(manager.state_dir, "mixed-purpose") == [author.run_id]
 
 
 def test_integration_can_remove_worktree(repository: Path, fake_codex: Path) -> None:

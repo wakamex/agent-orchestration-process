@@ -18,6 +18,7 @@ from .worktrees import AOPError, TASK_ID, WorktreeManager
 
 
 EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+MODES = {"agent", "participant"}
 SANDBOXES = {"workspace-write", "scratch-write", "danger-full-access"}
 TASK_FIELDS = {
     "id",
@@ -26,6 +27,7 @@ TASK_FIELDS = {
     "prompt_file",
     "base",
     "model",
+    "mode",
     "effort",
     "sandbox",
     "timeout",
@@ -46,6 +48,7 @@ class BatchTask:
     base: str = "HEAD"
     model: str | None = None
     effort: str | None = None
+    mode: str = "agent"
     sandbox: str = "workspace-write"
     timeout_seconds: float | None = None
     artifacts: tuple[str, ...] = ()
@@ -56,6 +59,7 @@ class BatchTaskResult:
     task: str
     agent: str
     status: str
+    mode: str
     model: str | None
     effort: str | None
     run_id: str | None
@@ -158,6 +162,7 @@ class BatchRunner:
                     task=task.id,
                     agent=task.agent,
                     status="not_started",
+                    mode=task.mode,
                     model=task.model,
                     effort=task.effort,
                     run_id=None,
@@ -193,6 +198,7 @@ class BatchRunner:
                 base=task.base,
                 model=task.model,
                 effort=task.effort,
+                mode=task.mode,
                 sandbox=task.sandbox,
                 timeout_seconds=task.timeout_seconds,
                 artifacts=task.artifacts,
@@ -202,6 +208,7 @@ class BatchRunner:
                 task=task.id,
                 agent=task.agent,
                 status="error",
+                mode=task.mode,
                 model=task.model,
                 effort=task.effort,
                 run_id=None,
@@ -219,6 +226,7 @@ class BatchRunner:
             task=task.id,
             agent=task.agent,
             status="succeeded" if result.succeeded else "failed",
+            mode=result.mode,
             model=result.model,
             effort=result.effort,
             run_id=result.run_id,
@@ -320,6 +328,9 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
 
     base = _optional_string(value, "base", label) or "HEAD"
     model = _optional_string(value, "model", label)
+    mode = _optional_string(value, "mode", label) or "agent"
+    if mode not in MODES:
+        raise AOPError(f"{label}.mode must be one of: {', '.join(sorted(MODES))}")
     effort = _optional_string(value, "effort", label)
     if effort is not None and effort not in EFFORTS:
         raise AOPError(f"{label}.effort must be one of: {', '.join(sorted(EFFORTS))}")
@@ -353,6 +364,7 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
         base=base,
         model=model,
         effort=effort,
+        mode=mode,
         sandbox=sandbox,
         timeout_seconds=timeout,
         artifacts=normalize_artifacts(artifacts),

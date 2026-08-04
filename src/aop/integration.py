@@ -416,8 +416,10 @@ def _verify_metadata_path(actual: Path, recorded: str) -> None:
         raise AOPError("task metadata path does not match its registered worktree")
 
 
-def _run_artifacts(state_dir: Path, task: str) -> list[tuple[str, str, dict[str, Any]]]:
-    runs: list[tuple[str, str, dict[str, Any]]] = []
+def _run_artifacts(
+    state_dir: Path, task: str
+) -> list[tuple[str, str, dict[str, Any], dict[str, Any]]]:
+    runs: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
     for request_path in (state_dir / "runs").glob("*/request.json"):
         try:
             request: dict[str, Any] = json.loads(request_path.read_text())
@@ -428,7 +430,12 @@ def _run_artifacts(state_dir: Path, task: str) -> list[tuple[str, str, dict[str,
             continue
         if request.get("task") == task:
             runs.append(
-                (str(request.get("created_at", "")), request_path.parent.name, result)
+                (
+                    str(request.get("created_at", "")),
+                    request_path.parent.name,
+                    request,
+                    result,
+                )
             )
     return sorted(runs)
 
@@ -436,16 +443,17 @@ def _run_artifacts(state_dir: Path, task: str) -> list[tuple[str, str, dict[str,
 def _source_run_ids(state_dir: Path, task: str) -> list[str]:
     return [
         run_id
-        for _, run_id, result in _run_artifacts(state_dir, task)
-        if result.get("succeeded") is True
+        for _, run_id, request, result in _run_artifacts(state_dir, task)
+        if request.get("mode", "agent") == "agent" and result.get("succeeded") is True
     ]
 
 
 def _latest_resumable_run_id(state_dir: Path, task: str) -> str:
     resumable = [
         run_id
-        for _, run_id, result in _run_artifacts(state_dir, task)
-        if isinstance(result.get("session_id"), str)
+        for _, run_id, request, result in _run_artifacts(state_dir, task)
+        if request.get("mode", "agent") == "agent"
+        and isinstance(result.get("session_id"), str)
     ]
     if not resumable:
         raise AOPError(

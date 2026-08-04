@@ -66,6 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--base", default="HEAD", help="commit for a new task worktree")
     run.add_argument("--model", help="override the agent model")
     run.add_argument(
+        "--mode",
+        choices=["agent", "participant"],
+        default="agent",
+        help="agent behavior mode; participant is currently Hermes-only",
+    )
+    run.add_argument(
         "--effort",
         choices=["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         help="override agent reasoning effort",
@@ -197,6 +203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 base=args.base,
                 model=args.model,
                 effort=args.effort,
+                mode=args.mode,
                 sandbox=args.sandbox,
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,

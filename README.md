@@ -147,6 +147,36 @@ programmatic mode, tags sessions as tool-created, and resumes the exact session 
 its old working directory. It reasserts the original Nous model and reasoning level on resume
 because Hermes otherwise falls back to its current configured defaults.
 
+Hermes can run a bounded conversational turn with the experimental participant mode:
+
+```sh
+aop run player \
+  --agent hermes \
+  --mode participant \
+  --sandbox scratch-write \
+  --prompt "Submit one move"
+```
+
+Participant mode persists across `aop resume` and can be selected in a batch task with
+`mode = "participant"`. AOP records the mode in the request, normalized result, and batch summary.
+It is currently supported only by the Hermes adapter.
+
+Hermes 0.20 does not have a supported no-tools option, so AOP temporarily combines `--safe-mode`,
+`--max-turns 1`, and an intentionally nonexistent `--toolsets __aop_no_tools__` allowlist. In the
+current Hermes implementation, an explicit unknown toolset resolves to zero model tool schemas.
+Safe mode also omits user configuration, repository rules, plugins, hooks, skills, and MCP servers.
+AOP reapplies the same flags on every resume and does not pass coding-agent permission flags such as
+`--yolo` or `--accept-hooks`. It also removes inherited internal no-tools and Kanban-worker mode
+variables so ambient Hermes process state cannot change the declared invocation mode or add worker
+tools.
+
+This unknown-toolset behavior is undocumented and may emit a warning outside quiet mode. It is not
+a durable security contract and could change in a future Hermes release, so the `bwrap` sandbox
+remains the filesystem boundary. AOP should replace the workaround with the proposed official
+`--no-tools` flag once
+[NousResearch/hermes-agent#78262](https://github.com/NousResearch/hermes-agent/pull/78262) is merged
+and available in the installed Hermes release.
+
 The agy default is `gemini-3.5-flash` at `medium` effort.
 
 For example, `--model gemini-3.5-flash --effort low` is passed directly to agy. An exact model
@@ -284,18 +314,15 @@ when a real project needs it.
 
 ### Roadmap
 
-- Add a provider-neutral `--mode participant` for bounded, tool-free model turns. Participant mode
-  must exclude repository and user instructions, tools, MCP servers, hooks, skills, and plugins;
-  produce one model response per invocation; persist unchanged across resume and batch runs; and
-  appear in run provenance. Adapters must reject the mode unless their provider CLI can enforce
-  the complete contract—AOP will not approximate it with prompt instructions or failing tool calls.
-  Implementation is paused because the supported provider CLIs do not yet share the required
-  controls. As of 2026-08-04:
-
-  - Claude can enforce the contract with safe mode and an empty tool set.
-  - Hermes can omit rules and bound tool iterations, but has no documented no-tools option.
-  - Codex has no exposed option to disable all tools and replace its coding-agent context.
-  - Agy has no exposed option to disable tools and project context; plan mode is not tool-free.
+- Replace Hermes participant mode's unknown-toolset workaround with the official `--no-tools` flag
+  proposed in [NousResearch/hermes-agent#78262](https://github.com/NousResearch/hermes-agent/pull/78262)
+  after it is merged and released. Until then, participant mode is experimental rather than a hard
+  no-tools guarantee.
+- Extend provider-neutral participant mode only when each adapter can enforce the full contract.
+  Claude has suitable safe-mode and empty-tool controls but is not wired yet. Codex has no exposed
+  option to disable all tools and replace its coding-agent context. Agy has no exposed option to
+  disable tools and project context; plan mode is not tool-free. Unsupported adapters fail before
+  creating a task worktree.
 
 ## 1. Core contract
 

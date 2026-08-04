@@ -321,6 +321,24 @@ def test_hermes_supports_workspace_sandbox_and_artifacts(
     ).read_text() == "# Hermes artifact\n"
 
 
+def test_hermes_defaults_to_deepseek_v4_flash_0731(
+    repository: Path, fake_hermes: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), HermesAdapter(os.fspath(fake_hermes))
+    )
+
+    result = runner.run(task="default-hermes", prompt="test")
+
+    assert result.succeeded
+    assert result.model == "deepseek/deepseek-v4-flash-0731"
+    assert result.effort is None
+    assert ["--model", "deepseek/deepseek-v4-flash-0731"] == result.command[
+        result.command.index("--model") : result.command.index("--model") + 2
+    ]
+    assert "--reasoning" not in result.command
+
+
 def test_hermes_rejects_an_unsupported_effort(
     repository: Path, fake_hermes: Path
 ) -> None:

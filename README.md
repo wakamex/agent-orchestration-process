@@ -123,12 +123,12 @@ headless host use:
 hermes auth add nous --type oauth --no-browser
 ```
 
-Pass a Nous model ID unchanged with `--model`; AOP passes `--effort` through as Hermes's native
-reasoning level. Supported levels are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
-and `ultra`. AOP uses Hermes's quiet programmatic mode, tags sessions as tool-created, and resumes
-the exact session without restoring its old working directory. It reasserts the original Nous
-model and reasoning level on resume because Hermes otherwise falls back to its current configured
-defaults.
+Hermes defaults to `deepseek/deepseek-v4-flash-0731`. Pass another Nous model ID unchanged with
+`--model`; AOP passes `--effort` through as Hermes's native reasoning level. Supported levels are
+`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. AOP uses Hermes's quiet
+programmatic mode, tags sessions as tool-created, and resumes the exact session without restoring
+its old working directory. It reasserts the original Nous model and reasoning level on resume
+because Hermes otherwise falls back to its current configured defaults.
 
 The agy default is `gemini-3.5-flash` at `medium` effort.
 

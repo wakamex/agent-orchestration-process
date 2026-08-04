@@ -825,6 +825,7 @@ class _HermesSession:
 
 class HermesAdapter:
     provider = "hermes"
+    DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
     EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
     def __init__(self, binary: str | None = None):
@@ -837,7 +838,7 @@ class HermesAdapter:
             raise AOPError(
                 f"Hermes effort must be one of: {', '.join(sorted(self.EFFORTS))}"
             )
-        return model, effort
+        return model or self.DEFAULT_MODEL, effort
 
     def execute(
         self,

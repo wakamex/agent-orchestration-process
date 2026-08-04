@@ -273,6 +273,14 @@ Runtime state lives under the ignored `.aop/` directory:
 The current CLI does not configure language-specific build caches. That interface will be added
 when a real project needs it.
 
+### Roadmap
+
+- Add a provider-neutral `--mode participant` for bounded, tool-free model turns. Participant mode
+  must exclude repository and user instructions, tools, MCP servers, hooks, skills, and plugins;
+  produce one model response per invocation; persist unchanged across resume and batch runs; and
+  appear in run provenance. Adapters must reject the mode unless their provider CLI can enforce
+  the complete contract—AOP will not approximate it with prompt instructions or failing tool calls.
+
 ## 1. Core contract
 
 An AOP project follows five rules:

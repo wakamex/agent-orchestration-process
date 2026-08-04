@@ -280,6 +280,13 @@ when a real project needs it.
   produce one model response per invocation; persist unchanged across resume and batch runs; and
   appear in run provenance. Adapters must reject the mode unless their provider CLI can enforce
   the complete contract—AOP will not approximate it with prompt instructions or failing tool calls.
+  Implementation is paused because the supported provider CLIs do not yet share the required
+  controls. As of 2026-08-04:
+
+  - Claude can enforce the contract with safe mode and an empty tool set.
+  - Hermes can omit rules and bound tool iterations, but has no documented no-tools option.
+  - Codex has no exposed option to disable all tools and replace its coding-agent context.
+  - Agy has no exposed option to disable tools and project context; plan mode is not tool-free.
 
 ## 1. Core contract
 

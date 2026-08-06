@@ -222,8 +222,18 @@ print(json.dumps({{
 
 
 @pytest.fixture
-def fake_cursor(tmp_path: Path) -> Path:
+def fake_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     executable = tmp_path / "agent"
+    cursor_home = tmp_path / "cursor-home"
+    cursor_home.mkdir()
+    (cursor_home / "cli-config.json").write_text('{"model": "composer-2.5"}\n')
+    (cursor_home / "skills-cursor").mkdir()
+    (cursor_home / "skills-cursor" / "test.md").write_text("test skill\n")
+    cursor_config = tmp_path / "cursor-config"
+    cursor_config.mkdir()
+    (cursor_config / "auth.json").write_text('{"token": "test"}\n')
+    monkeypatch.setenv("AOP_CURSOR_HOME", os.fspath(cursor_home))
+    monkeypatch.setenv("AOP_CURSOR_CONFIG_DIR", os.fspath(cursor_config))
     executable.write_text(
         f"""#!{sys.executable}
 import json
@@ -233,6 +243,12 @@ import sys
 
 args = sys.argv[1:]
 prompt = args[args.index("--") + 1]
+cursor_home = pathlib.Path(os.environ["AOP_CURSOR_HOME"])
+cursor_config = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "cursor"
+auth_path = cursor_config / "auth.json"
+if not auth_path.is_file():
+    raise RuntimeError("missing private Cursor authentication")
+auth_path.write_text('{{"token": "refreshed"}}\\n')
 session_id = (
     args[args.index("--resume") + 1]
     if "--resume" in args
@@ -240,6 +256,12 @@ session_id = (
 )
 if prompt == "CURSOR_DIFFERENT_SESSION":
     session_id = "0478966c-19cc-4ade-b3b3-83b59dd670ba"
+project_dir = cursor_home / "projects" / "test-project"
+project_dir.mkdir(parents=True, exist_ok=True)
+project_dir.joinpath("repo.json").write_text("{{}}\\n")
+chat_dir = cursor_home / "chats" / session_id
+chat_dir.mkdir(parents=True, exist_ok=True)
+chat_dir.joinpath("state.json").write_text(prompt)
 if prompt.startswith("WRITE_ARTIFACT"):
     pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("report.md").write_text(
         "# Cursor artifact\\n"

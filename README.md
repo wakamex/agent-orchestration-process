@@ -99,6 +99,14 @@ conversation ID; a missing or different ID fails closed and is not resumable. Re
 worktree removes its private profile while preserving run records. Set `AOP_AGY_SOURCE_DIR` only
 when the authenticated source profile is somewhere other than `~/.gemini`.
 
+For Cursor Agent in either non-danger sandbox, AOP seeds a persistent task-local Cursor profile and
+authentication directory under `.aop/provider-state/<task>/cursor`. Project metadata, chats,
+tracking data, and Cursor-created worktrees start empty and remain private to the AOP task; existing
+CLI configuration, skills, plugins, policies, and authentication are copied without duplicating IDE
+extensions. Cursor caches use the shared AOP cache. This lets the first turn and exact resume work
+when the surrounding home directory is read-only, without modifying global Cursor state. Cleanup
+removes the private profile with the task. `danger-full-access` retains Cursor's native global state.
+
 For Hermes in either non-danger sandbox, AOP seeds a persistent task-local Hermes home under
 `.aop/provider-state/<task>/` from the authenticated profile. Hermes can read the existing
 configuration, credentials, skills, hooks, and memories even when their host filesystem is

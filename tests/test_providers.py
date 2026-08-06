@@ -132,6 +132,74 @@ def test_cursor_workspace_sandbox_and_artifact(
     ).read_text() == "# Cursor artifact\n"
 
 
+@pytest.mark.parametrize("sandbox", ["scratch-write", "workspace-write"])
+def test_cursor_uses_private_runtime_state_with_read_only_global_home(
+    repository: Path,
+    fake_cursor: Path,
+    sandbox: str,
+) -> None:
+    source_home = Path(os.environ["AOP_CURSOR_HOME"])
+    source_config = Path(os.environ["AOP_CURSOR_CONFIG_DIR"])
+    source_auth = source_config / "auth.json"
+    source_home.chmod(0o555)
+    source_config.chmod(0o555)
+    source_auth.chmod(0o444)
+    task = f"managed-cursor-{sandbox}"
+    manager = WorktreeManager.discover(repository)
+
+    try:
+        runner = AgentRunner(manager, CursorAdapter(os.fspath(fake_cursor)))
+        first = runner.run(
+            task=task,
+            prompt="first",
+            sandbox=sandbox,
+            timeout_seconds=5,
+        )
+        resumed = runner.resume(run_id=first.run_id, prompt="second")
+    finally:
+        source_home.chmod(0o755)
+        source_config.chmod(0o755)
+        source_auth.chmod(0o644)
+
+    private_state = manager.state_dir / "provider-state" / task / "cursor"
+    assert first.succeeded
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert (private_state / "config" / "cursor" / "auth.json").read_text() == (
+        '{"token": "refreshed"}\n'
+    )
+    assert (private_state / "home" / "skills-cursor" / "test.md").is_file()
+    assert (
+        private_state / "home" / "projects" / "test-project" / "repo.json"
+    ).is_file()
+    assert (
+        private_state / "home" / "chats" / first.session_id / "state.json"
+    ).read_text() == "second"
+    assert not (source_home / "projects").exists()
+    assert not (source_home / "chats").exists()
+    assert source_auth.read_text() == '{"token": "test"}\n'
+    assert os.fspath(private_state / "home") in first.command
+    assert ["--setenv", "XDG_CONFIG_HOME", os.fspath(private_state / "config")] == (
+        first.command[
+            first.command.index("XDG_CONFIG_HOME") - 1 : first.command.index(
+                "XDG_CONFIG_HOME"
+            )
+            + 2
+        ]
+    )
+    assert ["--setenv", "XDG_CACHE_HOME"] == first.command[
+        first.command.index("XDG_CACHE_HOME") - 1 : first.command.index(
+            "XDG_CACHE_HOME"
+        )
+        + 1
+    ]
+
+    manager.remove(task)
+    assert not private_state.exists()
+    assert (manager.state_dir / "runs" / first.run_id / "result.json").is_file()
+    assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
+
+
 def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     repository: Path, fake_agy: Path
 ) -> None:

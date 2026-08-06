@@ -1345,11 +1345,31 @@ def _provider_command(
     else:
         wrapped.extend(["--bind", os.fspath(scratch), os.fspath(scratch)])
     wrapped.extend(["--bind", os.fspath(cache), os.fspath(cache)])
-    if request.provider in {"agy", "hermes"}:
+    if request.provider in {"agy", "cursor", "hermes"}:
         wrapped.extend(["--bind", os.fspath(provider_state), os.fspath(provider_state)])
     if request.provider == "agy":
         source_dir = _agy_source_dir(environment)
         wrapped.extend(["--ro-bind", os.fspath(source_dir), os.fspath(source_dir)])
+    if request.provider == "cursor":
+        source_home = _cursor_source_home(environment)
+        source_auth = _cursor_source_auth(environment)
+        isolated_state = provider_state / "cursor"
+        _prepare_cursor_state(source_home, source_auth, isolated_state)
+        cursor_cache = cache / "cursor"
+        cursor_cache.mkdir(parents=True, exist_ok=True)
+        wrapped.extend(
+            [
+                "--bind",
+                os.fspath(isolated_state / "home"),
+                os.fspath(source_home),
+                "--setenv",
+                "XDG_CONFIG_HOME",
+                os.fspath(isolated_state / "config"),
+                "--setenv",
+                "XDG_CACHE_HOME",
+                os.fspath(cursor_cache),
+            ]
+        )
     if request.provider == "hermes":
         source_home = _hermes_source_home(environment)
         if not source_home.is_dir():
@@ -1384,6 +1404,92 @@ _AGY_NESTED_SEED_FILES = {
         "settings.json",
     },
 }
+
+_CURSOR_RUNTIME_DIRECTORIES = {
+    "ai-tracking",
+    "chats",
+    "extensions",
+    "projects",
+    "worktrees",
+}
+
+
+def _cursor_source_home(environment: dict[str, str]) -> Path:
+    configured = environment.get("AOP_CURSOR_HOME")
+    source = (
+        Path(configured).expanduser()
+        if configured
+        else Path(environment["HOME"]) / ".cursor"
+    )
+    try:
+        return source.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise AOPError(
+            f"Cursor home does not exist: {source}; authenticate Cursor Agent first"
+        ) from error
+
+
+def _cursor_source_auth(environment: dict[str, str]) -> Path | None:
+    configured = environment.get("AOP_CURSOR_CONFIG_DIR")
+    source = (
+        Path(configured).expanduser()
+        if configured
+        else Path(environment["HOME"]) / ".config" / "cursor"
+    )
+    try:
+        return source.resolve(strict=True)
+    except FileNotFoundError as error:
+        if environment.get("CURSOR_API_KEY"):
+            return None
+        raise AOPError(
+            f"Cursor authentication does not exist: {source}; authenticate Cursor Agent first"
+        ) from error
+
+
+def _prepare_cursor_state(
+    source_home: Path, source_auth: Path | None, destination: Path
+) -> None:
+    if destination.is_dir():
+        return
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    private_home = temporary / "home"
+    private_config = temporary / "config" / "cursor"
+    private_home.mkdir(parents=True, mode=0o700)
+    try:
+        for entry in source_home.iterdir():
+            if entry.name in _CURSOR_RUNTIME_DIRECTORIES:
+                continue
+            target = private_home / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, target, symlinks=True)
+            elif entry.is_file():
+                shutil.copy2(entry, target)
+        for name in _CURSOR_RUNTIME_DIRECTORIES:
+            if name != "extensions":
+                private_home.joinpath(name).mkdir()
+        if source_auth is None:
+            private_config.mkdir(parents=True)
+        else:
+            shutil.copytree(source_auth, private_config, symlinks=True)
+        _make_tree_user_writable(temporary)
+        os.replace(temporary, destination)
+    except OSError as error:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise AOPError(f"could not prepare isolated Cursor state: {error}") from error
+
+
+def _make_tree_user_writable(root: Path) -> None:
+    for directory, names, files in os.walk(root):
+        path = Path(directory)
+        path.chmod(path.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        for name in [*names, *files]:
+            entry = path / name
+            if entry.is_symlink():
+                continue
+            permissions = stat.S_IRUSR | stat.S_IWUSR
+            if entry.is_dir():
+                permissions |= stat.S_IXUSR
+            entry.chmod(entry.stat().st_mode | permissions)
 
 
 def _agy_source_dir(environment: dict[str, str]) -> Path:

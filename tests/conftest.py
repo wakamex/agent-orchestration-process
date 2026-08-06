@@ -222,6 +222,74 @@ print(json.dumps({{
 
 
 @pytest.fixture
+def fake_cursor(tmp_path: Path) -> Path:
+    executable = tmp_path / "agent"
+    executable.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+prompt = args[args.index("--") + 1]
+session_id = (
+    args[args.index("--resume") + 1]
+    if "--resume" in args
+    else "b5b6dbdd-0d68-452f-9d5c-20238c970169"
+)
+if prompt == "CURSOR_DIFFERENT_SESSION":
+    session_id = "0478966c-19cc-4ade-b3b3-83b59dd670ba"
+if prompt.startswith("WRITE_ARTIFACT"):
+    pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("report.md").write_text(
+        "# Cursor artifact\\n"
+    )
+if prompt == "CHECK_CURSOR_SANDBOX":
+    pathlib.Path("agent-write.txt").write_text("allowed")
+    for protected in [
+        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path(".git"),
+    ]:
+        try:
+            protected.write_text("forbidden")
+        except OSError:
+            pass
+        else:
+            raise RuntimeError(f"sandbox allowed write to {{protected}}")
+
+print(json.dumps({{
+    "type": "system",
+    "subtype": "init",
+    "session_id": session_id,
+    "model": "Composer 2.5",
+}}), flush=True)
+print(json.dumps({{
+    "type": "assistant",
+    "message": {{"content": [{{"type": "text", "text": "working"}}]}},
+    "session_id": session_id,
+}}), flush=True)
+print(json.dumps({{
+    "type": "result",
+    "subtype": "success",
+    "duration_ms": 1500,
+    "duration_api_ms": 1250,
+    "is_error": False,
+    "result": f"answer:{{prompt}}",
+    "session_id": session_id,
+    "usage": {{
+        "inputTokens": 100,
+        "outputTokens": 20,
+        "cacheReadTokens": 30,
+        "cacheWriteTokens": 0,
+    }},
+}}), flush=True)
+"""
+    )
+    executable.chmod(0o755)
+    return executable
+
+
+@pytest.fixture
 def fake_agy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     executable = tmp_path / "agy"
     source_dir = tmp_path / "agy-source"

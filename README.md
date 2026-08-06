@@ -14,7 +14,7 @@ each project.
 
 ## Reference implementation
 
-This repository includes a dependency-free Python CLI for running Codex, Claude Code,
+This repository includes a dependency-free Python CLI for running Codex, Claude Code, Cursor Agent,
 Antigravity (`agy`), and Hermes concurrently in isolated Git worktrees. Each adapter records a
 normalized result and resumes the exact provider session associated with an earlier run.
 
@@ -51,6 +51,8 @@ Run an agent in a new or existing task worktree:
 aop run task-a --prompt-file task.md --timeout 1800
 aop run task-b --agent claude --model sonnet --effort high \
   --prompt "Implement the parser and its tests"
+aop run task-cursor --agent cursor \
+  --prompt "Refactor the parser without changing behavior"
 aop run task-c --agent agy --model gemini-3.5-flash --effort low \
   --prompt "Add adversarial parser tests"
 aop run task-d --agent hermes --model deepseek/deepseek-v4-flash-0731 --effort high \
@@ -85,7 +87,8 @@ worktree's `.git` pointer read-only. `scratch-write` leaves the task read-only a
 `scratch/` directory plus the shared cache writable; use it for agents that need working space but
 must not edit the repository. `danger-full-access` explicitly skips `bwrap`. Configured
 authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`,
-`AOP_AGY_BIN`, `AOP_HERMES_BIN`, and `AOP_BWRAP_BIN` may override their respective executables.
+`AOP_CURSOR_BIN`, `AOP_AGY_BIN`, `AOP_HERMES_BIN`, and `AOP_BWRAP_BIN` may override their
+respective executables.
 
 Every Agy task uses a persistent private Gemini profile under
 `.aop/provider-state/<task>/agy/gemini`, including with `danger-full-access`. AOP initializes it
@@ -182,6 +185,11 @@ The agy default is `gemini-3.5-flash` at `medium` effort.
 For example, `--model gemini-3.5-flash --effort low` is passed directly to agy. An exact model
 printed by `agy models` can instead be passed without `--effort`.
 
+Cursor Agent uses `composer-2.5` by default. Pass any model ID printed by `agent models` through
+`--model`. Cursor encodes reasoning effort and fast variants in its model IDs, so its adapter rejects
+a separate `--effort`. AOP disables Cursor's native sandbox and permission prompts inside the outer
+`bwrap` boundary, records its structured token and timing metrics, and resumes the exact chat ID.
+
 Every run records wall-clock time and time to first event and agent response. Adapters also record
 input, cached-input, output, and reasoning-output tokens when the provider exposes them. When
 `--model` names a model in AOP's dated pricing table, the result also contains an estimated standard
@@ -197,9 +205,9 @@ metrics remain available while cost is reported as `n/a`. Claude's result stream
 resolved model, token usage, and CLI-reported USD API-equivalent cost. Hermes's session accounting
 supplies its resolved model, cache and reasoning token buckets, and provider-aware estimated or
 actual cost; AOP records the delta for each invocation so resumed turns are not double-counted. Agy
-currently supplies timing and token usage from its structured result stream. AOP records Agy's
-provider-reported duration separately from its own wall-clock duration. Agy does not report
-API-equivalent cost, so that field remains `n/a`.
+currently supplies timing and token usage from its structured result stream. Cursor and Agy each
+report provider duration separately from AOP's wall-clock duration. Neither reports API-equivalent
+cost, so that field remains `n/a`.
 
 Run independent tasks concurrently from a TOML manifest:
 

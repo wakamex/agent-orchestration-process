@@ -632,6 +632,193 @@ class ClaudeAdapter:
         }
 
 
+class CursorAdapter:
+    provider = "cursor"
+    modes = frozenset({"agent"})
+    DEFAULT_MODEL = "composer-2.5"
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_CURSOR_BIN", "agent")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        if effort is not None:
+            raise AOPError(
+                "Cursor Agent does not accept a separate effort; choose a model ID "
+                "with the desired effort"
+            )
+        return model or self.DEFAULT_MODEL, None
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        command = _provider_command(
+            self._command(request, worktree), request, worktree, environment
+        )
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=None,
+            timeout_seconds=request.timeout_seconds,
+            is_response=self._is_response,
+        )
+        _atomic_write(run_dir / "events.jsonl", capture.stdout)
+        _atomic_write(run_dir / "stderr.log", capture.stderr)
+        parsed = self._parse(capture.stdout)
+        reported_session_id = parsed["session_id"]
+        session_id = reported_session_id
+        final_message = parsed["final_message"]
+        if final_message is not None:
+            _atomic_write(run_dir / "last-message.txt", final_message)
+
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif capture.exit_code:
+            error = (
+                capture.stderr.strip()
+                or f"Cursor Agent exited with status {capture.exit_code}"
+            )
+        elif not parsed["has_result"]:
+            error = "Cursor Agent did not emit a terminal result"
+        elif request.session_id and reported_session_id != request.session_id:
+            session_id = None
+            if reported_session_id is None:
+                error = (
+                    "Cursor Agent resume result did not report the requested chat ID "
+                    f"{request.session_id}"
+                )
+            else:
+                error = (
+                    f"Cursor Agent resumed as chat {reported_session_id} instead of "
+                    f"the requested chat {request.session_id}"
+                )
+        elif reported_session_id is None:
+            error = "Cursor Agent result did not report a chat ID"
+        elif parsed["error"]:
+            error = parsed["error"]
+        elif final_message is None:
+            error = "Cursor Agent did not emit a final response"
+        else:
+            error = None
+
+        return RunResult(
+            run_id=request.run_id,
+            provider=self.provider,
+            mode=request.mode,
+            task=request.task,
+            model=request.model,
+            effort=request.effort,
+            session_id=session_id,
+            command=command,
+            started_at=started_at,
+            finished_at=_now(),
+            duration_seconds=capture.duration_seconds,
+            time_to_first_event_seconds=capture.first_event_seconds,
+            time_to_first_response_seconds=capture.first_response_seconds,
+            exit_code=capture.exit_code,
+            timed_out=capture.timed_out,
+            error=error,
+            final_message=final_message,
+            usage=parsed["usage"],
+            api_equivalent_cost=None,
+            provider_duration_seconds=parsed["duration_seconds"],
+        )
+
+    def _command(self, request: RunRequest, worktree: Worktree) -> list[str]:
+        command = [
+            self.binary,
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--force",
+            "--sandbox",
+            "disabled",
+            "--trust",
+            "--workspace",
+            os.fspath(worktree.path),
+        ]
+        if request.session_id:
+            command.extend(["--resume", request.session_id])
+        elif request.model:
+            command.extend(["--model", request.model])
+        command.extend(["--", request.prompt])
+        return command
+
+    @staticmethod
+    def _is_response(line: str) -> bool:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            return False
+        content = event.get("message", {}).get("content", [])
+        return any(
+            item.get("type") == "text" for item in content if isinstance(item, dict)
+        )
+
+    @staticmethod
+    def _parse(output: str) -> dict[str, object]:
+        session_id = None
+        final_message = None
+        error = None
+        duration_seconds = None
+        usage = TokenUsage()
+        has_result = False
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_session_id = event.get("session_id")
+            if isinstance(event_session_id, str) and event_session_id:
+                session_id = event_session_id
+            if event.get("type") != "result":
+                continue
+            has_result = True
+            result = event.get("result")
+            final_message = result if isinstance(result, str) else None
+            if event.get("is_error") or event.get("subtype") != "success":
+                detail = event.get("error")
+                error = (
+                    detail
+                    if isinstance(detail, str) and detail
+                    else final_message or "Cursor Agent turn failed"
+                )
+            raw_usage = (
+                event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            )
+            usage = TokenUsage.from_dict(
+                {
+                    "input_tokens": raw_usage.get("inputTokens"),
+                    "cached_input_tokens": raw_usage.get("cacheReadTokens"),
+                    "output_tokens": raw_usage.get("outputTokens"),
+                }
+            )
+            duration_ms = event.get("duration_api_ms")
+            if isinstance(duration_ms, (int, float)) and not isinstance(
+                duration_ms, bool
+            ):
+                duration_seconds = round(float(duration_ms) / 1000, 6)
+        return {
+            "session_id": session_id,
+            "final_message": final_message,
+            "error": error,
+            "duration_seconds": duration_seconds,
+            "usage": usage,
+            "has_result": has_result,
+        }
+
+
 class AgyAdapter:
     provider = "agy"
     modes = frozenset({"agent"})
@@ -1314,6 +1501,8 @@ def adapter_for(agent: str) -> AgentAdapter:
         return CodexAdapter()
     if agent == "claude":
         return ClaudeAdapter()
+    if agent == "cursor":
+        return CursorAdapter()
     if agent == "agy":
         return AgyAdapter()
     if agent == "hermes":

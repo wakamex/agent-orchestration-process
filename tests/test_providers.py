@@ -11,6 +11,7 @@ from aop.runner import (
     AgentRunner,
     ClaudeAdapter,
     CodexAdapter,
+    CursorAdapter,
     HermesAdapter,
 )
 from aop.worktrees import AOPError, WorktreeManager
@@ -48,6 +49,87 @@ def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> Non
     assert resumed.succeeded
     assert ["--resume", first.session_id] == resumed.command[-2:]
     assert "--model" not in resumed.command
+
+
+def test_cursor_defaults_to_composer_and_resumes_exact_chat(
+    repository: Path, fake_cursor: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CursorAdapter(os.fspath(fake_cursor)))
+
+    first = runner.run(task="cursor-task", prompt="first", timeout_seconds=5)
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded
+    assert first.provider == "cursor"
+    assert first.model == "composer-2.5"
+    assert first.final_message == "answer:first"
+    assert first.usage.input_tokens == 100
+    assert first.usage.cached_input_tokens == 30
+    assert first.usage.output_tokens == 20
+    assert first.provider_duration_seconds == 1.25
+    assert first.api_equivalent_cost is None
+    assert ["--model", "composer-2.5"] == first.command[
+        first.command.index("--model") : first.command.index("--model") + 2
+    ]
+    assert ["--sandbox", "disabled"] == first.command[
+        first.command.index("--sandbox") : first.command.index("--sandbox") + 2
+    ]
+    assert "--force" in first.command
+    assert "--trust" in first.command
+    assert first.time_to_first_response_seconds is not None
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert ["--resume", first.session_id] == resumed.command[
+        resumed.command.index("--resume") : resumed.command.index("--resume") + 2
+    ]
+    assert "--model" not in resumed.command
+
+
+def test_cursor_rejects_effort_and_changed_resume_chat(
+    repository: Path, fake_cursor: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CursorAdapter(os.fspath(fake_cursor)))
+
+    with pytest.raises(AOPError, match="does not accept a separate effort"):
+        runner.run(task="cursor-effort", prompt="test", effort="high")
+    assert manager.list() == []
+
+    first = runner.run(task="cursor-resume", prompt="first")
+    resumed = runner.resume(run_id=first.run_id, prompt="CURSOR_DIFFERENT_SESSION")
+
+    assert not resumed.succeeded
+    assert resumed.session_id is None
+    assert "instead of the requested chat" in (resumed.error or "")
+
+
+def test_cursor_workspace_sandbox_and_artifact(
+    repository: Path, fake_cursor: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CursorAdapter(os.fspath(fake_cursor)))
+
+    sandboxed = runner.run(task="cursor-sandbox", prompt="CHECK_CURSOR_SANDBOX")
+    artifact = runner.run(
+        task="cursor-artifact",
+        prompt="WRITE_ARTIFACT",
+        sandbox="scratch-write",
+        artifacts=["report.md"],
+    )
+
+    assert sandboxed.succeeded
+    assert (manager.get("cursor-sandbox").path / "agent-write.txt").read_text() == (
+        "allowed"
+    )
+    assert not (repository / "main-write.txt").exists()
+    assert artifact.succeeded
+    assert (
+        manager.state_dir
+        / "runs"
+        / artifact.run_id
+        / artifact.artifacts[0].archive_path
+    ).read_text() == "# Cursor artifact\n"
 
 
 def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
@@ -478,6 +560,7 @@ def test_hermes_participant_mode_is_tool_free_bounded_and_stable_across_resume(
     [
         (CodexAdapter, "codex"),
         (ClaudeAdapter, "claude"),
+        (CursorAdapter, "cursor"),
         (AgyAdapter, "agy"),
     ],
 )
@@ -485,11 +568,22 @@ def test_unsupported_adapters_reject_participant_mode_before_creating_a_worktree
     repository: Path,
     fake_codex: Path,
     fake_claude: Path,
+    fake_cursor: Path,
     fake_agy: Path,
-    adapter: type[CodexAdapter] | type[ClaudeAdapter] | type[AgyAdapter],
+    adapter: (
+        type[CodexAdapter]
+        | type[ClaudeAdapter]
+        | type[CursorAdapter]
+        | type[AgyAdapter]
+    ),
     provider: str,
 ) -> None:
-    binaries = {"codex": fake_codex, "claude": fake_claude, "agy": fake_agy}
+    binaries = {
+        "codex": fake_codex,
+        "claude": fake_claude,
+        "cursor": fake_cursor,
+        "agy": fake_agy,
+    }
     binary = binaries[provider]
     manager = WorktreeManager.discover(repository)
 

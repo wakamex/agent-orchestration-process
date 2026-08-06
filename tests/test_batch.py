@@ -166,14 +166,16 @@ prompt = "FAIL"
     assert all(task["run_id"] for task in summary["tasks"])
 
 
-def test_batch_can_mix_claude_agy_and_hermes(
+def test_batch_can_mix_cursor_claude_agy_and_hermes(
     repository: Path,
     fake_claude: Path,
+    fake_cursor: Path,
     fake_agy: Path,
     fake_hermes: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AOP_CLAUDE_BIN", os.fspath(fake_claude))
+    monkeypatch.setenv("AOP_CURSOR_BIN", os.fspath(fake_cursor))
     monkeypatch.setenv("AOP_AGY_BIN", os.fspath(fake_agy))
     monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
     manifest = repository / "providers.toml"
@@ -185,6 +187,11 @@ agent = "claude"
 model = "sonnet"
 effort = "high"
 prompt = "one"
+
+[[tasks]]
+id = "cursor-task"
+agent = "cursor"
+prompt = "cursor"
 
 [[tasks]]
 id = "agy-task"
@@ -205,10 +212,16 @@ prompt = "three"
     result = BatchRunner(WorktreeManager.discover(repository), jobs=2).run(manifest)
 
     assert result.succeeded
-    assert [task.agent for task in result.tasks] == ["claude", "agy", "hermes"]
+    assert [task.agent for task in result.tasks] == [
+        "claude",
+        "cursor",
+        "agy",
+        "hermes",
+    ]
     assert result.tasks[0].model == "claude-test-model"
-    assert result.tasks[1].model == "gemini-3.1-pro"
-    assert result.tasks[2].model == "deepseek/deepseek-v4-flash-0731"
+    assert result.tasks[1].model == "composer-2.5"
+    assert result.tasks[2].model == "gemini-3.1-pro"
+    assert result.tasks[3].model == "deepseek/deepseek-v4-flash-0731"
 
 
 def test_batch_runs_hermes_participant_mode_and_records_provenance(

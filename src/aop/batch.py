@@ -298,10 +298,13 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
     if not isinstance(agent, str) or agent not in {
         "codex",
         "claude",
+        "cursor",
         "agy",
         "hermes",
     }:
-        raise AOPError(f"{label}.agent must be one of: agy, claude, codex, hermes")
+        raise AOPError(
+            f"{label}.agent must be one of: agy, claude, codex, cursor, hermes"
+        )
 
     prompt = value.get("prompt")
     prompt_file = value.get("prompt_file")

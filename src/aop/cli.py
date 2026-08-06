@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("task")
     run.add_argument(
         "--agent",
-        choices=["codex", "claude", "cursor", "agy", "hermes"],
+        choices=["codex", "claude", "cursor", "opencode", "agy", "hermes"],
         default="codex",
     )
     run.add_argument("--base", default="HEAD", help="commit for a new task worktree")

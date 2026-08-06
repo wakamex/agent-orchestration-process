@@ -44,6 +44,9 @@ def test_cli_reports_version_and_provider_neutral_resume_help(
         ]
     )
     assert args.mode == "participant"
+    assert parser.parse_args(
+        ["run", "worker", "--agent", "opencode", "--prompt", "fix"]
+    ).agent == "opencode"
 
 
 def test_run_persists_structured_codex_artifacts(

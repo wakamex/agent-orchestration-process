@@ -166,16 +166,18 @@ prompt = "FAIL"
     assert all(task["run_id"] for task in summary["tasks"])
 
 
-def test_batch_can_mix_cursor_claude_agy_and_hermes(
+def test_batch_can_mix_cursor_claude_opencode_agy_and_hermes(
     repository: Path,
     fake_claude: Path,
     fake_cursor: Path,
+    fake_opencode: Path,
     fake_agy: Path,
     fake_hermes: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AOP_CLAUDE_BIN", os.fspath(fake_claude))
     monkeypatch.setenv("AOP_CURSOR_BIN", os.fspath(fake_cursor))
+    monkeypatch.setenv("AOP_OPENCODE_BIN", os.fspath(fake_opencode))
     monkeypatch.setenv("AOP_AGY_BIN", os.fspath(fake_agy))
     monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
     manifest = repository / "providers.toml"
@@ -201,6 +203,13 @@ effort = "low"
 prompt = "two"
 
 [[tasks]]
+id = "opencode-task"
+agent = "opencode"
+model = "opencode/deepseek-v4-flash"
+effort = "low"
+prompt = "opencode"
+
+[[tasks]]
 id = "hermes-task"
 agent = "hermes"
 model = "deepseek/deepseek-v4-flash-0731"
@@ -216,12 +225,14 @@ prompt = "three"
         "claude",
         "cursor",
         "agy",
+        "opencode",
         "hermes",
     ]
     assert result.tasks[0].model == "claude-test-model"
     assert result.tasks[1].model == "composer-2.5"
     assert result.tasks[2].model == "gemini-3.1-pro"
-    assert result.tasks[3].model == "deepseek/deepseek-v4-flash-0731"
+    assert result.tasks[3].model == "opencode/deepseek-v4-flash"
+    assert result.tasks[4].model == "deepseek/deepseek-v4-flash-0731"
 
 
 def test_batch_runs_hermes_participant_mode_and_records_provenance(

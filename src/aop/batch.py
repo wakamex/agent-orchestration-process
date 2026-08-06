@@ -299,11 +299,12 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
         "codex",
         "claude",
         "cursor",
+        "opencode",
         "agy",
         "hermes",
     }:
         raise AOPError(
-            f"{label}.agent must be one of: agy, claude, codex, cursor, hermes"
+            f"{label}.agent must be one of: agy, claude, codex, cursor, hermes, opencode"
         )
 
     prompt = value.get("prompt")

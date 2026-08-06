@@ -13,6 +13,7 @@ from aop.runner import (
     CodexAdapter,
     CursorAdapter,
     HermesAdapter,
+    OpenCodeAdapter,
 )
 from aop.worktrees import AOPError, WorktreeManager
 
@@ -192,6 +193,203 @@ def test_cursor_uses_private_runtime_state_with_read_only_global_home(
             "XDG_CACHE_HOME"
         )
         + 1
+    ]
+
+    manager.remove(task)
+    assert not private_state.exists()
+    assert (manager.state_dir / "runs" / first.run_id / "result.json").is_file()
+    assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
+
+
+def test_opencode_defaults_to_zen_model_and_resumes_exact_session(
+    repository: Path, fake_opencode: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, OpenCodeAdapter(os.fspath(fake_opencode)))
+
+    first = runner.run(
+        task="opencode-task",
+        prompt="first",
+        effort="high",
+        timeout_seconds=5,
+    )
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded
+    assert first.provider == "opencode"
+    assert first.model == "opencode/deepseek-v4-flash"
+    assert first.effort == "high"
+    assert first.final_message == "answer:first"
+    assert first.usage.input_tokens == 53
+    assert first.usage.cached_input_tokens == 10
+    assert first.usage.output_tokens == 5
+    assert first.usage.reasoning_output_tokens == 2
+    assert first.provider_duration_seconds == 0.5
+    assert first.api_equivalent_cost is not None
+    assert first.api_equivalent_cost.amount_usd == 0.00012345
+    assert not first.api_equivalent_cost.estimated
+    assert first.time_to_first_response_seconds is not None
+    assert ["--model", "opencode/deepseek-v4-flash"] == first.command[
+        first.command.index("--model") : first.command.index("--model") + 2
+    ]
+    assert ["--variant", "high"] == first.command[
+        first.command.index("--variant") : first.command.index("--variant") + 2
+    ]
+    assert "--auto" in first.command
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert ["--session", first.session_id] == resumed.command[
+        resumed.command.index("--session") : resumed.command.index("--session") + 2
+    ]
+    assert ["--model", first.model] == resumed.command[
+        resumed.command.index("--model") : resumed.command.index("--model") + 2
+    ]
+    assert ["--variant", "high"] == resumed.command[
+        resumed.command.index("--variant") : resumed.command.index("--variant") + 2
+    ]
+
+
+def test_opencode_accepts_short_zen_model_and_fails_closed_on_changed_resume(
+    repository: Path, fake_opencode: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, OpenCodeAdapter(os.fspath(fake_opencode)))
+
+    first = runner.run(
+        task="opencode-resume",
+        prompt="first",
+        model="deepseek-v4-flash",
+    )
+    resumed = runner.resume(
+        run_id=first.run_id,
+        prompt="OPENCODE_DIFFERENT_SESSION",
+    )
+
+    assert first.model == "opencode/deepseek-v4-flash"
+    assert not resumed.succeeded
+    assert resumed.session_id is None
+    assert "instead of the requested session" in (resumed.error or "")
+
+
+def test_opencode_reports_structured_provider_errors(
+    repository: Path, fake_opencode: Path
+) -> None:
+    result = AgentRunner(
+        WorktreeManager.discover(repository),
+        OpenCodeAdapter(os.fspath(fake_opencode)),
+    ).run(task="opencode-error", prompt="OPENCODE_ERROR")
+
+    assert not result.succeeded
+    assert result.error == "synthetic failure"
+
+
+def test_opencode_normalizes_multi_step_tool_loop(
+    repository: Path, fake_opencode: Path
+) -> None:
+    result = AgentRunner(
+        WorktreeManager.discover(repository),
+        OpenCodeAdapter(os.fspath(fake_opencode)),
+    ).run(task="opencode-tool-loop", prompt="OPENCODE_TOOL_LOOP")
+
+    assert result.succeeded
+    assert result.final_message == "answer:OPENCODE_TOOL_LOOP"
+    assert result.usage.input_tokens == 61
+    assert result.usage.cached_input_tokens == 13
+    assert result.usage.output_tokens == 7
+    assert result.usage.reasoning_output_tokens == 3
+    assert result.api_equivalent_cost is not None
+    assert result.api_equivalent_cost.amount_usd == 0.00022345
+
+
+def test_opencode_workspace_sandbox_and_artifact(
+    repository: Path, fake_opencode: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, OpenCodeAdapter(os.fspath(fake_opencode)))
+
+    sandboxed = runner.run(task="opencode-sandbox", prompt="CHECK_OPENCODE_SANDBOX")
+    artifact = runner.run(
+        task="opencode-artifact",
+        prompt="WRITE_ARTIFACT",
+        sandbox="scratch-write",
+        artifacts=["report.md"],
+    )
+
+    assert sandboxed.succeeded
+    assert (manager.get("opencode-sandbox").path / "agent-write.txt").read_text() == (
+        "allowed"
+    )
+    assert not (repository / "main-write.txt").exists()
+    assert artifact.succeeded
+    assert (
+        manager.state_dir
+        / "runs"
+        / artifact.run_id
+        / artifact.artifacts[0].archive_path
+    ).read_text() == "# OpenCode artifact\n"
+
+
+@pytest.mark.parametrize("sandbox", ["scratch-write", "workspace-write"])
+def test_opencode_uses_private_runtime_state_with_read_only_global_profile(
+    repository: Path,
+    fake_opencode: Path,
+    sandbox: str,
+) -> None:
+    source_config = Path(os.environ["AOP_OPENCODE_CONFIG_DIR"])
+    source_data = Path(os.environ["AOP_OPENCODE_DATA_DIR"])
+    source_auth = source_data / "auth.json"
+    source_dependencies = source_config / "node_modules"
+    for path in (source_config, source_data, source_dependencies):
+        path.chmod(0o555)
+    source_auth.chmod(0o444)
+    task = f"managed-opencode-{sandbox}"
+    manager = WorktreeManager.discover(repository)
+
+    try:
+        runner = AgentRunner(manager, OpenCodeAdapter(os.fspath(fake_opencode)))
+        first = runner.run(task=task, prompt="first", sandbox=sandbox)
+        resumed = runner.resume(run_id=first.run_id, prompt="second")
+    finally:
+        for path in (source_config, source_data, source_dependencies):
+            path.chmod(0o755)
+        source_auth.chmod(0o644)
+
+    private_state = manager.state_dir / "provider-state" / task / "opencode"
+    assert first.succeeded
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert (private_state / "data" / "opencode" / "auth.json").read_text() == (
+        '{"opencode": {"key": "refreshed"}}\n'
+    )
+    assert (private_state / "data" / "opencode" / "opencode.db").is_file()
+    assert (private_state / "state" / "opencode" / "model.json").is_file()
+    assert (private_state / "config" / "opencode" / "package.json").is_file()
+    assert not (source_data / "opencode.db").exists()
+    assert source_auth.read_text() == '{"opencode": {"key": "test"}}\n'
+    assert ["--setenv", "XDG_DATA_HOME", os.fspath(private_state / "data")] == (
+        first.command[
+            first.command.index("XDG_DATA_HOME") - 1 : first.command.index(
+                "XDG_DATA_HOME"
+            )
+            + 2
+        ]
+    )
+    assert ["--setenv", "XDG_CACHE_HOME", os.fspath(manager.cache_dir)] == (
+        first.command[
+            first.command.index("XDG_CACHE_HOME") - 1 : first.command.index(
+                "XDG_CACHE_HOME"
+            )
+            + 2
+        ]
+    )
+    assert [
+        "--ro-bind",
+        os.fspath(source_dependencies),
+        os.fspath(private_state / "config" / "opencode" / "node_modules"),
+    ] == first.command[
+        first.command.index(os.fspath(source_dependencies))
+        - 1 : first.command.index(os.fspath(source_dependencies))
+        + 2
     ]
 
     manager.remove(task)
@@ -629,6 +827,7 @@ def test_hermes_participant_mode_is_tool_free_bounded_and_stable_across_resume(
         (CodexAdapter, "codex"),
         (ClaudeAdapter, "claude"),
         (CursorAdapter, "cursor"),
+        (OpenCodeAdapter, "opencode"),
         (AgyAdapter, "agy"),
     ],
 )
@@ -637,11 +836,13 @@ def test_unsupported_adapters_reject_participant_mode_before_creating_a_worktree
     fake_codex: Path,
     fake_claude: Path,
     fake_cursor: Path,
+    fake_opencode: Path,
     fake_agy: Path,
     adapter: (
         type[CodexAdapter]
         | type[ClaudeAdapter]
         | type[CursorAdapter]
+        | type[OpenCodeAdapter]
         | type[AgyAdapter]
     ),
     provider: str,
@@ -650,6 +851,7 @@ def test_unsupported_adapters_reject_participant_mode_before_creating_a_worktree
         "codex": fake_codex,
         "claude": fake_claude,
         "cursor": fake_cursor,
+        "opencode": fake_opencode,
         "agy": fake_agy,
     }
     binary = binaries[provider]

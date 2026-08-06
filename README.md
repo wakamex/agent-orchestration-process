@@ -15,8 +15,8 @@ each project.
 ## Reference implementation
 
 This repository includes a dependency-free Python CLI for running Codex, Claude Code, Cursor Agent,
-Antigravity (`agy`), and Hermes concurrently in isolated Git worktrees. Each adapter records a
-normalized result and resumes the exact provider session associated with an earlier run.
+OpenCode, Antigravity (`agy`), and Hermes concurrently in isolated Git worktrees. Each adapter
+records a normalized result and resumes the exact provider session associated with an earlier run.
 
 Install the CLI from this checkout:
 
@@ -53,6 +53,8 @@ aop run task-b --agent claude --model sonnet --effort high \
   --prompt "Implement the parser and its tests"
 aop run task-cursor --agent cursor \
   --prompt "Refactor the parser without changing behavior"
+aop run task-opencode --agent opencode --effort high \
+  --prompt "Fix the parser and run its tests"
 aop run task-c --agent agy --model gemini-3.5-flash --effort low \
   --prompt "Add adversarial parser tests"
 aop run task-d --agent hermes --model deepseek/deepseek-v4-flash-0731 --effort high \
@@ -87,8 +89,8 @@ worktree's `.git` pointer read-only. `scratch-write` leaves the task read-only a
 `scratch/` directory plus the shared cache writable; use it for agents that need working space but
 must not edit the repository. `danger-full-access` explicitly skips `bwrap`. Configured
 authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`,
-`AOP_CURSOR_BIN`, `AOP_AGY_BIN`, `AOP_HERMES_BIN`, and `AOP_BWRAP_BIN` may override their
-respective executables.
+`AOP_CURSOR_BIN`, `AOP_OPENCODE_BIN`, `AOP_AGY_BIN`, `AOP_HERMES_BIN`, and `AOP_BWRAP_BIN` may
+override their respective executables.
 
 Every Agy task uses a persistent private Gemini profile under
 `.aop/provider-state/<task>/agy/gemini`, including with `danger-full-access`. AOP initializes it
@@ -106,6 +108,17 @@ CLI configuration, skills, plugins, policies, and authentication are copied with
 extensions. Cursor caches use the shared AOP cache. This lets the first turn and exact resume work
 when the surrounding home directory is read-only, without modifying global Cursor state. Cleanup
 removes the private profile with the task. `danger-full-access` retains Cursor's native global state.
+
+For OpenCode in either non-danger sandbox, AOP seeds small user configuration and authentication
+files into a persistent task-local XDG profile under `.aop/provider-state/<task>/opencode`.
+OpenCode's session database, logs, model state, token refreshes, generated config metadata, and
+downloaded tools stay outside the global profile. Existing generated plugin dependencies are
+mounted read-only instead of copied, while downloads use `.aop/cache/opencode`, shared by all tasks.
+This permits a first turn and exact resume when the surrounding home directory is read-only without
+duplicating the plugin tree per task or changing global OpenCode state. Cleanup removes the private
+profile with the task. `danger-full-access` retains OpenCode's native global state. Set
+`AOP_OPENCODE_CONFIG_DIR` or `AOP_OPENCODE_DATA_DIR` only when the authenticated source profile is
+outside the standard XDG locations.
 
 For Hermes in either non-danger sandbox, AOP seeds a persistent task-local Hermes home under
 `.aop/provider-state/<task>/` from the authenticated profile. Hermes can read the existing
@@ -198,6 +211,13 @@ Cursor Agent uses `composer-2.5` by default. Pass any model ID printed by `agent
 a separate `--effort`. AOP disables Cursor's native sandbox and permission prompts inside the outer
 `bwrap` boundary, records its structured token and timing metrics, and resumes the exact chat ID.
 
+OpenCode defaults to the paid OpenCode Zen model `opencode/deepseek-v4-flash`. A short model name
+such as `deepseek-v4-flash` is automatically qualified with `opencode/`; pass a full
+`provider/model` ID to use another configured provider. AOP maps `--effort` to OpenCode's native
+`--variant`, reasserts both model and variant on exact-session resume, and uses OpenCode's automatic
+permission mode inside the outer `bwrap` boundary. Authenticate OpenCode normally before the first
+AOP run, for example with `opencode providers login`.
+
 Every run records wall-clock time and time to first event and agent response. Adapters also record
 input, cached-input, output, and reasoning-output tokens when the provider exposes them. When
 `--model` names a model in AOP's dated pricing table, the result also contains an estimated standard
@@ -213,9 +233,11 @@ metrics remain available while cost is reported as `n/a`. Claude's result stream
 resolved model, token usage, and CLI-reported USD API-equivalent cost. Hermes's session accounting
 supplies its resolved model, cache and reasoning token buckets, and provider-aware estimated or
 actual cost; AOP records the delta for each invocation so resumed turns are not double-counted. Agy
-currently supplies timing and token usage from its structured result stream. Cursor and Agy each
-report provider duration separately from AOP's wall-clock duration. Neither reports API-equivalent
-cost, so that field remains `n/a`.
+currently supplies timing and token usage from its structured result stream. Cursor, OpenCode, and
+Agy each report provider duration separately from AOP's wall-clock duration. OpenCode also reports
+per-step billed USD cost; AOP sums it for the invocation and records it as an actual CLI-reported
+cost instead of applying AOP's API price table. Cursor and Agy do not report API-equivalent cost, so
+that field remains `n/a`.
 
 Run independent tasks concurrently from a TOML manifest:
 

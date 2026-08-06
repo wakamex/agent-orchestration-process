@@ -312,6 +312,153 @@ print(json.dumps({{
 
 
 @pytest.fixture
+def fake_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    executable = tmp_path / "opencode"
+    source_config = tmp_path / "opencode-config"
+    source_config.mkdir()
+    (source_config / "opencode.jsonc").write_text('{"instructions": ["AGENTS.md"]}\n')
+    (source_config / "AGENTS.md").write_text("test instructions\n")
+    dependencies = source_config / "node_modules" / "@opencode-ai" / "plugin"
+    dependencies.mkdir(parents=True)
+    (dependencies / "package.json").write_text('{"version": "test"}\n')
+    source_data = tmp_path / "opencode-data"
+    source_data.mkdir()
+    (source_data / "auth.json").write_text('{"opencode": {"key": "test"}}\n')
+    monkeypatch.setenv("AOP_OPENCODE_CONFIG_DIR", os.fspath(source_config))
+    monkeypatch.setenv("AOP_OPENCODE_DATA_DIR", os.fspath(source_data))
+    executable.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+if args[0] != "run" or "--format" not in args or "--auto" not in args:
+    raise RuntimeError(f"unexpected invocation: {{args}}")
+prompt = args[args.index("--") + 1]
+config_dir = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
+data_dir = pathlib.Path(os.environ["XDG_DATA_HOME"]) / "opencode"
+state_dir = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "opencode"
+cache_dir = pathlib.Path(os.environ["XDG_CACHE_HOME"]) / "opencode"
+auth_path = data_dir / "auth.json"
+if not auth_path.is_file():
+    raise RuntimeError("missing private OpenCode authentication")
+if not config_dir.joinpath("AGENTS.md").is_file():
+    raise RuntimeError("missing private OpenCode configuration")
+if not config_dir.joinpath(
+    "node_modules", "@opencode-ai", "plugin", "package.json"
+).is_file():
+    raise RuntimeError("missing shared OpenCode plugin dependencies")
+auth_path.write_text('{{"opencode": {{"key": "refreshed"}}}}\\n')
+config_dir.joinpath("package.json").write_text('{{"dependencies": {{}}}}\\n')
+state_dir.mkdir(parents=True, exist_ok=True)
+state_dir.joinpath("model.json").write_text('{{}}\\n')
+cache_dir.mkdir(parents=True, exist_ok=True)
+cache_dir.joinpath("version").write_text("test\\n")
+session_id = (
+    args[args.index("--session") + 1]
+    if "--session" in args
+    else "ses_opencode_test"
+)
+database = data_dir / "opencode.db"
+if "--session" in args:
+    state = json.loads(database.read_text())
+    if state["session_id"] != session_id:
+        raise RuntimeError("session is absent from private state")
+else:
+    database.write_text(json.dumps({{"session_id": session_id}}))
+if prompt == "OPENCODE_DIFFERENT_SESSION":
+    session_id = "ses_opencode_different"
+if prompt.startswith("WRITE_ARTIFACT"):
+    pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("report.md").write_text(
+        "# OpenCode artifact\\n"
+    )
+if prompt == "CHECK_OPENCODE_SANDBOX":
+    pathlib.Path("agent-write.txt").write_text("allowed")
+    try:
+        pathlib.Path(os.environ["AOP_ROOT"]).joinpath("main-write.txt").write_text(
+            "forbidden"
+        )
+    except OSError:
+        pass
+    else:
+        raise RuntimeError("sandbox allowed main-worktree mutation")
+
+print(json.dumps({{
+    "type": "step_start",
+    "timestamp": 1000,
+    "sessionID": session_id,
+    "part": {{"type": "step-start"}},
+}}), flush=True)
+if prompt == "OPENCODE_TOOL_LOOP":
+    print(json.dumps({{
+        "type": "text",
+        "timestamp": 1100,
+        "sessionID": session_id,
+        "part": {{"type": "text", "text": "intermediate"}},
+    }}), flush=True)
+    print(json.dumps({{
+        "type": "step_finish",
+        "timestamp": 1200,
+        "sessionID": session_id,
+        "part": {{
+            "type": "step-finish",
+            "reason": "tool-calls",
+            "tokens": {{
+                "total": 11,
+                "input": 1,
+                "output": 2,
+                "reasoning": 1,
+                "cache": {{"read": 3, "write": 4}},
+            }},
+            "cost": 0.0001,
+        }},
+    }}), flush=True)
+    print(json.dumps({{
+        "type": "step_start",
+        "timestamp": 1300,
+        "sessionID": session_id,
+        "part": {{"type": "step-start"}},
+    }}), flush=True)
+if prompt == "OPENCODE_ERROR":
+    print(json.dumps({{
+        "type": "error",
+        "timestamp": 1200,
+        "sessionID": session_id,
+        "error": {{"name": "ProviderError", "data": {{"message": "synthetic failure"}}}},
+    }}), flush=True)
+else:
+    print(json.dumps({{
+        "type": "text",
+        "timestamp": 1400,
+        "sessionID": session_id,
+        "part": {{"type": "text", "text": f"answer:{{prompt}}"}},
+    }}), flush=True)
+    print(json.dumps({{
+        "type": "step_finish",
+        "timestamp": 1500,
+        "sessionID": session_id,
+        "part": {{
+            "type": "step-finish",
+            "reason": "stop",
+            "tokens": {{
+                "total": 60,
+                "input": 40,
+                "output": 5,
+                "reasoning": 2,
+                "cache": {{"read": 10, "write": 3}},
+            }},
+            "cost": 0.00012345,
+        }},
+    }}), flush=True)
+"""
+    )
+    executable.chmod(0o755)
+    return executable
+
+
+@pytest.fixture
 def fake_agy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     executable = tmp_path / "agy"
     source_dir = tmp_path / "agy-source"

@@ -819,6 +819,262 @@ class CursorAdapter:
         }
 
 
+class OpenCodeAdapter:
+    provider = "opencode"
+    modes = frozenset({"agent"})
+    DEFAULT_MODEL = "opencode/deepseek-v4-flash"
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_OPENCODE_BIN", "opencode")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        selected = model or self.DEFAULT_MODEL
+        if "/" not in selected:
+            selected = f"opencode/{selected}"
+        return selected, effort
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        command = _provider_command(
+            self._command(request, worktree), request, worktree, environment
+        )
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=None,
+            timeout_seconds=request.timeout_seconds,
+            is_response=self._is_response,
+        )
+        _atomic_write(run_dir / "events.jsonl", capture.stdout)
+        _atomic_write(run_dir / "stderr.log", capture.stderr)
+        parsed = self._parse(capture.stdout, request.model)
+        final_message = parsed["final_message"]
+        if final_message is not None:
+            _atomic_write(run_dir / "last-message.txt", final_message)
+        reported_session_id = parsed["session_id"]
+        session_id = reported_session_id
+        resume_error = None
+        if request.session_id and reported_session_id != request.session_id:
+            session_id = None
+            if reported_session_id is None:
+                resume_error = (
+                    "OpenCode resume result did not report the requested session ID "
+                    f"{request.session_id}"
+                )
+            else:
+                resume_error = (
+                    f"OpenCode resumed as session {reported_session_id} instead of "
+                    f"the requested session {request.session_id}"
+                )
+
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif capture.exit_code:
+            error = (
+                capture.stderr.strip()
+                or parsed["error"]
+                or f"OpenCode exited with status {capture.exit_code}"
+            )
+        elif resume_error:
+            error = resume_error
+        elif parsed["error"]:
+            error = parsed["error"]
+        elif not parsed["has_finish"]:
+            error = "OpenCode did not emit a terminal step_finish event"
+        elif reported_session_id is None:
+            error = "OpenCode result did not report a session ID"
+        elif final_message is None:
+            error = "OpenCode did not emit a final response"
+        else:
+            error = None
+
+        return RunResult(
+            run_id=request.run_id,
+            provider=self.provider,
+            mode=request.mode,
+            task=request.task,
+            model=request.model,
+            effort=request.effort,
+            session_id=session_id,
+            command=command,
+            started_at=started_at,
+            finished_at=_now(),
+            duration_seconds=capture.duration_seconds,
+            time_to_first_event_seconds=capture.first_event_seconds,
+            time_to_first_response_seconds=capture.first_response_seconds,
+            exit_code=capture.exit_code,
+            timed_out=capture.timed_out,
+            error=error,
+            final_message=final_message,
+            usage=parsed["usage"],
+            api_equivalent_cost=parsed["cost"],
+            provider_duration_seconds=parsed["duration_seconds"],
+        )
+
+    def _command(self, request: RunRequest, worktree: Worktree) -> list[str]:
+        command = [
+            self.binary,
+            "run",
+            "--format",
+            "json",
+            "--auto",
+            "--dir",
+            os.fspath(worktree.path),
+        ]
+        if request.model:
+            command.extend(["--model", request.model])
+        if request.effort:
+            command.extend(["--variant", request.effort])
+        if request.session_id:
+            command.extend(["--session", request.session_id])
+        command.extend(["--", request.prompt])
+        return command
+
+    @staticmethod
+    def _is_response(line: str) -> bool:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(event, dict) or event.get("type") != "text":
+            return False
+        part = event.get("part")
+        return isinstance(part, dict) and bool(part.get("text"))
+
+    @staticmethod
+    def _parse(output: str, model: str | None) -> dict[str, object]:
+        session_id = None
+        final_message = None
+        current_message_parts: list[str] = []
+        error = None
+        has_finish = False
+        input_tokens = 0
+        cached_input_tokens = 0
+        output_tokens = 0
+        reasoning_output_tokens = 0
+        cost_usd = 0.0
+        first_timestamp = None
+        last_timestamp = None
+
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_session_id = event.get("sessionID")
+            if isinstance(event_session_id, str) and event_session_id:
+                session_id = event_session_id
+            timestamp = event.get("timestamp")
+            if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+                first_timestamp = (
+                    float(timestamp)
+                    if first_timestamp is None
+                    else min(first_timestamp, float(timestamp))
+                )
+                last_timestamp = (
+                    float(timestamp)
+                    if last_timestamp is None
+                    else max(last_timestamp, float(timestamp))
+                )
+            event_type = event.get("type")
+            part = event.get("part")
+            if event_type == "step_start":
+                current_message_parts = []
+            elif event_type == "text" and isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    current_message_parts.append(text)
+            elif event_type == "error":
+                error = OpenCodeAdapter._error_message(event.get("error"))
+            elif event_type == "step_finish" and isinstance(part, dict):
+                has_finish = True
+                final_message = "".join(current_message_parts) or None
+                tokens = part.get("tokens")
+                if isinstance(tokens, dict):
+                    cache = tokens.get("cache")
+                    cache = cache if isinstance(cache, dict) else {}
+                    cache_read = OpenCodeAdapter._integer(cache.get("read"))
+                    cache_write = OpenCodeAdapter._integer(cache.get("write"))
+                    input_tokens += (
+                        OpenCodeAdapter._integer(tokens.get("input"))
+                        + cache_read
+                        + cache_write
+                    )
+                    cached_input_tokens += cache_read
+                    output_tokens += OpenCodeAdapter._integer(tokens.get("output"))
+                    reasoning_output_tokens += OpenCodeAdapter._integer(
+                        tokens.get("reasoning")
+                    )
+                amount = part.get("cost")
+                if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+                    cost_usd += max(float(amount), 0.0)
+
+        usage = TokenUsage(
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            output_tokens=output_tokens,
+            reasoning_output_tokens=reasoning_output_tokens,
+        )
+        cost = None
+        if has_finish:
+            priced_as = model or "opencode"
+            cost = EstimatedCost(
+                amount_usd=round(cost_usd, 8),
+                currency="USD",
+                estimated=False,
+                model=priced_as,
+                priced_as=priced_as,
+                pricing_version="opencode-cli-reported",
+                pricing_source="OpenCode step_finish events",
+                long_context_pricing=False,
+            )
+        duration_seconds = None
+        if first_timestamp is not None and last_timestamp is not None:
+            duration_seconds = round((last_timestamp - first_timestamp) / 1000, 6)
+        return {
+            "session_id": session_id,
+            "final_message": final_message,
+            "error": error,
+            "has_finish": has_finish,
+            "usage": usage,
+            "cost": cost,
+            "duration_seconds": duration_seconds,
+        }
+
+    @staticmethod
+    def _error_message(value: object) -> str:
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, dict):
+            data = value.get("data")
+            for candidate in (
+                value.get("message"),
+                data.get("message") if isinstance(data, dict) else None,
+                value.get("name"),
+            ):
+                if isinstance(candidate, str) and candidate:
+                    return candidate
+            return json.dumps(value, sort_keys=True)
+        return "OpenCode turn failed"
+
+    @staticmethod
+    def _integer(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(value, 0)
+
+
 class AgyAdapter:
     provider = "agy"
     modes = frozenset({"agent"})
@@ -1345,7 +1601,7 @@ def _provider_command(
     else:
         wrapped.extend(["--bind", os.fspath(scratch), os.fspath(scratch)])
     wrapped.extend(["--bind", os.fspath(cache), os.fspath(cache)])
-    if request.provider in {"agy", "cursor", "hermes"}:
+    if request.provider in {"agy", "cursor", "hermes", "opencode"}:
         wrapped.extend(["--bind", os.fspath(provider_state), os.fspath(provider_state)])
     if request.provider == "agy":
         source_dir = _agy_source_dir(environment)
@@ -1388,6 +1644,47 @@ def _provider_command(
                 os.fspath(isolated_home),
             ]
         )
+    if request.provider == "opencode":
+        source_config = _opencode_source_config(environment)
+        source_data = _opencode_source_data(environment)
+        home_config = Path(environment["HOME"]) / ".opencode"
+        isolated_state = provider_state / "opencode"
+        _prepare_opencode_state(source_config, source_data, isolated_state)
+        opencode_cache = cache / "opencode"
+        opencode_cache.mkdir(parents=True, exist_ok=True)
+        wrapped.extend(
+            [
+                "--setenv",
+                "XDG_CONFIG_HOME",
+                os.fspath(isolated_state / "config"),
+                "--setenv",
+                "XDG_DATA_HOME",
+                os.fspath(isolated_state / "data"),
+                "--setenv",
+                "XDG_STATE_HOME",
+                os.fspath(isolated_state / "state"),
+                "--setenv",
+                "XDG_CACHE_HOME",
+                os.fspath(cache),
+                "--setenv",
+                "OPENCODE_DISABLE_AUTOUPDATE",
+                "1",
+            ]
+        )
+        dependencies = source_config / "node_modules" if source_config else None
+        private_dependencies = isolated_state / "config" / "opencode" / "node_modules"
+        if dependencies is not None and dependencies.is_dir():
+            wrapped.extend(
+                [
+                    "--ro-bind",
+                    os.fspath(dependencies),
+                    os.fspath(private_dependencies),
+                ]
+            )
+        if home_config.is_dir():
+            wrapped.extend(
+                ["--ro-bind", os.fspath(home_config), os.fspath(home_config)]
+            )
     wrapped.extend(["--chdir", os.fspath(worktree.path), "--", *command])
     return wrapped
 
@@ -1412,6 +1709,15 @@ _CURSOR_RUNTIME_DIRECTORIES = {
     "projects",
     "worktrees",
 }
+
+_OPENCODE_CONFIG_RUNTIME_NAMES = {
+    ".gitignore",
+    "bun.lock",
+    "node_modules",
+    "package-lock.json",
+    "package.json",
+}
+_OPENCODE_DATA_SEED_FILES = {"auth.json", "mcp-auth.json"}
 
 
 def _cursor_source_home(environment: dict[str, str]) -> Path:
@@ -1490,6 +1796,67 @@ def _make_tree_user_writable(root: Path) -> None:
             if entry.is_dir():
                 permissions |= stat.S_IXUSR
             entry.chmod(entry.stat().st_mode | permissions)
+
+
+def _opencode_source_config(environment: dict[str, str]) -> Path | None:
+    configured = environment.get("AOP_OPENCODE_CONFIG_DIR")
+    base = Path(environment.get("XDG_CONFIG_HOME", Path(environment["HOME"]) / ".config"))
+    source = Path(configured).expanduser() if configured else base / "opencode"
+    if source.is_dir():
+        return source.resolve()
+    if configured:
+        raise AOPError(f"OpenCode config directory does not exist: {source}")
+    return None
+
+
+def _opencode_source_data(environment: dict[str, str]) -> Path | None:
+    configured = environment.get("AOP_OPENCODE_DATA_DIR")
+    base = Path(
+        environment.get(
+            "XDG_DATA_HOME", Path(environment["HOME"]) / ".local" / "share"
+        )
+    )
+    source = Path(configured).expanduser() if configured else base / "opencode"
+    if source.is_dir():
+        return source.resolve()
+    if configured:
+        raise AOPError(f"OpenCode data directory does not exist: {source}")
+    return None
+
+
+def _prepare_opencode_state(
+    source_config: Path | None, source_data: Path | None, destination: Path
+) -> None:
+    if destination.is_dir():
+        return
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    private_config = temporary / "config" / "opencode"
+    private_data = temporary / "data" / "opencode"
+    private_state = temporary / "state"
+    private_config.mkdir(parents=True, mode=0o700)
+    private_data.mkdir(parents=True, mode=0o700)
+    private_state.mkdir(parents=True, mode=0o700)
+    try:
+        if source_config:
+            for entry in source_config.iterdir():
+                if entry.name in _OPENCODE_CONFIG_RUNTIME_NAMES:
+                    continue
+                target = private_config / entry.name
+                if entry.is_dir():
+                    shutil.copytree(entry, target, symlinks=True)
+                elif entry.is_file():
+                    shutil.copy2(entry, target)
+        if source_data:
+            for name in _OPENCODE_DATA_SEED_FILES:
+                source = source_data / name
+                if source.is_file():
+                    shutil.copy2(source, private_data / name)
+        (private_config / "node_modules").mkdir()
+        _make_tree_user_writable(temporary)
+        os.replace(temporary, destination)
+    except OSError as error:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise AOPError(f"could not prepare isolated OpenCode state: {error}") from error
 
 
 def _agy_source_dir(environment: dict[str, str]) -> Path:
@@ -1609,6 +1976,8 @@ def adapter_for(agent: str) -> AgentAdapter:
         return ClaudeAdapter()
     if agent == "cursor":
         return CursorAdapter()
+    if agent == "opencode":
+        return OpenCodeAdapter()
     if agent == "agy":
         return AgyAdapter()
     if agent == "hermes":

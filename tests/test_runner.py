@@ -453,6 +453,21 @@ def test_turn_failure_is_not_reported_as_success(
     assert result.final_message is None
 
 
+def test_codex_requires_a_terminal_completion_event(
+    repository: Path, fake_codex: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+
+    result = runner.run(task="incomplete", prompt="INCOMPLETE")
+
+    assert not result.succeeded
+    assert result.exit_code == 0
+    assert result.session_id == SESSION_ID
+    assert result.final_message == "answer:INCOMPLETE"
+    assert result.error == "Codex did not emit a terminal turn.completed event"
+
+
 def test_cli_runs_codex_and_reports_resumable_ids(
     repository: Path,
     fake_codex: Path,

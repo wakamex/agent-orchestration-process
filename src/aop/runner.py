@@ -217,7 +217,7 @@ class CodexAdapter:
         _atomic_write(run_dir / "events.jsonl", stdout)
         _atomic_write(run_dir / "stderr.log", stderr)
 
-        session_id, event_error, usage = self._parse_events(stdout)
+        session_id, event_error, usage, completed = self._parse_events(stdout)
         if timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif event_error:
@@ -226,6 +226,8 @@ class CodexAdapter:
             error = stderr.strip() or f"Codex exited with status {exit_code}"
         elif session_id is None:
             error = "Codex did not emit a thread.started event"
+        elif not completed:
+            error = "Codex did not emit a terminal turn.completed event"
         else:
             error = None
 
@@ -285,10 +287,11 @@ class CodexAdapter:
     @staticmethod
     def _parse_events(
         output: str,
-    ) -> tuple[str | None, str | None, TokenUsage]:
+    ) -> tuple[str | None, str | None, TokenUsage, bool]:
         session_id = None
         error = None
         usage = TokenUsage()
+        completed = False
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -311,21 +314,22 @@ class CodexAdapter:
                     error = "Codex turn failed"
             elif event_type == "error" and isinstance(event.get("message"), str):
                 error = event["message"]
-            elif event_type == "turn.completed" and isinstance(
-                event.get("usage"), dict
-            ):
-                current = TokenUsage.from_dict(event["usage"])
-                usage = TokenUsage(
-                    input_tokens=usage.input_tokens + current.input_tokens,
-                    cached_input_tokens=(
-                        usage.cached_input_tokens + current.cached_input_tokens
-                    ),
-                    output_tokens=usage.output_tokens + current.output_tokens,
-                    reasoning_output_tokens=(
-                        usage.reasoning_output_tokens + current.reasoning_output_tokens
-                    ),
-                )
-        return session_id, error, usage
+            elif event_type == "turn.completed":
+                completed = True
+                if isinstance(event.get("usage"), dict):
+                    current = TokenUsage.from_dict(event["usage"])
+                    usage = TokenUsage(
+                        input_tokens=usage.input_tokens + current.input_tokens,
+                        cached_input_tokens=(
+                            usage.cached_input_tokens + current.cached_input_tokens
+                        ),
+                        output_tokens=usage.output_tokens + current.output_tokens,
+                        reasoning_output_tokens=(
+                            usage.reasoning_output_tokens
+                            + current.reasoning_output_tokens
+                        ),
+                    )
+        return session_id, error, usage, completed
 
     @staticmethod
     def _is_agent_message(line: str) -> bool:
@@ -513,6 +517,8 @@ class ClaudeAdapter:
             )
         elif parsed["session_id"] is None:
             error = "Claude did not report a session ID"
+        elif not parsed["has_result"]:
+            error = "Claude did not emit a terminal result event"
         else:
             error = None
         return RunResult(
@@ -581,6 +587,7 @@ class ClaudeAdapter:
         error = None
         usage = TokenUsage()
         cost = None
+        has_result = False
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -593,6 +600,7 @@ class ClaudeAdapter:
                 model = event.get("model") or model
             if event.get("type") != "result":
                 continue
+            has_result = True
             final_message = (
                 event.get("result") if isinstance(event.get("result"), str) else None
             )
@@ -629,6 +637,7 @@ class ClaudeAdapter:
             "error": error,
             "usage": usage,
             "cost": cost,
+            "has_result": has_result,
         }
 
 

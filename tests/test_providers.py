@@ -54,6 +54,21 @@ def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> Non
     assert "--model" not in resumed.command
 
 
+def test_claude_requires_a_terminal_result_event(
+    repository: Path, fake_claude: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude)))
+
+    result = runner.run(task="claude-incomplete", prompt="INCOMPLETE")
+
+    assert not result.succeeded
+    assert result.exit_code == 0
+    assert result.session_id is not None
+    assert result.final_message is None
+    assert result.error == "Claude did not emit a terminal result event"
+
+
 def test_cursor_defaults_to_composer_and_resumes_exact_chat(
     repository: Path, fake_cursor: Path
 ) -> None:

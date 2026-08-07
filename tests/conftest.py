@@ -213,6 +213,8 @@ print(json.dumps({{
     "type": "item.completed",
     "item": {{"id": "item_0", "type": "agent_message", "text": message}},
 }}), flush=True)
+if prompt == "INCOMPLETE":
+    raise SystemExit(0)
 print(json.dumps({{
     "type": "turn.completed",
     "usage": {{
@@ -286,6 +288,8 @@ print(json.dumps({{
     "session_id": session_id,
     "message": {{"content": [{{"type": "text", "text": "working"}}]}},
 }}), flush=True)
+if prompt == "INCOMPLETE":
+    raise SystemExit(0)
 print(json.dumps({{
     "type": "result",
     "subtype": "success",

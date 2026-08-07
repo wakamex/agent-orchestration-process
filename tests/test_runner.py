@@ -468,6 +468,24 @@ def test_codex_requires_a_terminal_completion_event(
     assert result.error == "Codex did not emit a terminal turn.completed event"
 
 
+def test_codex_rejects_a_changed_resume_thread(
+    repository: Path, fake_codex: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+    first = runner.run(task="codex-resume-identity", prompt="first")
+
+    resumed = runner.resume(run_id=first.run_id, prompt="DIFFERENT_SESSION")
+
+    assert not resumed.succeeded
+    assert resumed.exit_code == 0
+    assert resumed.session_id is None
+    assert resumed.error == (
+        "Codex resumed as thread different-codex-thread instead of the requested "
+        f"thread {first.session_id}"
+    )
+
+
 def test_cli_runs_codex_and_reports_resumable_ids(
     repository: Path,
     fake_codex: Path,

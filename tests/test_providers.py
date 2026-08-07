@@ -69,6 +69,24 @@ def test_claude_requires_a_terminal_result_event(
     assert result.error == "Claude did not emit a terminal result event"
 
 
+def test_claude_rejects_a_changed_resume_session(
+    repository: Path, fake_claude: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude)))
+    first = runner.run(task="claude-resume-identity", prompt="first")
+
+    resumed = runner.resume(run_id=first.run_id, prompt="DIFFERENT_SESSION")
+
+    assert not resumed.succeeded
+    assert resumed.exit_code == 0
+    assert resumed.session_id is None
+    assert resumed.error == (
+        "Claude resumed as session different-claude-session instead of the requested "
+        f"session {first.session_id}"
+    )
+
+
 def test_cursor_defaults_to_composer_and_resumes_exact_chat(
     repository: Path, fake_cursor: Path
 ) -> None:

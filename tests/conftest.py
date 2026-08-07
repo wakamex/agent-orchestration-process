@@ -174,6 +174,8 @@ elif prompt.startswith("SYMLINK_ARTIFACT"):
 session_id = {SESSION_ID!r}
 if "resume" in args:
     session_id = args[args.index("resume") + 1]
+if prompt == "DIFFERENT_SESSION":
+    session_id = "different-codex-thread"
 
 if prompt.startswith("AOP conflict resolution"):
     conflicts = subprocess.run(
@@ -277,6 +279,8 @@ session_id = (
     if "--resume" in args
     else args[args.index("--session-id") + 1]
 )
+if prompt == "DIFFERENT_SESSION":
+    session_id = "different-claude-session"
 print(json.dumps({{
     "type": "system",
     "subtype": "init",

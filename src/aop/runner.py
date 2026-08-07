@@ -217,14 +217,30 @@ class CodexAdapter:
         _atomic_write(run_dir / "events.jsonl", stdout)
         _atomic_write(run_dir / "stderr.log", stderr)
 
-        session_id, event_error, usage, completed = self._parse_events(stdout)
+        reported_session_id, event_error, usage, completed = self._parse_events(stdout)
+        session_id = reported_session_id
+        resume_error = None
+        if request.session_id and reported_session_id != request.session_id:
+            session_id = None
+            if reported_session_id is None:
+                resume_error = (
+                    "Codex resume result did not report the requested thread ID "
+                    f"{request.session_id}"
+                )
+            else:
+                resume_error = (
+                    f"Codex resumed as thread {reported_session_id} instead of "
+                    f"the requested thread {request.session_id}"
+                )
         if timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif event_error:
             error = event_error
         elif exit_code != 0:
             error = stderr.strip() or f"Codex exited with status {exit_code}"
-        elif session_id is None:
+        elif resume_error:
+            error = resume_error
+        elif reported_session_id is None:
             error = "Codex did not emit a thread.started event"
         elif not completed:
             error = "Codex did not emit a terminal turn.completed event"
@@ -244,7 +260,7 @@ class CodexAdapter:
             task=request.task,
             model=request.model,
             effort=request.effort,
-            session_id=session_id or request.session_id,
+            session_id=session_id,
             command=command,
             started_at=started_at,
             finished_at=_now(),
@@ -506,6 +522,21 @@ class ClaudeAdapter:
         final_message = parsed["final_message"]
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
+        reported_session_id = parsed["session_id"]
+        session_id = reported_session_id
+        resume_error = None
+        if request.session_id and reported_session_id != request.session_id:
+            session_id = None
+            if reported_session_id is None:
+                resume_error = (
+                    "Claude resume result did not report the requested session ID "
+                    f"{request.session_id}"
+                )
+            else:
+                resume_error = (
+                    f"Claude resumed as session {reported_session_id} instead of "
+                    f"the requested session {request.session_id}"
+                )
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif parsed["error"]:
@@ -515,7 +546,9 @@ class ClaudeAdapter:
                 capture.stderr.strip()
                 or f"Claude exited with status {capture.exit_code}"
             )
-        elif parsed["session_id"] is None:
+        elif resume_error:
+            error = resume_error
+        elif reported_session_id is None:
             error = "Claude did not report a session ID"
         elif not parsed["has_result"]:
             error = "Claude did not emit a terminal result event"
@@ -528,7 +561,7 @@ class ClaudeAdapter:
             task=request.task,
             model=parsed["model"] or request.model,
             effort=request.effort,
-            session_id=parsed["session_id"] or request.session_id,
+            session_id=session_id,
             command=command,
             started_at=started_at,
             finished_at=_now(),

@@ -412,6 +412,12 @@ path of another registered worktree before invoking AOP when that linked worktre
 primary checkout, must own `.aop/`, candidate worktrees, run records, and provider state. AOP rejects
 a configured path that Git does not report as a worktree.
 
+Set `AOP_HIDE_PATHS` to an `os.pathsep`-separated list of existing absolute directories that must be
+masked with empty temporary filesystems inside sandboxed provider processes. This is intended for
+same-user control sockets and similarly scoped host interfaces that a worker must not reach. AOP
+rejects symlinks, missing paths, and required runtime directories. It has no effect in explicit
+`danger-full-access` mode.
+
 Model session identifiers, parent runs, timeouts, and terminal status live in each run's JSON
 artifacts instead of mutable environment variables.
 

@@ -95,6 +95,25 @@ def test_run_persists_structured_codex_artifacts(
     assert (run_dir / "stderr.log").read_text() == ""
 
 
+def test_sandbox_can_hide_external_control_directories(
+    repository: Path,
+    fake_codex: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = tmp_path / "control"
+    control.mkdir()
+    monkeypatch.setenv("AOP_HIDE_PATHS", os.fspath(control))
+    manager = WorktreeManager.discover(repository)
+    result = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+        task="hidden-control", prompt="make the change", timeout_seconds=5
+    )
+
+    index = result.command.index("--tmpfs")
+    assert result.command[index + 1] == os.fspath(control)
+    assert result.succeeded
+
+
 def test_declared_artifact_is_validated_and_archived(
     repository: Path, fake_codex: Path
 ) -> None:

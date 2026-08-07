@@ -1589,10 +1589,19 @@ def _provider_command(
         "--dev-bind",
         "/",
         "/",
-        "--ro-bind",
-        os.fspath(root),
-        os.fspath(root),
     ]
+    hidden_paths = environment.get("AOP_HIDE_PATHS", "")
+    for raw_path in hidden_paths.split(os.pathsep):
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+            raise AOPError(f"AOP hidden path must be an existing absolute directory: {path}")
+        resolved = path.resolve(strict=True)
+        if resolved in {Path("/"), root, worktree.path, cache, provider_state, scratch}:
+            raise AOPError(f"AOP refuses to hide a required runtime path: {resolved}")
+        wrapped.extend(["--tmpfs", os.fspath(resolved)])
+    wrapped.extend(["--ro-bind", os.fspath(root), os.fspath(root)])
     if request.sandbox == "workspace-write":
         wrapped.extend(["--bind", os.fspath(worktree.path), os.fspath(worktree.path)])
         git_marker = worktree.path / ".git"

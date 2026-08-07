@@ -18,6 +18,22 @@ This repository includes a dependency-free Python CLI for running Codex, Claude 
 OpenCode, Antigravity (`agy`), and Hermes concurrently in isolated Git worktrees. Each adapter
 records a normalized result and resumes the exact provider session associated with an earlier run.
 
+### Bounded adapter design
+
+AOP is built for bounded automation, not as a general interactive agent host. Its provider adapters
+deliberately invoke the installed CLIs directly for one turn at a time and normalize only the
+contract needed by an automated worker: model and effort selection, a final result, exact resume
+identity, timing and usage, durable logs, process termination, and declared artifacts. Worktrees,
+filesystem isolation, deadlines, and integration remain AOP responsibilities outside the adapters.
+
+This direct design keeps each provider process disposable and makes timeout recovery and
+process-group cleanup explicit. AOP does not attempt to reproduce interactive host features such as
+live steering, approval dialogs, terminal rendering, session browsing, or mid-turn configuration.
+ACP adapters provide those features through a larger persistent protocol and state-machine surface;
+their implementations are useful references for provider event and resume semantics, but they are
+not AOP runtime dependencies. AOP should adopt an ACP transport only if a demonstrated bounded-work
+requirement becomes simpler and more reliable with it, rather than for general protocol parity.
+
 Install the CLI from this checkout:
 
 ```sh

@@ -337,6 +337,7 @@ def _report_run(
         metrics += f" api_equiv=${result.api_equivalent_cost.amount_usd:.6f}"
     else:
         metrics += " api_equiv=n/a"
+    metrics += f" billing={result.billing.route}"
     print(
         f"aop: run_id={result.run_id} session_id={result.session_id or '-'} {metrics} "
         f"artifacts={manager.state_dir / 'runs' / result.run_id}",
@@ -364,7 +365,7 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
         file=sys.stderr,
     )
     print(
-        "aop: task\tagent\tmodel\teffort\ttime\ttokens\tapi-equiv",
+        "aop: task\tagent\tmodel\teffort\ttime\ttokens\tapi-equiv\tbilling",
         file=sys.stderr,
     )
     for task in result.tasks:
@@ -385,7 +386,8 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
         )
         print(
             f"aop: {task.task}\t{task.agent}\t{task.model or '(configured)'}\t"
-            f"{task.effort or '(configured)'}\t{duration}\t{tokens}\t{cost}",
+            f"{task.effort or '(configured)'}\t{duration}\t{tokens}\t{cost}\t"
+            f"{task.billing_route or 'unknown'}",
             file=sys.stderr,
         )
     if result.interrupted:

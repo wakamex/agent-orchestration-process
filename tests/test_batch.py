@@ -89,6 +89,7 @@ prompt = "four"
     assert result.tasks[0].input_tokens == 1
     assert result.tasks[0].output_tokens == 1
     assert result.tasks[0].api_equivalent_cost_usd == 0.000035
+    assert result.tasks[0].billing_route == "subscription"
     assert {item.task for item in manager.list()} == {"alpha", "beta", "gamma", "delta"}
     assert sum(message.endswith("started") for message in messages) == 4
 
@@ -97,6 +98,7 @@ prompt = "four"
     assert summary["succeeded"] is True
     assert len(summary["tasks"]) == 4
     assert summary["tasks"][0]["model"] == "gpt-5.6-sol"
+    assert summary["tasks"][0]["billing_route"] == "subscription"
 
 
 def test_batch_archives_declared_artifacts(

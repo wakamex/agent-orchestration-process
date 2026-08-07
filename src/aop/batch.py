@@ -70,6 +70,7 @@ class BatchTaskResult:
     output_tokens: int | None
     reasoning_output_tokens: int | None
     api_equivalent_cost_usd: float | None
+    billing_route: str | None
     exit_code: int | None
     error: str | None
 
@@ -173,6 +174,7 @@ class BatchRunner:
                     output_tokens=None,
                     reasoning_output_tokens=None,
                     api_equivalent_cost_usd=None,
+                    billing_route=None,
                     exit_code=None,
                     error="batch interrupted before launch",
                 )
@@ -219,6 +221,7 @@ class BatchRunner:
                 output_tokens=None,
                 reasoning_output_tokens=None,
                 api_equivalent_cost_usd=None,
+                billing_route=None,
                 exit_code=None,
                 error=str(error),
             )
@@ -241,6 +244,7 @@ class BatchRunner:
                 if result.api_equivalent_cost
                 else None
             ),
+            billing_route=result.billing.route,
             exit_code=result.exit_code,
             error=result.error,
         )

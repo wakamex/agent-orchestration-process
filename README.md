@@ -260,6 +260,15 @@ USD cost.
 This is a comparison metric for subscription runs, not an amount billed to the account. Reasoning
 tokens are reported separately but are already included in output tokens and are not charged twice.
 
+Each normalized run result also records sanitized `billing` provenance separately from that
+comparison cost. `route` is one of `subscription`, `provider-credits`, `metered-api`, `local`, or
+`unknown`; `credential_source` identifies only the credential class, and `detected_by` identifies
+the provider metadata used to infer it. `actual_cost_known` is true only when the agent CLI reports
+an actual cost for a route that can incur a per-use charge. AOP never copies credential values,
+account identifiers, or provider configuration into the result. When an adapter cannot distinguish
+the active billing route reliably, it records `unknown` instead of guessing. The terse run summary
+prints the route as `billing=...`.
+
 Before dispatching any AOP command, the CLI verifies that its global models.dev catalog cache is
 less than 24 hours old. A stale or missing cache is refreshed under a process lock and replaced
 atomically. If refresh fails, AOP fails closed instead of reporting or using expired prices. Set

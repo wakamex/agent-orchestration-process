@@ -41,6 +41,10 @@ def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> Non
     assert first.usage.output_tokens == 40
     assert first.api_equivalent_cost is not None
     assert first.api_equivalent_cost.amount_usd == 0.0123
+    assert first.billing.route == "subscription"
+    assert first.billing.credential_source == "claude-oauth"
+    assert first.billing.detected_by == "claude auth status"
+    assert not first.billing.actual_cost_known
     assert first.command[0] == "bwrap"
     assert "--dangerously-skip-permissions" in first.command
     assert ["--model", "opus"] == first.command[
@@ -52,6 +56,22 @@ def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> Non
     assert resumed.succeeded
     assert ["--resume", first.session_id] == resumed.command[-2:]
     assert "--model" not in resumed.command
+
+
+def test_claude_records_metered_api_authentication_without_credentials(
+    repository: Path,
+    fake_claude: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_FAKE_CLAUDE_AUTH", "api-key")
+    result = AgentRunner(
+        WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+    ).run(task="claude-api-billing", prompt="test")
+
+    assert result.succeeded
+    assert result.billing.route == "metered-api"
+    assert result.billing.credential_source == "anthropic-api-key"
+    assert not result.billing.actual_cost_known
 
 
 def test_claude_requires_a_terminal_result_event(
@@ -105,6 +125,9 @@ def test_cursor_defaults_to_composer_and_resumes_exact_chat(
     assert first.usage.output_tokens == 20
     assert first.provider_duration_seconds == 1.25
     assert first.api_equivalent_cost is None
+    assert first.billing.route == "provider-credits"
+    assert first.billing.credential_source == "cursor-account"
+    assert not first.billing.actual_cost_known
     assert ["--model", "composer-2.5"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
     ]
@@ -263,6 +286,9 @@ def test_opencode_defaults_to_zen_model_and_resumes_exact_session(
     assert first.api_equivalent_cost is not None
     assert first.api_equivalent_cost.amount_usd == 0.00012345
     assert not first.api_equivalent_cost.estimated
+    assert first.billing.route == "provider-credits"
+    assert first.billing.credential_source == "opencode-api-key"
+    assert first.billing.actual_cost_known
     assert first.time_to_first_response_seconds is not None
     assert ["--model", "opencode/deepseek-v4-flash"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
@@ -477,6 +503,9 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     assert first.provider_duration_seconds == 1.25
     assert first.time_to_first_response_seconds is not None
     assert first.api_equivalent_cost is None
+    assert first.billing.route == "subscription"
+    assert first.billing.credential_source == "google-oauth"
+    assert not first.billing.actual_cost_known
     events_path = manager.state_dir / "runs" / first.run_id / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text().splitlines()]
     assert [event["event"] for event in events] == [
@@ -781,6 +810,9 @@ def test_hermes_run_and_exact_resume_report_per_turn_usage(
     assert first.api_equivalent_cost is not None
     assert first.api_equivalent_cost.amount_usd == 0.000001
     assert first.api_equivalent_cost.estimated
+    assert first.billing.route == "subscription"
+    assert first.billing.credential_source == "nous-oauth"
+    assert not first.billing.actual_cost_known
 
     assert resumed.succeeded
     assert resumed.session_id == first.session_id

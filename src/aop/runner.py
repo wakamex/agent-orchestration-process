@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Callable, Protocol, Sequence
 
-from .models import RunArtifact, RunRequest, RunResult
+from .models import BillingProvenance, RunArtifact, RunRequest, RunResult
 from .locks import exclusive_lock, task_lock_path
 from .pricing import EstimatedCost, TokenUsage, estimate_api_cost
 from .worktrees import AOPError, Worktree, WorktreeManager
@@ -30,6 +30,24 @@ def _now() -> str:
 
 def _rounded(value: float | None) -> float | None:
     return round(value, 6) if value is not None else None
+
+
+def _billing_probe(
+    command: list[str], cwd: Path, environment: dict[str, str]
+) -> subprocess.CompletedProcess[str] | None:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return result if result.returncode == 0 else None
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -252,6 +270,7 @@ class CodexAdapter:
             final_message = last_message_path.read_text()
             _atomic_write(run_dir / "last-message.txt", final_message)
             last_message_path.unlink()
+        billing = self._billing_provenance(worktree.path, environment)
 
         return RunResult(
             run_id=request.run_id,
@@ -273,7 +292,29 @@ class CodexAdapter:
             final_message=final_message,
             usage=usage,
             api_equivalent_cost=estimate_api_cost(request.model, usage),
+            billing=billing,
         )
+
+    def _billing_provenance(
+        self, cwd: Path, environment: dict[str, str]
+    ) -> BillingProvenance:
+        status = _billing_probe([self.binary, "login", "status"], cwd, environment)
+        if status is None:
+            return BillingProvenance()
+        output = f"{status.stdout}\n{status.stderr}"
+        if "Logged in using ChatGPT" in output:
+            return BillingProvenance(
+                route="subscription",
+                credential_source="chatgpt-oauth",
+                detected_by="codex login status",
+            )
+        if "Logged in using an API key" in output:
+            return BillingProvenance(
+                route="metered-api",
+                credential_source="openai-api-key",
+                detected_by="codex login status",
+            )
+        return BillingProvenance(detected_by="codex login status")
 
     def _command(
         self, request: RunRequest, worktree: Worktree, last_message_path: Path
@@ -554,6 +595,7 @@ class ClaudeAdapter:
             error = "Claude did not emit a terminal result event"
         else:
             error = None
+        billing = self._billing_provenance(worktree.path, environment)
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
@@ -574,7 +616,73 @@ class ClaudeAdapter:
             final_message=final_message,
             usage=parsed["usage"],
             api_equivalent_cost=parsed["cost"],
+            billing=billing,
         )
+
+    def _billing_provenance(
+        self, cwd: Path, environment: dict[str, str]
+    ) -> BillingProvenance:
+        status = _billing_probe(
+            [self.binary, "auth", "status", "--json"], cwd, environment
+        )
+        if status is not None:
+            try:
+                value = json.loads(status.stdout)
+            except json.JSONDecodeError:
+                value = None
+            if isinstance(value, dict):
+                method = value.get("authMethod")
+                provider = value.get("apiProvider")
+                normalized = (
+                    method.lower().replace("_", "").replace(".", "")
+                    if isinstance(method, str)
+                    else ""
+                )
+                if normalized == "claudeai":
+                    return BillingProvenance(
+                        route="subscription",
+                        credential_source="claude-oauth",
+                        detected_by="claude auth status",
+                    )
+                if normalized in {"apikey", "console"}:
+                    return BillingProvenance(
+                        route="metered-api",
+                        credential_source=(
+                            "anthropic-api-key"
+                            if normalized == "apikey"
+                            else "anthropic-console"
+                        ),
+                        detected_by="claude auth status",
+                    )
+                if isinstance(provider, str) and provider.lower() in {
+                    "bedrock",
+                    "vertex",
+                }:
+                    return BillingProvenance(
+                        route="metered-api",
+                        credential_source=provider.lower(),
+                        detected_by="claude auth status",
+                    )
+                return BillingProvenance(detected_by="claude auth status")
+        if environment.get("CLAUDE_CODE_USE_BEDROCK"):
+            return BillingProvenance(
+                route="metered-api",
+                credential_source="bedrock",
+                detected_by="environment",
+            )
+        if environment.get("CLAUDE_CODE_USE_VERTEX"):
+            return BillingProvenance(
+                route="metered-api",
+                credential_source="vertex",
+                detected_by="environment",
+            )
+        if environment.get("ANTHROPIC_API_KEY"):
+            return BillingProvenance(
+                route="metered-api",
+                credential_source="anthropic-api-key",
+                detected_by="environment",
+            )
+        return BillingProvenance()
 
     def _command(self, request: RunRequest, worktree: Worktree) -> list[str]:
         command = [
@@ -770,6 +878,15 @@ class CursorAdapter:
             final_message=final_message,
             usage=parsed["usage"],
             api_equivalent_cost=None,
+            billing=BillingProvenance(
+                route="provider-credits",
+                credential_source=(
+                    "cursor-api-key"
+                    if environment.get("CURSOR_API_KEY")
+                    else "cursor-account"
+                ),
+                detected_by="Cursor Agent billing contract",
+            ),
             provider_duration_seconds=parsed["duration_seconds"],
         )
 
@@ -938,6 +1055,7 @@ class OpenCodeAdapter:
             error = "OpenCode did not emit a final response"
         else:
             error = None
+        billing = self._billing_provenance(request.model, environment, parsed["cost"])
 
         return RunResult(
             run_id=request.run_id,
@@ -959,7 +1077,55 @@ class OpenCodeAdapter:
             final_message=final_message,
             usage=parsed["usage"],
             api_equivalent_cost=parsed["cost"],
+            billing=billing,
             provider_duration_seconds=parsed["duration_seconds"],
+        )
+
+    @staticmethod
+    def _billing_provenance(
+        model: str | None,
+        environment: dict[str, str],
+        cost: object,
+    ) -> BillingProvenance:
+        provider = model.partition("/")[0] if model else ""
+        route = "unknown"
+        credential_source = None
+        detected_by = None
+        if provider == "opencode":
+            route = "provider-credits"
+            credential_source = "opencode-api-key"
+            detected_by = "OpenCode model provider"
+        elif provider in {"ollama", "lmstudio"}:
+            route = "local"
+            credential_source = provider
+            detected_by = "OpenCode model provider"
+        else:
+            source_data = _opencode_source_data(environment)
+            auth_path = source_data / "auth.json" if source_data else None
+            try:
+                auth = json.loads(auth_path.read_text()) if auth_path else None
+            except (OSError, json.JSONDecodeError):
+                auth = None
+            entry = auth.get(provider) if isinstance(auth, dict) else None
+            auth_type = entry.get("type") if isinstance(entry, dict) else None
+            if auth_type == "oauth" and provider in {"openai", "xai"}:
+                route = "subscription"
+                credential_source = f"{provider}-oauth"
+                detected_by = "OpenCode authentication metadata"
+            elif auth_type in {"api", "api-key"}:
+                route = "metered-api"
+                credential_source = f"{provider}-api-key"
+                detected_by = "OpenCode authentication metadata"
+        actual_cost_known = (
+            isinstance(cost, EstimatedCost)
+            and not cost.estimated
+            and route in {"provider-credits", "metered-api"}
+        )
+        return BillingProvenance(
+            route=route,
+            credential_source=credential_source,
+            detected_by=detected_by,
+            actual_cost_known=actual_cost_known,
         )
 
     def _command(self, request: RunRequest, worktree: Worktree) -> list[str]:
@@ -1210,6 +1376,11 @@ class AgyAdapter:
             final_message=final_message,
             usage=parsed["usage"],
             api_equivalent_cost=None,
+            billing=BillingProvenance(
+                route="subscription",
+                credential_source="google-oauth",
+                detected_by="Antigravity authenticated profile",
+            ),
             provider_duration_seconds=parsed["duration_seconds"],
         )
 
@@ -1381,6 +1552,7 @@ class HermesAdapter:
         baseline = before if request.session_id == session_id else None
         usage = self._usage_delta(baseline, after)
         cost = self._cost_delta(baseline, after, request.model, usage)
+        billing = self._billing_provenance(after, cost)
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
@@ -1414,6 +1586,38 @@ class HermesAdapter:
             final_message=final_message,
             usage=usage,
             api_equivalent_cost=cost,
+            billing=billing,
+        )
+
+    @staticmethod
+    def _billing_provenance(
+        session: _HermesSession | None, cost: EstimatedCost | None
+    ) -> BillingProvenance:
+        provider = session.billing_provider if session else None
+        routes = {
+            "nous": ("subscription", "nous-oauth"),
+            "xai-oauth": ("subscription", "xai-oauth"),
+            "openai-codex": ("subscription", "chatgpt-oauth"),
+            "copilot": ("subscription", "github-copilot"),
+            "copilot-acp": ("subscription", "github-copilot"),
+            "ollama": ("local", "ollama"),
+            "vllm": ("local", "vllm"),
+            "openai": ("metered-api", "openai-api-key"),
+            "xai": ("metered-api", "xai-api-key"),
+            "openrouter": ("metered-api", "openrouter-api-key"),
+        }
+        route, credential_source = routes.get(provider, ("unknown", None))
+        return BillingProvenance(
+            route=route,
+            credential_source=credential_source,
+            detected_by="Hermes session billing provider" if provider else None,
+            actual_cost_known=(
+                cost is not None
+                and session is not None
+                and session.cost_usd is not None
+                and not session.cost_estimated
+                and route in {"metered-api", "provider-credits"}
+            ),
         )
 
     def _command(self, request: RunRequest) -> list[str]:

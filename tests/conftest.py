@@ -131,6 +131,12 @@ import sys
 import time
 
 args = sys.argv[1:]
+if args == ["login", "status"]:
+    if os.environ.get("AOP_FAKE_CODEX_AUTH") == "api-key":
+        print("Logged in using an API key")
+    else:
+        print("Logged in using ChatGPT")
+    raise SystemExit(0)
 prompt = sys.stdin.read()
 output_path = pathlib.Path(args[args.index("--output-last-message") + 1])
 
@@ -243,6 +249,18 @@ import pathlib
 import sys
 
 args = sys.argv[1:]
+if args == ["auth", "status", "--json"]:
+    auth_method = (
+        "api_key"
+        if os.environ.get("AOP_FAKE_CLAUDE_AUTH") == "api-key"
+        else "claude.ai"
+    )
+    print(json.dumps({{
+        "loggedIn": True,
+        "authMethod": auth_method,
+        "apiProvider": "firstParty",
+    }}))
+    raise SystemExit(0)
 prompt = sys.stdin.read()
 if prompt == "CHECK_SANDBOX":
     pathlib.Path("agent-write.txt").write_text("allowed")

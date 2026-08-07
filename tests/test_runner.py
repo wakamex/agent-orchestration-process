@@ -74,6 +74,10 @@ def test_run_persists_structured_codex_artifacts(
     assert result.usage.reasoning_output_tokens == 0
     assert result.api_equivalent_cost is not None
     assert result.api_equivalent_cost.amount_usd == 0.000035
+    assert result.billing.route == "subscription"
+    assert result.billing.credential_source == "chatgpt-oauth"
+    assert result.billing.detected_by == "codex login status"
+    assert not result.billing.actual_cost_known
     assert result.time_to_first_event_seconds is not None
     assert result.time_to_first_response_seconds is not None
     assert result.provider_duration_seconds is None
@@ -91,11 +95,36 @@ def test_run_persists_structured_codex_artifacts(
     assert request["artifacts"] == []
     assert persisted_result["succeeded"] is True
     assert persisted_result["artifacts"] == []
+    assert persisted_result["billing"] == {
+        "route": "subscription",
+        "credential_source": "chatgpt-oauth",
+        "detected_by": "codex login status",
+        "actual_cost_known": False,
+    }
     assert persisted_result["api_equivalent_cost"]["pricing_version"].startswith(
         "models-dev-"
     )
     assert '"type": "thread.started"' in events
     assert (run_dir / "stderr.log").read_text() == ""
+
+
+def test_codex_records_metered_api_authentication_without_credentials(
+    repository: Path,
+    fake_codex: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_FAKE_CODEX_AUTH", "api-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-persisted")
+    result = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    ).run(task="codex-api-billing", prompt="test")
+
+    assert result.succeeded
+    assert result.billing.route == "metered-api"
+    assert result.billing.credential_source == "openai-api-key"
+    assert not result.billing.actual_cost_known
+    persisted = repository / ".aop" / "runs" / result.run_id / "result.json"
+    assert "must-not-be-persisted" not in persisted.read_text()
 
 
 def test_sandbox_can_hide_external_control_directories(

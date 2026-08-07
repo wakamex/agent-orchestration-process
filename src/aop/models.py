@@ -45,6 +45,18 @@ class RunArtifact:
 
 
 @dataclass(frozen=True)
+class BillingProvenance:
+    route: str = "unknown"
+    credential_source: str | None = None
+    detected_by: str | None = None
+    actual_cost_known: bool = False
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> BillingProvenance:
+        return cls(**value) if value is not None else cls()
+
+
+@dataclass(frozen=True)
 class RunResult:
     run_id: str
     provider: str
@@ -65,6 +77,7 @@ class RunResult:
     final_message: str | None
     usage: TokenUsage
     api_equivalent_cost: EstimatedCost | None
+    billing: BillingProvenance = BillingProvenance()
     artifacts: tuple[RunArtifact, ...] = ()
     provider_duration_seconds: float | None = None
 
@@ -97,6 +110,7 @@ class RunResult:
         fields["api_equivalent_cost"] = EstimatedCost.from_dict(
             fields.get("api_equivalent_cost")
         )
+        fields["billing"] = BillingProvenance.from_dict(fields.get("billing"))
         fields["artifacts"] = tuple(
             RunArtifact(**artifact) for artifact in fields.get("artifacts", ())
         )

@@ -57,8 +57,9 @@ def list_models(agent: str, catalog: ModelCatalog) -> list[AvailableModel]:
         _require_binary(_binary("claude", "AOP_CLAUDE_BIN", "claude"))
         return _catalog_models(agent, "anthropic", catalog)
     if agent == "hermes":
-        _require_binary(_binary("hermes", "AOP_HERMES_BIN", "hermes"))
-        return _hermes_models(catalog)
+        binary = _binary("hermes", "AOP_HERMES_BIN", "hermes")
+        provider = _run([binary, "config", "get", "model.provider"]).strip()
+        return _hermes_models(catalog, provider)
     raise AOPError(f"unsupported agent: {agent}")
 
 
@@ -247,8 +248,21 @@ def _catalog_models(
     ]
 
 
-def _hermes_models(catalog: ModelCatalog) -> list[AvailableModel]:
-    del catalog
+def _hermes_models(
+    catalog: ModelCatalog, provider: str
+) -> list[AvailableModel]:
+    catalog_provider = {
+        "gemini": "google",
+        "openai-codex": "openai",
+        "xai-oauth": "xai",
+    }.get(provider, provider)
+    if catalog_provider != "nous":
+        records = _catalog_models("hermes", catalog_provider, catalog)
+        if not records:
+            raise AOPError(
+                f"the model catalog has no entries for Hermes provider {provider}"
+            )
+        return records
     values = _fetch_nous_models()
     records = []
     for value in values:

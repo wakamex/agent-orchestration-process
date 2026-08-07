@@ -230,9 +230,10 @@ aop models --refresh
 ```
 
 Codex, Cursor, Agy, and OpenCode results are queried from their non-interactive model interfaces.
-Hermes results come from the live Nous inference model endpoint. Claude has no non-interactive model
-listing, so its rows come from the Anthropic catalog and are marked `catalog` rather than
-account-verified. The `availability` and `price_scope` fields keep those distinctions explicit.
+Hermes follows its configured provider: Nous results come from the live Nous inference endpoint,
+while providers without a live listing use their matching catalog entries. Claude has no
+non-interactive model listing, so its rows come from the Anthropic catalog and are marked `catalog`
+rather than account-verified. The `availability` and `price_scope` fields keep those distinctions explicit.
 `api-equivalent` prices are standard API comparison rates and do not describe subscription billing;
 `provider` prices are rates reported by that provider endpoint.
 
@@ -258,7 +259,10 @@ so run-cost estimates do not add cache-write charges. If the model is implicit o
 timing metrics remain available while cost is reported as `n/a`. Claude's result stream supplies its
 resolved model, token usage, and CLI-reported USD API-equivalent cost. Hermes's session accounting
 supplies its resolved model, cache and reasoning token buckets, and provider-aware estimated or
-actual cost; AOP records the delta for each invocation so resumed turns are not double-counted. Agy
+actual cost; AOP records the delta for each invocation so resumed turns are not double-counted. If
+Hermes reports `cost_source: none`, AOP uses the fresh catalog for the session's billing provider
+and records an API-equivalent estimate instead of treating Hermes's zero-initialized counter as a
+real zero-dollar cost. A zero-token failed turn remains unpriced. Agy
 currently supplies timing and token usage from its structured result stream. Cursor, OpenCode, and
 Agy each report provider duration separately from AOP's wall-clock duration. OpenCode also reports
 per-step billed USD cost; AOP sums it for the invocation and records it as an actual CLI-reported

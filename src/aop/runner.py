@@ -1280,6 +1280,7 @@ class AgyAdapter:
 @dataclass(frozen=True)
 class _HermesSession:
     model: str | None
+    billing_provider: str | None
     final_message: str | None
     last_assistant_id: str | None
     usage: TokenUsage
@@ -1332,17 +1333,19 @@ class HermesAdapter:
         reported_session_id = self._session_id(capture.stderr)
         session_id = reported_session_id or request.session_id
         after = self._session(session_id, request, worktree, environment)
-        final_message = self._final_message(before, after, capture.stdout)
+        final_message = self._final_message(before, after)
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
         baseline = before if request.session_id == session_id else None
         usage = self._usage_delta(baseline, after)
-        cost = self._cost_delta(baseline, after, request.model)
+        cost = self._cost_delta(baseline, after, request.model, usage)
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif capture.exit_code:
-            error = self._exit_error(capture.stderr, capture.exit_code)
+            error = self._exit_error(
+                capture.stdout, capture.stderr, capture.exit_code
+            )
         elif session_id is None:
             error = "Hermes did not report a session ID"
         elif final_message is None:
@@ -1448,6 +1451,7 @@ class HermesAdapter:
         actual_cost = self._number(raw.get("actual_cost_usd"))
         estimated_cost = self._number(raw.get("estimated_cost_usd"))
         source = raw.get("cost_source")
+        billing_provider = raw.get("billing_provider")
         version = raw.get("pricing_version")
         model = raw.get("model")
         final_message = None
@@ -1467,6 +1471,9 @@ class HermesAdapter:
                     break
         return _HermesSession(
             model=model if isinstance(model, str) else None,
+            billing_provider=(
+                billing_provider if isinstance(billing_provider, str) else None
+            ),
             final_message=final_message,
             last_assistant_id=last_assistant_id,
             usage=TokenUsage(
@@ -1487,16 +1494,16 @@ class HermesAdapter:
     def _final_message(
         before: _HermesSession | None,
         after: _HermesSession | None,
-        stdout: str,
     ) -> str | None:
-        if after and after.final_message:
-            is_new = before is None or (
-                after.last_assistant_id is None
-                or after.last_assistant_id != before.last_assistant_id
-            )
-            if is_new:
-                return after.final_message
-        return stdout.rstrip() or None
+        if after is None or after.final_message is None:
+            return None
+        if before is None:
+            return after.final_message
+        if before.last_assistant_id and after.last_assistant_id:
+            is_new = before.last_assistant_id != after.last_assistant_id
+        else:
+            is_new = before.final_message != after.final_message
+        return after.final_message if is_new else None
 
     @staticmethod
     def _session_id(stderr: str) -> str | None:
@@ -1507,11 +1514,23 @@ class HermesAdapter:
         return None
 
     @staticmethod
-    def _exit_error(stderr: str, exit_code: int) -> str:
+    def _exit_error(stdout: str, stderr: str, exit_code: int) -> str:
+        provider_error_prefixes = (
+            "API call failed",
+            "Authentication failed",
+            "Error:",
+            "No access token",
+            "✗",
+        )
+        for line in reversed(stdout.splitlines()):
+            detail = line.strip()
+            if detail.startswith(provider_error_prefixes):
+                return detail
         detail = "\n".join(
             line
             for line in stderr.splitlines()
-            if line.strip() and not line.strip().startswith("session_id:")
+            if line.strip()
+            and not line.strip().startswith(("session_id:", "↻ Resumed session "))
         ).strip()
         return detail or f"Hermes exited with status {exit_code}"
 
@@ -1539,12 +1558,20 @@ class HermesAdapter:
         before: _HermesSession | None,
         after: _HermesSession | None,
         requested_model: str | None,
+        usage: TokenUsage,
     ) -> EstimatedCost | None:
-        if after is None or after.cost_usd is None:
+        if after is None:
+            return None
+        model = after.model or requested_model or "hermes"
+        if after.cost_source == "none":
+            provider = HermesAdapter._catalog_provider(after.billing_provider)
+            if provider is None or usage.total_tokens == 0:
+                return None
+            return estimate_api_cost(model, usage, providers=(provider,))
+        if after.cost_usd is None:
             return None
         previous = before.cost_usd if before and before.cost_usd is not None else 0.0
         amount = max(after.cost_usd - previous, 0.0)
-        model = after.model or requested_model or "hermes"
         return EstimatedCost(
             amount_usd=round(amount, 8),
             currency="USD",
@@ -1555,6 +1582,18 @@ class HermesAdapter:
             pricing_source=f"Hermes CLI session accounting ({after.cost_source})",
             long_context_pricing=False,
         )
+
+    @staticmethod
+    def _catalog_provider(provider: str | None) -> str | None:
+        return {
+            "anthropic": "anthropic",
+            "gemini": "google",
+            "google": "google",
+            "openai": "openai",
+            "openai-codex": "openai",
+            "xai": "xai",
+            "xai-oauth": "xai",
+        }.get(provider or "")
 
     @staticmethod
     def _integer(value: object) -> int:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from aop.pricing import TokenUsage
 from aop.runner import (
     AgyAdapter,
     AgentRunner,
@@ -13,6 +14,7 @@ from aop.runner import (
     CodexAdapter,
     CursorAdapter,
     HermesAdapter,
+    _HermesSession,
     OpenCodeAdapter,
 )
 from aop.worktrees import AOPError, WorktreeManager
@@ -933,6 +935,86 @@ def test_hermes_nonzero_exit_is_a_normalized_failure(
     assert not result.succeeded
     assert result.exit_code == 3
     assert result.error == "Hermes exited with status 3"
+
+
+def test_hermes_failure_reports_provider_error_instead_of_resume_banner() -> None:
+    error = HermesAdapter._exit_error(
+        "reasoning\nAPI call failed after 3 retries: empty stream\n",
+        "↻ Resumed session session-1 (1 user message, 2 total messages)\n"
+        "session_id: session-1\n",
+        1,
+    )
+
+    assert error == "API call failed after 3 retries: empty stream"
+
+
+def test_hermes_does_not_return_a_stale_message_when_resume_adds_no_answer() -> None:
+    previous = _HermesSession(
+        model="grok-4.5",
+        billing_provider="xai-oauth",
+        final_message="PLAY: round one",
+        last_assistant_id=None,
+        usage=TokenUsage(),
+        cost_usd=None,
+        cost_estimated=True,
+        cost_source="none",
+        pricing_version="none",
+    )
+    unchanged = _HermesSession(
+        model="grok-4.5",
+        billing_provider="xai-oauth",
+        final_message="PLAY: round one",
+        last_assistant_id=None,
+        usage=TokenUsage(),
+        cost_usd=None,
+        cost_estimated=True,
+        cost_source="none",
+        pricing_version="none",
+    )
+
+    assert HermesAdapter._final_message(previous, unchanged) is None
+
+
+def test_hermes_unknown_session_cost_uses_catalog_api_equivalent() -> None:
+    session = _HermesSession(
+        model="grok-4.5",
+        billing_provider="xai-oauth",
+        final_message="answer",
+        last_assistant_id="2",
+        usage=TokenUsage(),
+        cost_usd=0.0,
+        cost_estimated=True,
+        cost_source="none",
+        pricing_version="hermes-cli-reported",
+    )
+    usage = TokenUsage(
+        input_tokens=2_000,
+        cached_input_tokens=500,
+        output_tokens=1_000,
+    )
+
+    cost = HermesAdapter._cost_delta(None, session, "grok-4.5", usage)
+
+    assert cost is not None
+    assert cost.amount_usd == 0.00915
+    assert cost.estimated
+    assert cost.pricing_source == "https://models.dev/api.json"
+
+
+def test_hermes_unknown_session_cost_with_no_usage_remains_unknown() -> None:
+    session = _HermesSession(
+        model="grok-4.5",
+        billing_provider="xai-oauth",
+        final_message=None,
+        last_assistant_id=None,
+        usage=TokenUsage(),
+        cost_usd=0.0,
+        cost_estimated=True,
+        cost_source="none",
+        pricing_version="hermes-cli-reported",
+    )
+
+    assert HermesAdapter._cost_delta(None, session, "grok-4.5", TokenUsage()) is None
 
 
 @pytest.mark.parametrize("sandbox", ["scratch-write", "workspace-write"])

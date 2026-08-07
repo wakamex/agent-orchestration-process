@@ -72,11 +72,13 @@ def estimate_api_cost(
     model: str | None,
     usage: TokenUsage,
     catalog: ModelCatalog | None = None,
+    *,
+    providers: tuple[str, ...] = ("openai",),
 ) -> EstimatedCost | None:
     if model is None:
         return None
     catalog = catalog or ensure_catalog_fresh()
-    resolved = _openai_price(catalog, model)
+    resolved = _catalog_price(catalog, model, providers)
     if resolved is None:
         return None
     priced_as, price = resolved
@@ -120,28 +122,30 @@ def estimate_api_cost(
     )
 
 
-def _openai_price(
-    catalog: ModelCatalog, model: str
+def _catalog_price(
+    catalog: ModelCatalog, model: str, providers: tuple[str, ...]
 ) -> tuple[str, ModelPrice] | None:
-    models = catalog.providers.get("openai", {}).get("models", {})
-    if not isinstance(models, dict):
-        return None
-    aliases = {
-        "gpt-5.6": "gpt-5.6-sol",
-    }
-    candidates = [aliases.get(model, model)]
-    candidates.extend(
-        candidate
-        for candidate in models
-        if isinstance(candidate, str) and model.startswith(f"{candidate}-20")
-    )
-    for candidate in sorted(set(candidates), key=len, reverse=True):
-        metadata = models.get(candidate)
-        if not isinstance(metadata, dict):
+    unqualified = model.partition("/")[2] or model
+    aliases = {"gpt-5.6": "gpt-5.6-sol"}
+    requested = aliases.get(unqualified, unqualified)
+    for provider in providers:
+        models = catalog.providers.get(provider, {}).get("models", {})
+        if not isinstance(models, dict):
             continue
-        price = _model_price(metadata.get("cost"))
-        if price is not None:
-            return candidate, price
+        candidates = [requested]
+        candidates.extend(
+            candidate
+            for candidate in models
+            if isinstance(candidate, str)
+            and requested.startswith(f"{candidate}-20")
+        )
+        for candidate in sorted(set(candidates), key=len, reverse=True):
+            metadata = models.get(candidate)
+            if not isinstance(metadata, dict):
+                continue
+            price = _model_price(metadata.get("cost"))
+            if price is not None:
+                return candidate, price
     return None
 
 

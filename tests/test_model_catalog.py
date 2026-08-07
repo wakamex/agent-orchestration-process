@@ -151,6 +151,7 @@ def test_hermes_uses_live_provider_prices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
+    monkeypatch.setattr(model_listing, "_run", lambda command, **options: "nous\n")
     monkeypatch.setattr(
         model_listing,
         "_fetch_nous_models",
@@ -174,3 +175,20 @@ def test_hermes_uses_live_provider_prices(
     assert model.input_per_million_usd == 0.009
     assert model.output_per_million_usd == 0.018
     assert model.pricing_source == model_listing.NOUS_MODELS_URL
+
+
+def test_hermes_catalog_follows_the_configured_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
+    monkeypatch.setattr(
+        model_listing, "_run", lambda command, **options: "xai-oauth\n"
+    )
+
+    model = model_listing.list_models("hermes", ensure_catalog_fresh())[0]
+
+    assert model.model == "grok-4.5"
+    assert model.availability == "catalog"
+    assert model.price_scope == "api-equivalent"
+    assert model.input_per_million_usd == 2
+    assert model.output_per_million_usd == 6

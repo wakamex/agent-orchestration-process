@@ -70,6 +70,14 @@ def fresh_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
         "anthropic": {"models": {}},
         "google": {"models": {}},
         "opencode": {"models": {}},
+        "xai": {
+            "models": {
+                "grok-4.5": {
+                    "name": "Grok 4.5",
+                    "cost": {"input": 2, "cache_read": 0.3, "output": 6},
+                }
+            }
+        },
     }
     raw = json.dumps(providers, separators=(",", ":"), sort_keys=True).encode()
     path = tmp_path / "model-catalog.json"

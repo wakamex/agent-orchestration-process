@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -111,6 +112,36 @@ def test_sandbox_can_hide_external_control_directories(
 
     index = result.command.index("--tmpfs")
     assert result.command[index + 1] == os.fspath(control)
+    assert result.succeeded
+
+
+def test_workspace_sandbox_mounts_shared_git_metadata_read_only(
+    repository: Path, fake_codex: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    result = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+        task="read-only-git", prompt="make the change", timeout_seconds=5
+    )
+    worktree = manager.get("read-only-git").path
+    common = Path(
+        subprocess.run(
+            (
+                "git",
+                "-C",
+                os.fspath(worktree),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+
+    index = result.command.index(os.fspath(common))
+    assert result.command[index - 1] == "--ro-bind"
+    assert result.command[index + 1] == os.fspath(common)
     assert result.succeeded
 
 

@@ -1607,6 +1607,14 @@ def _provider_command(
         git_marker = worktree.path / ".git"
         if git_marker.exists():
             wrapped.extend(["--ro-bind", os.fspath(git_marker), os.fspath(git_marker)])
+        common_git_directory = _git_common_directory(worktree.path)
+        wrapped.extend(
+            [
+                "--ro-bind",
+                os.fspath(common_git_directory),
+                os.fspath(common_git_directory),
+            ]
+        )
     else:
         wrapped.extend(["--bind", os.fspath(scratch), os.fspath(scratch)])
     wrapped.extend(["--bind", os.fspath(cache), os.fspath(cache)])
@@ -1696,6 +1704,29 @@ def _provider_command(
             )
     wrapped.extend(["--chdir", os.fspath(worktree.path), "--", *command])
     return wrapped
+
+
+def _git_common_directory(worktree: Path) -> Path:
+    result = subprocess.run(
+        (
+            "git",
+            "-C",
+            os.fspath(worktree),
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or "git rev-parse failed"
+        raise AOPError(f"Could not resolve candidate Git metadata: {detail}")
+    path = Path(result.stdout.strip())
+    if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+        raise AOPError("Candidate Git common directory is invalid")
+    return path.resolve(strict=True)
 
 
 _AGY_SEED_DIRECTORIES = {"config"}

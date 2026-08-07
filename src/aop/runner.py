@@ -1388,7 +1388,6 @@ class HermesAdapter:
         command.extend(["--source", "tool"])
         if request.session_id:
             command.extend(["--resume", request.session_id, "--no-restore-cwd"])
-        command.extend(["--provider", "nous"])
         if request.model:
             command.extend(["--model", request.model])
         if request.effort:

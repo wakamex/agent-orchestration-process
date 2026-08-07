@@ -728,9 +728,7 @@ def test_hermes_run_and_exact_resume_report_per_turn_usage(
     assert first.effort == "high"
     assert first.final_message == "answer:first"
     assert first.command[0] == "bwrap"
-    assert ["--provider", "nous"] == first.command[
-        first.command.index("--provider") : first.command.index("--provider") + 2
-    ]
+    assert "--provider" not in first.command
     assert ["--model", "deepseek/deepseek-v4-flash-0731"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
     ]
@@ -756,9 +754,7 @@ def test_hermes_run_and_exact_resume_report_per_turn_usage(
         resumed.command.index("--resume") : resumed.command.index("--resume") + 2
     ]
     assert "--no-restore-cwd" in resumed.command
-    assert ["--provider", "nous"] == resumed.command[
-        resumed.command.index("--provider") : resumed.command.index("--provider") + 2
-    ]
+    assert "--provider" not in resumed.command
     assert ["--model", "deepseek/deepseek-v4-flash-0731"] == resumed.command[
         resumed.command.index("--model") : resumed.command.index("--model") + 2
     ]

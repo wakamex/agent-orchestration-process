@@ -157,18 +157,20 @@ task scratch, but receives a fresh output directory and only validates artifacts
 Claude accepts its normal model aliases and effort levels `low`, `medium`, `high`, `xhigh`, and
 `max`. Agy accepts its native model names and effort levels `low`, `medium`, and `high`.
 
-Hermes uses the Nous Portal provider. Install Hermes 0.20 or newer and authenticate once; on a
-headless host use:
+Hermes uses the provider selected in the Hermes profile and AOP does not override it. Install
+Hermes 0.20 or newer and authenticate the desired provider once. For example, on a headless host:
 
 ```sh
 hermes auth add nous --type oauth --no-browser
+hermes auth add xai-oauth --type oauth --no-browser
 ```
 
-Hermes defaults to `deepseek/deepseek-v4-flash-0731`. Pass another Nous model ID unchanged with
-`--model`; AOP passes `--effort` through as Hermes's native reasoning level. Supported levels are
+Hermes defaults to `deepseek/deepseek-v4-flash-0731`, which expects a compatible configured
+provider such as Nous. Pass another model ID unchanged with `--model`; AOP passes `--effort` through
+as Hermes's native reasoning level. Supported levels are
 `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. AOP uses Hermes's quiet
 programmatic mode, tags sessions as tool-created, and resumes the exact session without restoring
-its old working directory. It reasserts the original Nous model and reasoning level on resume
+its old working directory. It reasserts the original model and reasoning level on resume
 because Hermes otherwise falls back to its current configured defaults.
 
 Hermes can run a bounded conversational turn with the experimental participant mode:

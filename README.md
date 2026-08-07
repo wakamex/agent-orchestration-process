@@ -218,18 +218,42 @@ such as `deepseek-v4-flash` is automatically qualified with `opencode/`; pass a 
 permission mode inside the outer `bwrap` boundary. Authenticate OpenCode normally before the first
 AOP run, for example with `opencode providers login`.
 
+Inspect the models exposed by the installed agent CLIs and their current comparison prices:
+
+```sh
+aop models
+aop models --agent codex --agent opencode
+aop models --agent hermes --json
+aop models --refresh
+```
+
+Codex, Cursor, Agy, and OpenCode results are queried from their non-interactive model interfaces.
+Hermes results come from the live Nous inference model endpoint. Claude has no non-interactive model
+listing, so its rows come from the Anthropic catalog and are marked `catalog` rather than
+account-verified. The `availability` and `price_scope` fields keep those distinctions explicit.
+`api-equivalent` prices are standard API comparison rates and do not describe subscription billing;
+`provider` prices are rates reported by that provider endpoint.
+
 Every run records wall-clock time and time to first event and agent response. Adapters also record
 input, cached-input, output, and reasoning-output tokens when the provider exposes them. When
-`--model` names a model in AOP's dated pricing table, the result also contains an estimated standard
-API-equivalent USD cost.
+`--model` names a priced OpenAI model, the result also contains an estimated standard API-equivalent
+USD cost.
 This is a comparison metric for subscription runs, not an amount billed to the account. Reasoning
 tokens are reported separately but are already included in output tokens and are not charged twice.
 
-Pricing is versioned in each result. The built-in 2026-07-10 snapshot covers GPT-5.6 Sol, Terra, and
-Luna; GPT-5.5; GPT-5.4, mini, and nano; and GPT-5.3-Codex. It accounts for documented long-context
-multipliers but cannot account for GPT-5.6 cache-write premiums because Codex currently reports
-cached reads without identifying cache writes. If the model is implicit or unknown, token and timing
-metrics remain available while cost is reported as `n/a`. Claude's result stream supplies its
+Before dispatching any AOP command, the CLI verifies that its global models.dev catalog cache is
+less than 24 hours old. A stale or missing cache is refreshed under a process lock and replaced
+atomically. If refresh fails, AOP fails closed instead of reporting or using expired prices. Set
+`AOP_MODEL_CATALOG_CACHE` to relocate the cache; its default is
+`${XDG_CACHE_HOME:-~/.cache}/aop/models-dev.json`. `aop models --refresh` refreshes immediately.
+Every estimated cost records the catalog URL, retrieval time, and content hash-derived version.
+models.dev is a community-maintained machine-readable registry, not an official provider price
+guarantee, and the provenance is retained so results remain auditable.
+
+The refreshed price data includes direct long-context tiers. AOP displays cache-write rates when
+the source provides them, but Codex currently reports cached reads without identifying cache writes,
+so run-cost estimates do not add cache-write charges. If the model is implicit or unknown, token and
+timing metrics remain available while cost is reported as `n/a`. Claude's result stream supplies its
 resolved model, token usage, and CLI-reported USD API-equivalent cost. Hermes's session accounting
 supplies its resolved model, cache and reasoning token buckets, and provider-aware estimated or
 actual cost; AOP records the delta for each invocation so resumed turns are not double-counted. Agy

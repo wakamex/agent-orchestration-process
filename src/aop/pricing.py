@@ -1,13 +1,10 @@
-"""Versioned estimates of standard API-equivalent token cost."""
+"""Fresh estimates of standard API-equivalent token cost."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-
-PRICING_VERSION = "2026-07-10"
-GPT_56_PRICING_SOURCE = "https://openai.com/index/gpt-5-6/"
-MODEL_PRICING_SOURCE = "https://developers.openai.com/api/docs/models"
+from .model_catalog import ModelCatalog, ensure_catalog_fresh
 
 
 @dataclass(frozen=True)
@@ -43,10 +40,10 @@ class ModelPrice:
     input_per_million_usd: float
     cached_input_per_million_usd: float
     output_per_million_usd: float
-    source: str
     long_context_threshold: int | None = None
-    long_context_input_multiplier: float = 1.0
-    long_context_output_multiplier: float = 1.0
+    long_context_input_per_million_usd: float | None = None
+    long_context_cached_input_per_million_usd: float | None = None
+    long_context_output_per_million_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +56,7 @@ class EstimatedCost:
     pricing_version: str
     pricing_source: str
     long_context_pricing: bool
+    pricing_retrieved_at: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -70,37 +68,44 @@ class EstimatedCost:
         return cls(**value)
 
 
-PRICES = {
-    "gpt-5.6-sol": ModelPrice(5.00, 0.50, 30.00, GPT_56_PRICING_SOURCE),
-    "gpt-5.6-terra": ModelPrice(2.50, 0.25, 15.00, GPT_56_PRICING_SOURCE),
-    "gpt-5.6-luna": ModelPrice(1.00, 0.10, 6.00, GPT_56_PRICING_SOURCE),
-    "gpt-5.5": ModelPrice(5.00, 0.50, 30.00, MODEL_PRICING_SOURCE, 272_000, 2.0, 1.5),
-    "gpt-5.4": ModelPrice(2.50, 0.25, 15.00, MODEL_PRICING_SOURCE, 272_000, 2.0, 1.5),
-    "gpt-5.4-mini": ModelPrice(0.75, 0.075, 4.50, MODEL_PRICING_SOURCE),
-    "gpt-5.4-nano": ModelPrice(0.20, 0.02, 1.25, MODEL_PRICING_SOURCE),
-    "gpt-5.3-codex": ModelPrice(1.75, 0.175, 14.00, MODEL_PRICING_SOURCE),
-}
-
-
-def estimate_api_cost(model: str | None, usage: TokenUsage) -> EstimatedCost | None:
+def estimate_api_cost(
+    model: str | None,
+    usage: TokenUsage,
+    catalog: ModelCatalog | None = None,
+) -> EstimatedCost | None:
     if model is None:
         return None
-    priced_as = _canonical_model(model)
-    if priced_as is None:
+    catalog = catalog or ensure_catalog_fresh()
+    resolved = _openai_price(catalog, model)
+    if resolved is None:
         return None
-    price = PRICES[priced_as]
+    priced_as, price = resolved
     long_context = (
         price.long_context_threshold is not None
         and usage.input_tokens > price.long_context_threshold
     )
-    input_multiplier = price.long_context_input_multiplier if long_context else 1.0
-    output_multiplier = price.long_context_output_multiplier if long_context else 1.0
+    input_rate = (
+        price.long_context_input_per_million_usd
+        if long_context
+        else price.input_per_million_usd
+    )
+    cached_rate = (
+        price.long_context_cached_input_per_million_usd
+        if long_context
+        else price.cached_input_per_million_usd
+    )
+    output_rate = (
+        price.long_context_output_per_million_usd
+        if long_context
+        else price.output_per_million_usd
+    )
+    assert input_rate is not None and cached_rate is not None and output_rate is not None
     cached = min(usage.cached_input_tokens, usage.input_tokens)
     uncached = usage.input_tokens - cached
     amount = (
-        uncached * price.input_per_million_usd * input_multiplier
-        + cached * price.cached_input_per_million_usd * input_multiplier
-        + usage.output_tokens * price.output_per_million_usd * output_multiplier
+        uncached * input_rate
+        + cached * cached_rate
+        + usage.output_tokens * output_rate
     ) / 1_000_000
     return EstimatedCost(
         amount_usd=round(amount, 8),
@@ -108,17 +113,85 @@ def estimate_api_cost(model: str | None, usage: TokenUsage) -> EstimatedCost | N
         estimated=True,
         model=model,
         priced_as=priced_as,
-        pricing_version=PRICING_VERSION,
-        pricing_source=price.source,
+        pricing_version=catalog.version,
+        pricing_source=catalog.source,
         long_context_pricing=long_context,
+        pricing_retrieved_at=catalog.fetched_at,
     )
 
 
-def _canonical_model(model: str) -> str | None:
-    for candidate in sorted(PRICES, key=len, reverse=True):
-        if model == candidate or model.startswith(f"{candidate}-20"):
-            return candidate
+def _openai_price(
+    catalog: ModelCatalog, model: str
+) -> tuple[str, ModelPrice] | None:
+    models = catalog.providers.get("openai", {}).get("models", {})
+    if not isinstance(models, dict):
+        return None
+    aliases = {
+        "gpt-5.6": "gpt-5.6-sol",
+    }
+    candidates = [aliases.get(model, model)]
+    candidates.extend(
+        candidate
+        for candidate in models
+        if isinstance(candidate, str) and model.startswith(f"{candidate}-20")
+    )
+    for candidate in sorted(set(candidates), key=len, reverse=True):
+        metadata = models.get(candidate)
+        if not isinstance(metadata, dict):
+            continue
+        price = _model_price(metadata.get("cost"))
+        if price is not None:
+            return candidate, price
     return None
+
+
+def _model_price(value: object) -> ModelPrice | None:
+    if not isinstance(value, dict):
+        return None
+    input_rate = _rate(value.get("input"))
+    output_rate = _rate(value.get("output"))
+    cached_rate = _rate(value.get("cache_read"))
+    if input_rate is None or output_rate is None:
+        return None
+    if cached_rate is None:
+        cached_rate = input_rate
+    tier = _context_tier(value.get("tiers"))
+    return ModelPrice(
+        input_per_million_usd=input_rate,
+        cached_input_per_million_usd=cached_rate,
+        output_per_million_usd=output_rate,
+        long_context_threshold=tier[0] if tier else None,
+        long_context_input_per_million_usd=tier[1] if tier else None,
+        long_context_cached_input_per_million_usd=tier[2] if tier else None,
+        long_context_output_per_million_usd=tier[3] if tier else None,
+    )
+
+
+def _context_tier(value: object) -> tuple[int, float, float, float] | None:
+    if not isinstance(value, list):
+        return None
+    for tier in value:
+        if not isinstance(tier, dict) or not isinstance(tier.get("tier"), dict):
+            continue
+        condition = tier["tier"]
+        size = condition.get("size")
+        input_rate = _rate(tier.get("input"))
+        output_rate = _rate(tier.get("output"))
+        cached_rate = _rate(tier.get("cache_read"))
+        if (
+            condition.get("type") == "context"
+            and isinstance(size, int)
+            and input_rate is not None
+            and output_rate is not None
+        ):
+            return size, input_rate, cached_rate or input_rate, output_rate
+    return None
+
+
+def _rate(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _nonnegative_integer(value: object) -> int:

@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
 
 from . import __version__
 from .batch import BatchResult, BatchRunner
 from .integration import CheckpointManager, IntegrationManager
+from .model_catalog import ModelCatalog, ensure_catalog_fresh
+from .model_listing import AGENTS, AvailableModel, list_models
 from .models import RunResult
 from .runner import AgentRunner, RunStore, adapter_for
 from .worktrees import AOPError, WorktreeManager
@@ -25,6 +28,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     commands = parser.add_subparsers(dest="command", required=True)
+
+    models = commands.add_parser(
+        "models", help="list models and current per-million-token prices"
+    )
+    models.add_argument(
+        "--agent",
+        action="append",
+        choices=AGENTS,
+        help="limit results to an agent; may be repeated",
+    )
+    models.add_argument(
+        "--refresh", action="store_true", help="refresh the shared model catalog now"
+    )
+    models.add_argument("--json", action="store_true", help="print JSON")
 
     commands.add_parser("init", help="prepare the current Git repository for AOP")
 
@@ -136,9 +153,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-
     try:
+        raw_arguments = list(sys.argv[1:] if argv is None else argv)
+        force_refresh = "models" in raw_arguments and "--refresh" in raw_arguments
+        catalog = ensure_catalog_fresh(force=force_refresh)
+        args = build_parser().parse_args(raw_arguments)
+
+        if args.command == "models":
+            return _report_models(args.agent or AGENTS, catalog, json_output=args.json)
+
         manager = WorktreeManager.discover(Path.cwd())
 
         if args.command == "init":
@@ -368,6 +391,63 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
     if result.interrupted:
         return 130
     return 0 if result.succeeded else 1
+
+
+def _report_models(
+    agents: Sequence[str], catalog: ModelCatalog, *, json_output: bool
+) -> int:
+    models: list[AvailableModel] = []
+    errors: dict[str, str] = {}
+    for agent in agents:
+        try:
+            models.extend(list_models(agent, catalog))
+        except AOPError as error:
+            errors[agent] = str(error)
+    models.sort(key=lambda item: (item.agent, item.model))
+    fetched_at = datetime.fromtimestamp(catalog.fetched_at, UTC).isoformat()
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "catalog": {
+                        "fetched_at": fetched_at,
+                        "sha256": catalog.sha256,
+                        "source": catalog.source,
+                    },
+                    "errors": errors,
+                    "models": [model.to_dict() for model in models],
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            "agent\tmodel\tavailability\tprice-scope\tinput\tcache-read\t"
+            "cache-write\toutput"
+        )
+        for model in models:
+            print(
+                f"{model.agent}\t{model.model}\t{model.availability}\t"
+                f"{model.price_scope}\t{_price(model.input_per_million_usd)}\t"
+                f"{_price(model.cached_input_per_million_usd)}\t"
+                f"{_price(model.cache_write_per_million_usd)}\t"
+                f"{_price(model.output_per_million_usd)}"
+            )
+        sources = sorted(
+            {model.pricing_source for model in models if model.pricing_source}
+        )
+        print(
+            f"aop: prices_per_million_usd sources={','.join(sources)} "
+            f"catalog_fetched_at={fetched_at} catalog_sha256={catalog.sha256}",
+            file=sys.stderr,
+        )
+        for agent, error in errors.items():
+            print(f"aop: {agent}: {error}", file=sys.stderr)
+    return 0 if models and not errors else 1
+
+
+def _price(value: float | None) -> str:
+    return "n/a" if value is None else f"${value:g}"
 
 
 if __name__ == "__main__":

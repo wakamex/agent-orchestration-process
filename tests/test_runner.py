@@ -91,7 +91,9 @@ def test_run_persists_structured_codex_artifacts(
     assert request["artifacts"] == []
     assert persisted_result["succeeded"] is True
     assert persisted_result["artifacts"] == []
-    assert persisted_result["api_equivalent_cost"]["pricing_version"] == "2026-07-10"
+    assert persisted_result["api_equivalent_cost"]["pricing_version"].startswith(
+        "models-dev-"
+    )
     assert '"type": "thread.started"' in events
     assert (run_dir / "stderr.log").read_text() == ""
 

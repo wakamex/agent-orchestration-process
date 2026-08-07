@@ -1,14 +1,91 @@
 from __future__ import annotations
 
 import os
+import json
+import hashlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
+
+
+@pytest.fixture(autouse=True)
+def fresh_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    providers = {
+        "openai": {
+            "models": {
+                "gpt-5.6-sol": {
+                    "name": "GPT-5.6 Sol",
+                    "cost": {
+                        "input": 5,
+                        "cache_read": 0.5,
+                        "cache_write": 6.25,
+                        "output": 30,
+                        "tiers": [
+                            {
+                                "input": 10,
+                                "cache_read": 1,
+                                "cache_write": 12.5,
+                                "output": 45,
+                                "tier": {"type": "context", "size": 272000},
+                            }
+                        ],
+                    },
+                },
+                "gpt-5.6-terra": {
+                    "name": "GPT-5.6 Terra",
+                    "cost": {"input": 2, "cache_read": 0.2, "output": 12},
+                },
+                "gpt-5.6-luna": {
+                    "name": "GPT-5.6 Luna",
+                    "cost": {"input": 0.2, "cache_read": 0.02, "output": 1.2},
+                },
+                "gpt-5.5": {
+                    "name": "GPT-5.5",
+                    "cost": {
+                        "input": 5,
+                        "cache_read": 0.5,
+                        "output": 30,
+                        "tiers": [
+                            {
+                                "input": 10,
+                                "cache_read": 1,
+                                "output": 45,
+                                "tier": {"type": "context", "size": 272000},
+                            }
+                        ],
+                    },
+                },
+                "gpt-5.4-mini": {
+                    "name": "GPT-5.4 mini",
+                    "cost": {"input": 0.75, "cache_read": 0.075, "output": 4.5},
+                },
+            }
+        },
+        "anthropic": {"models": {}},
+        "google": {"models": {}},
+        "opencode": {"models": {}},
+    }
+    raw = json.dumps(providers, separators=(",", ":"), sort_keys=True).encode()
+    path = tmp_path / "model-catalog.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "fetched_at": time.time(),
+                "source": "https://models.dev/api.json",
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "providers": providers,
+            }
+        )
+    )
+    monkeypatch.setenv("AOP_MODEL_CATALOG_CACHE", os.fspath(path))
+    return path
 
 
 def git(cwd: Path, *args: str) -> str:

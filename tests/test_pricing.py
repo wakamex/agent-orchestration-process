@@ -9,8 +9,8 @@ from aop.pricing import TokenUsage, estimate_api_cost
     ("model", "expected"),
     [
         ("gpt-5.6-sol", 0.01055),
-        ("gpt-5.6-terra", 0.005275),
-        ("gpt-5.6-luna", 0.00211),
+        ("gpt-5.6-terra", 0.00422),
+        ("gpt-5.6-luna", 0.000422),
         ("gpt-5.5-2026-04-23", 0.01055),
         ("gpt-5.4-mini-2026-03-17", 0.0015825),
     ],
@@ -28,7 +28,9 @@ def test_estimated_standard_api_cost(model: str, expected: float) -> None:
     assert estimate is not None
     assert estimate.amount_usd == expected
     assert estimate.estimated is True
-    assert estimate.pricing_version == "2026-07-10"
+    assert estimate.pricing_version.startswith("models-dev-")
+    assert estimate.pricing_source == "https://models.dev/api.json"
+    assert estimate.pricing_retrieved_at is not None
     assert estimate.long_context_pricing is False
 
 

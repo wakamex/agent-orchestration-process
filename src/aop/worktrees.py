@@ -69,6 +69,19 @@ class WorktreeManager:
     def discover(cls, start: Path | None = None) -> WorktreeManager:
         cwd = (start or Path.cwd()).resolve()
         listing = git(cwd, "worktree", "list", "--porcelain").stdout
+        configured_root = os.environ.get("AOP_STATE_ROOT")
+        if configured_root:
+            requested = Path(configured_root).resolve()
+            worktree_paths = {
+                Path(line.removeprefix("worktree ")).resolve()
+                for line in listing.splitlines()
+                if line.startswith("worktree ")
+            }
+            if requested not in worktree_paths:
+                raise AOPError(
+                    f"AOP_STATE_ROOT is not a registered Git worktree: {requested}"
+                )
+            return cls(requested)
         first = next(
             (line for line in listing.splitlines() if line.startswith("worktree ")),
             None,

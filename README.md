@@ -407,6 +407,11 @@ AOP_PROVIDER_STATE_DIR  task-local provider runtime state
 AOP_RUN_ID      current structured run identifier (model runs only)
 ```
 
+By default AOP stores its state under the primary Git worktree. Set `AOP_STATE_ROOT` to the absolute
+path of another registered worktree before invoking AOP when that linked worktree, rather than the
+primary checkout, must own `.aop/`, candidate worktrees, run records, and provider state. AOP rejects
+a configured path that Git does not report as a worktree.
+
 Model session identifiers, parent runs, timeouts, and terminal status live in each run's JSON
 artifacts instead of mutable environment variables.
 

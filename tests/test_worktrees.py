@@ -47,6 +47,24 @@ def test_worktree_lifecycle(repository: Path) -> None:
     assert not provider_state.exists()
 
 
+def test_explicit_state_root_anchors_aop_to_a_linked_worktree(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    research = tmp_path / "research"
+    git(repository, "worktree", "add", "-b", "research", os.fspath(research), "HEAD")
+    monkeypatch.setenv("AOP_STATE_ROOT", os.fspath(research))
+
+    manager = WorktreeManager.discover(research)
+    created = manager.create("experiment-one")
+
+    assert manager.root == research
+    assert created.path == research / ".aop" / "worktrees" / "experiment-one"
+    assert "/.aop/" in (research / ".gitignore").read_text()
+    primary_ignore = repository / ".gitignore"
+    assert not primary_ignore.exists() or "/.aop/" not in primary_ignore.read_text()
+    manager.remove("experiment-one")
+
+
 def test_dirty_worktree_requires_force(repository: Path) -> None:
     manager = WorktreeManager.discover(repository)
     worktree = manager.create("dirty-task")

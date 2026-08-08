@@ -13,6 +13,7 @@ from aop.runner import (
     ClaudeAdapter,
     CodexAdapter,
     CursorAdapter,
+    DevinAdapter,
     HermesAdapter,
     _HermesSession,
     OpenCodeAdapter,
@@ -252,6 +253,141 @@ def test_cursor_uses_private_runtime_state_with_read_only_global_home(
         )
         + 1
     ]
+
+    manager.remove(task)
+    assert not private_state.exists()
+    assert (manager.state_dir / "runs" / first.run_id / "result.json").is_file()
+    assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
+
+
+def test_devin_defaults_to_swe_and_resumes_exact_session(
+    repository: Path, fake_devin: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+
+    first = runner.run(task="devin-task", prompt="first", timeout_seconds=5)
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded
+    assert first.provider == "devin"
+    assert first.model == "swe-1-7"
+    assert first.final_message == "answer:first"
+    assert first.usage.input_tokens == 100
+    assert first.usage.cached_input_tokens == 30
+    assert first.usage.output_tokens == 20
+    assert first.api_equivalent_cost is None
+    assert first.billing.route == "provider-credits"
+    assert first.billing.credential_source == "devin-account"
+    assert not first.billing.actual_cost_known
+    assert ["--model", "swe-1-7"] == first.command[
+        first.command.index("--model") : first.command.index("--model") + 2
+    ]
+    assert ["--permission-mode", "dangerous"] == first.command[
+        first.command.index("--permission-mode") : first.command.index(
+            "--permission-mode"
+        )
+        + 2
+    ]
+    assert first.time_to_first_response_seconds is not None
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert resumed.model == "swe-1-7"
+    assert ["--resume", first.session_id] == resumed.command[
+        resumed.command.index("--resume") : resumed.command.index("--resume") + 2
+    ]
+    assert "--model" not in resumed.command
+    assert (
+        manager.state_dir / "runs" / first.run_id / "provider-result.json"
+    ).is_file()
+
+
+def test_devin_rejects_effort_incomplete_turn_and_changed_resume_session(
+    repository: Path, fake_devin: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+
+    with pytest.raises(AOPError, match="does not accept a separate effort"):
+        runner.run(task="devin-effort", prompt="test", effort="high")
+    incomplete = runner.run(task="devin-incomplete", prompt="DEVIN_INCOMPLETE")
+    first = runner.run(task="devin-resume", prompt="first")
+    resumed = runner.resume(run_id=first.run_id, prompt="DEVIN_DIFFERENT_SESSION")
+
+    assert not incomplete.succeeded
+    assert incomplete.error == "Devin did not write a trajectory export"
+    assert not resumed.succeeded
+    assert resumed.session_id is None
+    assert resumed.error == (
+        "Devin resumed as session different-devin-session instead of the requested "
+        f"session {first.session_id}"
+    )
+
+
+def test_devin_workspace_sandbox_and_artifact(
+    repository: Path, fake_devin: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+
+    sandboxed = runner.run(task="devin-sandbox", prompt="CHECK_DEVIN_SANDBOX")
+    artifact = runner.run(
+        task="devin-artifact",
+        prompt="WRITE_ARTIFACT",
+        sandbox="scratch-write",
+        artifacts=["report.md"],
+    )
+
+    assert sandboxed.succeeded
+    assert (manager.get("devin-sandbox").path / "agent-write.txt").read_text() == (
+        "allowed"
+    )
+    assert not (repository / "main-write.txt").exists()
+    assert artifact.succeeded
+    assert (
+        manager.state_dir
+        / "runs"
+        / artifact.run_id
+        / artifact.artifacts[0].archive_path
+    ).read_text() == "# Devin artifact\n"
+
+
+@pytest.mark.parametrize(
+    "sandbox", ["scratch-write", "workspace-write", "danger-full-access"]
+)
+def test_devin_uses_private_runtime_state_with_read_only_global_profile(
+    repository: Path,
+    fake_devin: Path,
+    sandbox: str,
+) -> None:
+    source_data = Path(os.environ["AOP_DEVIN_DATA_DIR"])
+    source_config = Path(os.environ["AOP_DEVIN_CONFIG_DIR"])
+    source_credentials = source_data / "credentials.toml"
+    source_data.chmod(0o555)
+    source_config.chmod(0o555)
+    source_credentials.chmod(0o444)
+    task = f"managed-devin-{sandbox}"
+    manager = WorktreeManager.discover(repository)
+
+    try:
+        runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+        first = runner.run(task=task, prompt="first", sandbox=sandbox)
+        resumed = runner.resume(run_id=first.run_id, prompt="second")
+    finally:
+        source_data.chmod(0o755)
+        source_config.chmod(0o755)
+        source_credentials.chmod(0o644)
+
+    private_state = manager.state_dir / "provider-state" / task / "devin"
+    assert first.succeeded
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert (private_state / "data" / "devin" / "credentials.toml").is_file()
+    assert (private_state / "config" / "devin" / "config.json").is_file()
+    assert (private_state / "data" / "devin" / "cli" / "fake-session.json").is_file()
+    assert not (private_state / "data" / "devin" / "cli" / "installed.bin").exists()
+    assert not (source_data / "cli" / "fake-session.json").exists()
+    assert source_credentials.read_text() == 'token = "test"\n'
 
     manager.remove(task)
     assert not private_state.exists()

@@ -106,6 +106,31 @@ def test_native_model_parsers_and_pricing(
             return "Fetching available models...\ngemini-3.5-flash-low\tGemini Flash\n"
         if command[0] == "opencode":
             return "opencode/deepseek-v4-flash\n"
+        if command[0] == "devin":
+            return json.dumps(
+                {
+                    "families": [
+                        {
+                            "family_label": "SWE-1.7",
+                            "variants": [
+                                {
+                                    "model_uid": "swe-1-7",
+                                    "label": "SWE-1.7 Max",
+                                    "cost_tier": "Free",
+                                },
+                                {
+                                    "model_uid": "swe-1-7-lightning",
+                                    "label": "SWE-1.7 Lightning Max",
+                                    "cost_tier": "Med cost",
+                                    "cost_summary": (
+                                        "$2.5 / MTok In · $12.5 / MTok Out"
+                                    ),
+                                },
+                            ],
+                        }
+                    ]
+                }
+            )
         raise AssertionError(command)
 
     monkeypatch.setattr(model_listing, "_run", run)
@@ -113,12 +138,19 @@ def test_native_model_parsers_and_pricing(
     codex = model_listing.list_models("codex", catalog)[0]
     cursor = model_listing.list_models("cursor", catalog)[0]
     agy = model_listing.list_models("agy", catalog)[0]
+    devin = model_listing.list_models("devin", catalog)
     opencode = model_listing.list_models("opencode", catalog)[0]
 
     assert codex.input_per_million_usd == 5
     assert codex.price_scope == "api-equivalent"
     assert cursor.input_per_million_usd == 5
     assert agy.availability == "account"
+    assert devin[0].model == "swe-1-7"
+    assert devin[0].input_per_million_usd == 0
+    assert devin[0].output_per_million_usd == 0
+    assert devin[1].input_per_million_usd == 2.5
+    assert devin[1].output_per_million_usd == 12.5
+    assert devin[1].pricing_source == "Devin CLI account model inventory"
     assert opencode.availability == "account"
 
 

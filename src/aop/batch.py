@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
+from .model_listing import AGENTS
 from .runner import AgentRunner, adapter_for, normalize_artifacts
 from .worktrees import AOPError, TASK_ID, WorktreeManager
 
@@ -299,17 +300,8 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
     if not TASK_ID.fullmatch(task_id):
         raise AOPError(f"{label}.id is not a valid task id: {task_id}")
     agent = value.get("agent", "codex")
-    if not isinstance(agent, str) or agent not in {
-        "codex",
-        "claude",
-        "cursor",
-        "opencode",
-        "agy",
-        "hermes",
-    }:
-        raise AOPError(
-            f"{label}.agent must be one of: agy, claude, codex, cursor, hermes, opencode"
-        )
+    if not isinstance(agent, str) or agent not in AGENTS:
+        raise AOPError(f"{label}.agent must be one of: {', '.join(AGENTS)}")
 
     prompt = value.get("prompt")
     prompt_file = value.get("prompt_file")

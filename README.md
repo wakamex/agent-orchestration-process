@@ -15,8 +15,9 @@ each project.
 ## Reference implementation
 
 This repository includes a dependency-free Python CLI for running Codex, Claude Code, Cursor Agent,
-OpenCode, Antigravity (`agy`), and Hermes concurrently in isolated Git worktrees. Each adapter
-records a normalized result and resumes the exact provider session associated with an earlier run.
+Devin CLI, OpenCode, Antigravity (`agy`), and Hermes concurrently in isolated Git worktrees. Each
+adapter records a normalized result and resumes the exact provider session associated with an
+earlier run.
 
 ### Bounded adapter design
 
@@ -69,6 +70,8 @@ aop run task-b --agent claude --model sonnet --effort high \
   --prompt "Implement the parser and its tests"
 aop run task-cursor --agent cursor \
   --prompt "Refactor the parser without changing behavior"
+aop run task-devin --agent devin --model swe-1-7 \
+  --prompt "Find and fix the parser's root cause"
 aop run task-opencode --agent opencode --effort high \
   --prompt "Fix the parser and run its tests"
 aop run task-c --agent agy --model gemini-3.5-flash --effort low \
@@ -105,8 +108,8 @@ worktree's `.git` pointer read-only. `scratch-write` leaves the task read-only a
 `scratch/` directory plus the shared cache writable; use it for agents that need working space but
 must not edit the repository. `danger-full-access` explicitly skips `bwrap`. Configured
 authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`,
-`AOP_CURSOR_BIN`, `AOP_OPENCODE_BIN`, `AOP_AGY_BIN`, `AOP_HERMES_BIN`, and `AOP_BWRAP_BIN` may
-override their respective executables.
+`AOP_CURSOR_BIN`, `AOP_DEVIN_BIN`, `AOP_OPENCODE_BIN`, `AOP_AGY_BIN`, `AOP_HERMES_BIN`, and
+`AOP_BWRAP_BIN` may override their respective executables.
 
 Every Agy task uses a persistent private Gemini profile under
 `.aop/provider-state/<task>/agy/gemini`, including with `danger-full-access`. AOP initializes it
@@ -124,6 +127,23 @@ CLI configuration, skills, plugins, policies, and authentication are copied with
 extensions. Cursor caches use the shared AOP cache. This lets the first turn and exact resume work
 when the surrounding home directory is read-only, without modifying global Cursor state. Cleanup
 removes the private profile with the task. `danger-full-access` retains Cursor's native global state.
+
+Every Devin task uses a persistent private XDG profile under
+`.aop/provider-state/<task>/devin`, including with `danger-full-access`. AOP seeds authentication,
+configuration, and MCP state, but excludes Devin's installed CLI versions, sessions, transcripts,
+logs, and databases. New runtime state stays private to the task, exact resumes use that same state,
+and cleanup removes it while preserving run records. Devin's installed bundle remains shared and
+read-only, so task isolation does not duplicate the installation. AOP runs Devin in its
+non-interactive dangerous permission mode because the outer `bwrap` boundary enforces
+`workspace-write` and `scratch-write`; `danger-full-access` retains its explicit meaning. Set
+`AOP_DEVIN_DATA_DIR` or `AOP_DEVIN_CONFIG_DIR` only when the authenticated source profile is outside
+the standard XDG locations. Authenticate once before the first AOP run; on an SSH host use
+`devin auth login --force-manual-token-flow`.
+
+Devin writes a fresh ATIF trajectory export for every invocation. AOP requires that export to
+contain the current prompt, a terminal agent response, and the exact requested session on resume.
+It records the resolved model variant and per-turn prompt, cached-input, and completion tokens, and
+archives the original export as `provider-result.json` with the other immutable run evidence.
 
 For OpenCode in either non-danger sandbox, AOP seeds small user configuration and authentication
 files into a persistent task-local XDG profile under `.aop/provider-state/<task>/opencode`.
@@ -229,6 +249,11 @@ Cursor Agent uses `composer-2.5` by default. Pass any model ID printed by `agent
 a separate `--effort`. AOP disables Cursor's native sandbox and permission prompts inside the outer
 `bwrap` boundary, records its structured token and timing metrics, and resumes the exact chat ID.
 
+Devin defaults to the free `swe-1-7` Max variant. Pass any exact model ID printed by
+`devin models list` through `--model`. Devin encodes reasoning level in model variant IDs such as
+`swe-1-7-medium`, so its adapter rejects a separate `--effort`. On resume, Devin restores the saved
+model and AOP omits `--model`, which the CLI otherwise ignores with a warning.
+
 OpenCode defaults to the paid OpenCode Zen model `opencode/deepseek-v4-flash`. A short model name
 such as `deepseek-v4-flash` is automatically qualified with `opencode/`; pass a full
 `provider/model` ID to use another configured provider. AOP maps `--effort` to OpenCode's native
@@ -245,7 +270,9 @@ aop models --agent hermes --json
 aop models --refresh
 ```
 
-Codex, Cursor, Agy, and OpenCode results are queried from their non-interactive model interfaces.
+Codex, Cursor, Devin, Agy, and OpenCode results are queried from their non-interactive model
+interfaces. Devin prices come from its authenticated account inventory, including zero-dollar
+models and provider-reported per-million-token rates.
 Hermes follows its configured provider: Nous results come from the live Nous inference endpoint,
 while providers without a live listing use their matching catalog entries. Claude has no
 non-interactive model listing, so its rows come from the Anthropic catalog and are marked `catalog`
@@ -288,11 +315,12 @@ actual cost; AOP records the delta for each invocation so resumed turns are not 
 Hermes reports `cost_source: none`, AOP uses the fresh catalog for the session's billing provider
 and records an API-equivalent estimate instead of treating Hermes's zero-initialized counter as a
 real zero-dollar cost. A zero-token failed turn remains unpriced. Agy
-currently supplies timing and token usage from its structured result stream. Cursor, OpenCode, and
-Agy each report provider duration separately from AOP's wall-clock duration. OpenCode also reports
-per-step billed USD cost; AOP sums it for the invocation and records it as an actual CLI-reported
-cost instead of applying AOP's API price table. Cursor and Agy do not report API-equivalent cost, so
-that field remains `n/a`.
+currently supplies timing and token usage from its structured result stream. Devin's trajectory
+supplies the resolved model variant and token usage for every inference in the current turn. Cursor,
+OpenCode, and Agy each report provider duration separately from AOP's wall-clock duration. OpenCode
+also reports per-step billed USD cost; AOP sums it for the invocation and records it as an actual
+CLI-reported cost instead of applying AOP's API price table. Cursor, Devin, and Agy do not report
+API-equivalent cost, so that field remains `n/a`.
 
 Run independent tasks concurrently from a TOML manifest:
 

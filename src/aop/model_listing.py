@@ -19,7 +19,7 @@ from .model_catalog import ModelCatalog
 from .worktrees import AOPError
 
 
-AGENTS = ("codex", "claude", "cursor", "opencode", "agy", "hermes")
+AGENTS = ("codex", "claude", "cursor", "devin", "opencode", "agy", "hermes")
 NOUS_MODELS_URL = "https://inference-api.nousresearch.com/v1/models"
 
 
@@ -51,6 +51,8 @@ def list_models(agent: str, catalog: ModelCatalog) -> list[AvailableModel]:
         return _simple_cli_models(
             agent, _binary("agy", "AOP_AGY_BIN", "agy"), ["models"], catalog
         )
+    if agent == "devin":
+        return _devin_models()
     if agent == "opencode":
         return _opencode_models(catalog)
     if agent == "claude":
@@ -224,6 +226,64 @@ def _opencode_models(catalog: ModelCatalog) -> list[AvailableModel]:
     if not records:
         raise AOPError("OpenCode did not return any models")
     return records
+
+
+def _devin_models() -> list[AvailableModel]:
+    binary = _binary("devin", "AOP_DEVIN_BIN", "devin")
+    try:
+        value = json.loads(_run([binary, "models", "list", "--format", "json"]))
+    except json.JSONDecodeError as error:
+        raise AOPError("Devin returned an invalid model inventory") from error
+    families = value.get("families") if isinstance(value, dict) else None
+    if not isinstance(families, list):
+        raise AOPError("Devin returned an invalid model inventory")
+    records = []
+    for family in families:
+        variants = family.get("variants") if isinstance(family, dict) else None
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            model = variant.get("model_uid")
+            if not isinstance(model, str) or not model:
+                continue
+            input_price, output_price = _devin_prices(variant)
+            priced = input_price is not None or output_price is not None
+            records.append(
+                AvailableModel(
+                    agent="devin",
+                    model=model,
+                    name=str(variant.get("label") or model),
+                    availability="account",
+                    price_scope="provider" if priced else "unknown",
+                    input_per_million_usd=input_price,
+                    output_per_million_usd=output_price,
+                    pricing_source=(
+                        "Devin CLI account model inventory" if priced else None
+                    ),
+                )
+            )
+    if not records:
+        raise AOPError("Devin did not return any models")
+    return records
+
+
+def _devin_prices(variant: dict[str, Any]) -> tuple[float | None, float | None]:
+    if str(variant.get("cost_tier", "")).lower() == "free":
+        return 0.0, 0.0
+    summary = variant.get("cost_summary")
+    if not isinstance(summary, str):
+        return None, None
+    prices = re.search(
+        r"\$([0-9]+(?:\.[0-9]+)?)\s*/\s*MTok\s*In.*?"
+        r"\$([0-9]+(?:\.[0-9]+)?)\s*/\s*MTok\s*Out",
+        summary,
+        re.IGNORECASE,
+    )
+    if prices is None:
+        return None, None
+    return float(prices.group(1)), float(prices.group(2))
 
 
 def _catalog_models(

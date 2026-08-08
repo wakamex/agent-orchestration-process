@@ -423,6 +423,124 @@ print(json.dumps({{
 
 
 @pytest.fixture
+def fake_devin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    executable = tmp_path / "devin"
+    source_data = tmp_path / "devin-data"
+    source_data.mkdir()
+    (source_data / "credentials.toml").write_text('token = "test"\n')
+    (source_data / "cli").mkdir()
+    (source_data / "cli" / "installed.bin").write_bytes(b"not copied")
+    source_config = tmp_path / "devin-config"
+    source_config.mkdir()
+    (source_config / "config.json").write_text('{"devin": {"org_id": "test"}}\n')
+    monkeypatch.setenv("AOP_DEVIN_DATA_DIR", os.fspath(source_data))
+    monkeypatch.setenv("AOP_DEVIN_CONFIG_DIR", os.fspath(source_config))
+    executable.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+if args == ["models", "list", "--format", "json"]:
+    print(json.dumps({{
+        "families": [
+            {{
+                "family_label": "SWE-1.7",
+                "family_uid": "swe-1.7",
+                "variants": [
+                    {{
+                        "model_uid": "swe-1-7",
+                        "label": "SWE-1.7 Max",
+                        "cost_tier": "Free",
+                    }},
+                ],
+            }},
+        ],
+    }}))
+    raise SystemExit(0)
+
+data_dir = pathlib.Path(os.environ["XDG_DATA_HOME"]) / "devin"
+config_dir = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "devin"
+state_dir = pathlib.Path(os.environ["XDG_STATE_HOME"])
+cache_dir = pathlib.Path(os.environ["XDG_CACHE_HOME"])
+if not data_dir.joinpath("credentials.toml").is_file():
+    raise RuntimeError("missing private Devin authentication")
+if not config_dir.joinpath("config.json").is_file():
+    raise RuntimeError("missing private Devin configuration")
+if data_dir.joinpath("cli", "installed.bin").exists():
+    raise RuntimeError("copied the installed Devin bundle")
+for directory in [data_dir / "cli", state_dir, cache_dir]:
+    directory.mkdir(parents=True, exist_ok=True)
+state_path = data_dir / "cli" / "fake-session.json"
+export_path = pathlib.Path(args[args.index("--export") + 1])
+prompt = args[args.index("-p") + 1]
+if "--resume" in args:
+    requested_session = args[args.index("--resume") + 1]
+    state = json.loads(state_path.read_text())
+    if state["session_id"] != requested_session:
+        raise RuntimeError("session is absent from private state")
+    session_id = requested_session
+    model = state["model"]
+else:
+    session_id = "tested-basil"
+    model = args[args.index("--model") + 1]
+    state_path.write_text(json.dumps({{"session_id": session_id, "model": model}}))
+if prompt == "DEVIN_DIFFERENT_SESSION":
+    session_id = "different-devin-session"
+if prompt == "DEVIN_INCOMPLETE":
+    print("partial", flush=True)
+    raise SystemExit(0)
+if prompt == "DEVIN_FAIL":
+    print("synthetic Devin failure", file=sys.stderr)
+    raise SystemExit(2)
+if prompt.startswith("WRITE_ARTIFACT"):
+    pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("report.md").write_text(
+        "# Devin artifact\\n"
+    )
+if prompt == "CHECK_DEVIN_SANDBOX":
+    pathlib.Path("agent-write.txt").write_text("allowed")
+    for protected in [
+        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path(".git"),
+    ]:
+        try:
+            protected.write_text("forbidden")
+        except OSError:
+            pass
+        else:
+            raise RuntimeError(f"sandbox allowed write to {{protected}}")
+
+message = f"answer:{{prompt}}"
+export_path.write_text(json.dumps({{
+    "schema_version": "ATIF-v1.7",
+    "session_id": session_id,
+    "agent": {{"name": "devin", "model_name": "SWE-1.7"}},
+    "steps": [
+        {{"step_id": 1, "source": "user", "message": prompt}},
+        {{
+            "step_id": 2,
+            "source": "agent",
+            "message": message,
+            "model_name": "SWE-1.7",
+            "metrics": {{
+                "prompt_tokens": 100,
+                "cached_tokens": 30,
+                "completion_tokens": 20,
+            }},
+            "extra": {{"generation_model": model}},
+        }},
+    ],
+}}))
+print(message, flush=True)
+"""
+    )
+    executable.chmod(0o755)
+    return executable
+
+
+@pytest.fixture
 def fake_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     executable = tmp_path / "opencode"
     source_config = tmp_path / "opencode-config"

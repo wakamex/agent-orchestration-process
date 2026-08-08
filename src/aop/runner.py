@@ -978,6 +978,230 @@ class CursorAdapter:
         }
 
 
+class DevinAdapter:
+    provider = "devin"
+    modes = frozenset({"agent"})
+    DEFAULT_MODEL = "swe-1-7"
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_DEVIN_BIN", "devin")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        if effort is not None:
+            raise AOPError(
+                "Devin does not accept a separate effort; choose a model ID with "
+                "the desired reasoning level"
+            )
+        return model or self.DEFAULT_MODEL, None
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        _prepare_devin_environment(environment)
+        export_path = (
+            Path(environment["AOP_SCRATCH_DIR"])
+            / f".devin-export-{request.run_id}.json"
+        )
+        command = _provider_command(
+            self._command(request, export_path), request, worktree, environment
+        )
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=None,
+            timeout_seconds=request.timeout_seconds,
+            is_response=lambda line: bool(line.strip()),
+        )
+        _atomic_write(run_dir / "events.jsonl", capture.stdout)
+        _atomic_write(run_dir / "stderr.log", capture.stderr)
+        parsed = self._parse_export(export_path, request.prompt)
+        if export_path.is_file():
+            _atomic_write(run_dir / "provider-result.json", export_path.read_text())
+            export_path.unlink()
+        final_message = parsed["final_message"]
+        if final_message is not None:
+            _atomic_write(run_dir / "last-message.txt", final_message)
+        reported_session_id = parsed["session_id"]
+        session_id = reported_session_id
+
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif capture.exit_code:
+            error = (
+                capture.stderr.strip()
+                or f"Devin exited with status {capture.exit_code}"
+            )
+        elif parsed["error"]:
+            error = parsed["error"]
+        elif request.session_id and reported_session_id != request.session_id:
+            session_id = None
+            if reported_session_id is None:
+                error = (
+                    "Devin resume result did not report the requested session ID "
+                    f"{request.session_id}"
+                )
+            else:
+                error = (
+                    f"Devin resumed as session {reported_session_id} instead of "
+                    f"the requested session {request.session_id}"
+                )
+        elif reported_session_id is None:
+            error = "Devin did not report a session ID"
+        elif final_message is None:
+            error = "Devin did not emit a final response"
+        else:
+            error = None
+
+        return RunResult(
+            run_id=request.run_id,
+            provider=self.provider,
+            mode=request.mode,
+            task=request.task,
+            model=parsed["model"] or request.model,
+            effort=request.effort,
+            session_id=session_id,
+            command=command,
+            started_at=started_at,
+            finished_at=_now(),
+            duration_seconds=capture.duration_seconds,
+            time_to_first_event_seconds=capture.first_event_seconds,
+            time_to_first_response_seconds=capture.first_response_seconds,
+            exit_code=capture.exit_code,
+            timed_out=capture.timed_out,
+            error=error,
+            final_message=final_message,
+            usage=parsed["usage"],
+            api_equivalent_cost=None,
+            billing=BillingProvenance(
+                route="provider-credits",
+                credential_source="devin-account",
+                detected_by="Devin authenticated account",
+            ),
+        )
+
+    def _command(self, request: RunRequest, export_path: Path) -> list[str]:
+        command = [
+            self.binary,
+            "--permission-mode",
+            "dangerous",
+            "--respect-workspace-trust",
+            "false",
+            "--export",
+            os.fspath(export_path),
+        ]
+        if request.session_id:
+            command.extend(["--resume", request.session_id])
+        elif request.model:
+            command.extend(["--model", request.model])
+        command.extend(["-p", request.prompt])
+        return command
+
+    @staticmethod
+    def _parse_export(path: Path, prompt: str) -> dict[str, object]:
+        try:
+            value = json.loads(path.read_text())
+        except FileNotFoundError:
+            return DevinAdapter._invalid_export(
+                "Devin did not write a trajectory export"
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            return DevinAdapter._invalid_export(
+                f"Devin wrote an invalid trajectory export: {error}"
+            )
+        if not isinstance(value, dict) or not str(
+            value.get("schema_version", "")
+        ).startswith("ATIF-"):
+            return DevinAdapter._invalid_export(
+                "Devin wrote an invalid trajectory export"
+            )
+        steps = value.get("steps")
+        if not isinstance(steps, list):
+            return DevinAdapter._invalid_export(
+                "Devin trajectory export did not contain steps"
+            )
+        turn_start = None
+        for index, step in enumerate(steps):
+            if (
+                isinstance(step, dict)
+                and step.get("source") == "user"
+                and step.get("message") == prompt
+            ):
+                turn_start = index
+        if turn_start is None:
+            return DevinAdapter._invalid_export(
+                "Devin trajectory export did not contain the current prompt"
+            )
+        agent_steps = [
+            step
+            for step in steps[turn_start + 1 :]
+            if isinstance(step, dict) and step.get("source") == "agent"
+        ]
+        final_message = next(
+            (
+                step["message"]
+                for step in reversed(agent_steps)
+                if isinstance(step.get("message"), str) and step["message"]
+            ),
+            None,
+        )
+        model = next(
+            (
+                extra["generation_model"]
+                for step in reversed(agent_steps)
+                if isinstance((extra := step.get("extra")), dict)
+                and isinstance(extra.get("generation_model"), str)
+            ),
+            None,
+        )
+        usage = TokenUsage(
+            input_tokens=sum(
+                DevinAdapter._metric(step, "prompt_tokens") for step in agent_steps
+            ),
+            cached_input_tokens=sum(
+                DevinAdapter._metric(step, "cached_tokens") for step in agent_steps
+            ),
+            output_tokens=sum(
+                DevinAdapter._metric(step, "completion_tokens") for step in agent_steps
+            ),
+        )
+        session_id = value.get("session_id")
+        return {
+            "session_id": session_id
+            if isinstance(session_id, str) and session_id
+            else None,
+            "model": model,
+            "final_message": final_message,
+            "usage": usage,
+            "error": None,
+        }
+
+    @staticmethod
+    def _metric(step: dict[str, object], name: str) -> int:
+        metrics = step.get("metrics")
+        value = metrics.get(name) if isinstance(metrics, dict) else None
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(value, 0)
+
+    @staticmethod
+    def _invalid_export(error: str) -> dict[str, object]:
+        return {
+            "session_id": None,
+            "model": None,
+            "final_message": None,
+            "usage": TokenUsage(),
+            "error": error,
+        }
+
+
 class OpenCodeAdapter:
     provider = "opencode"
     modes = frozenset({"agent"})
@@ -1902,7 +2126,7 @@ def _provider_command(
     else:
         wrapped.extend(["--bind", os.fspath(scratch), os.fspath(scratch)])
     wrapped.extend(["--bind", os.fspath(cache), os.fspath(cache)])
-    if request.provider in {"agy", "cursor", "hermes", "opencode"}:
+    if request.provider in {"agy", "cursor", "devin", "hermes", "opencode"}:
         wrapped.extend(["--bind", os.fspath(provider_state), os.fspath(provider_state)])
     if request.provider == "agy":
         source_dir = _agy_source_dir(environment)
@@ -2042,6 +2266,12 @@ _OPENCODE_CONFIG_RUNTIME_NAMES = {
     "package.json",
 }
 _OPENCODE_DATA_SEED_FILES = {"auth.json", "mcp-auth.json"}
+_DEVIN_DATA_RUNTIME_NAMES = {
+    "cli",
+    "sessions.db",
+    "sessions.db-shm",
+    "sessions.db-wal",
+}
 
 
 def _cursor_source_home(environment: dict[str, str]) -> Path:
@@ -2106,6 +2336,80 @@ def _prepare_cursor_state(
     except OSError as error:
         shutil.rmtree(temporary, ignore_errors=True)
         raise AOPError(f"could not prepare isolated Cursor state: {error}") from error
+
+
+def _prepare_devin_environment(environment: dict[str, str]) -> None:
+    source_data = _devin_source_data(environment)
+    source_config = _devin_source_config(environment)
+    destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "devin"
+    _prepare_devin_state(source_data, source_config, destination)
+    cache = Path(environment["AOP_CACHE_DIR"]) / "devin"
+    cache.mkdir(parents=True, exist_ok=True)
+    environment.update(
+        {
+            "XDG_DATA_HOME": os.fspath(destination / "data"),
+            "XDG_CONFIG_HOME": os.fspath(destination / "config"),
+            "XDG_STATE_HOME": os.fspath(destination / "state"),
+            "XDG_CACHE_HOME": os.fspath(cache),
+        }
+    )
+
+
+def _devin_source_data(environment: dict[str, str]) -> Path:
+    configured = environment.get("AOP_DEVIN_DATA_DIR")
+    base = Path(
+        environment.get("XDG_DATA_HOME", Path(environment["HOME"]) / ".local" / "share")
+    )
+    source = Path(configured).expanduser() if configured else base / "devin"
+    if not (source / "credentials.toml").is_file():
+        raise AOPError(
+            f"Devin authentication does not exist: {source}; authenticate Devin first"
+        )
+    return source.resolve()
+
+
+def _devin_source_config(environment: dict[str, str]) -> Path | None:
+    configured = environment.get("AOP_DEVIN_CONFIG_DIR")
+    base = Path(
+        environment.get("XDG_CONFIG_HOME", Path(environment["HOME"]) / ".config")
+    )
+    source = Path(configured).expanduser() if configured else base / "devin"
+    if source.is_dir():
+        return source.resolve()
+    if configured:
+        raise AOPError(f"Devin config directory does not exist: {source}")
+    return None
+
+
+def _prepare_devin_state(
+    source_data: Path, source_config: Path | None, destination: Path
+) -> None:
+    if destination.is_dir():
+        return
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    private_data = temporary / "data" / "devin"
+    private_config = temporary / "config" / "devin"
+    private_state = temporary / "state"
+    private_data.mkdir(parents=True, mode=0o700)
+    private_state.mkdir(parents=True, mode=0o700)
+    try:
+        for entry in source_data.iterdir():
+            if entry.name in _DEVIN_DATA_RUNTIME_NAMES:
+                continue
+            target = private_data / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, target, symlinks=True)
+            elif entry.is_file():
+                shutil.copy2(entry, target)
+        if source_config is None:
+            private_config.mkdir(parents=True)
+        else:
+            shutil.copytree(source_config, private_config, symlinks=True)
+        _make_tree_user_writable(temporary)
+        os.replace(temporary, destination)
+    except OSError as error:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise AOPError(f"could not prepare isolated Devin state: {error}") from error
 
 
 def _make_tree_user_writable(root: Path) -> None:
@@ -2300,6 +2604,8 @@ def adapter_for(agent: str) -> AgentAdapter:
         return ClaudeAdapter()
     if agent == "cursor":
         return CursorAdapter()
+    if agent == "devin":
+        return DevinAdapter()
     if agent == "opencode":
         return OpenCodeAdapter()
     if agent == "agy":

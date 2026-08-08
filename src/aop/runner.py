@@ -12,10 +12,11 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Callable, Protocol, Sequence
+from typing import Callable, Iterator, Protocol, Sequence
 
 from .models import BillingProvenance, RunArtifact, RunRequest, RunResult
 from .locks import exclusive_lock, task_lock_path
@@ -1753,6 +1754,16 @@ class HermesAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
+        with _hermes_runtime_environment(environment) as runtime_environment:
+            return self._execute(request, worktree, run_dir, runtime_environment)
+
+    def _execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
         before = self._session(request.session_id, request, worktree, environment)
         command = _provider_command(
             self._command(request), request, worktree, environment
@@ -2160,23 +2171,9 @@ def _provider_command(
             ]
         )
     if request.provider == "hermes":
-        source_home = _hermes_source_home(environment)
-        if not source_home.is_dir():
-            raise AOPError(
-                f"Hermes home does not exist: {source_home}; authenticate Hermes first"
-            )
-        isolated_home = provider_state / "hermes" / "home"
-        _prepare_hermes_home(source_home, isolated_home)
-        wrapped.extend(
-            [
-                "--ro-bind",
-                os.fspath(source_home),
-                os.fspath(source_home),
-                "--setenv",
-                "HERMES_HOME",
-                os.fspath(isolated_home),
-            ]
-        )
+        isolated_home = Path(environment["HERMES_HOME"])
+        if isolated_home != provider_state / "hermes" / "home":
+            raise AOPError("Hermes runtime home is outside its task-private state")
     if request.provider == "opencode":
         source_config = _opencode_source_config(environment)
         source_data = _opencode_source_data(environment)
@@ -2662,6 +2659,186 @@ def _prepare_hermes_home(source: Path, destination: Path) -> None:
     except OSError as error:
         shutil.rmtree(temporary, ignore_errors=True)
         raise AOPError(f"could not prepare isolated Hermes home: {error}") from error
+
+
+def _parse_hermes_timestamp(value: object) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = float(value)
+        return timestamp / 1000 if timestamp > 10_000_000_000 else timestamp
+    if not isinstance(value, str) or not value.strip():
+        return 0.0
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _hermes_value_freshness(
+    value: object, store_updated_at: float
+) -> tuple[float, float]:
+    # A failed request can update the store after copying an already-consumed
+    # refresh token. Token lifecycle timestamps must therefore win first.
+    refresh_times: list[float] = []
+    obtained_times: list[float] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                if key == "last_refresh":
+                    refresh_times.append(_parse_hermes_timestamp(nested))
+                elif key in {"obtained_at", "agent_key_obtained_at"}:
+                    obtained_times.append(_parse_hermes_timestamp(nested))
+                elif isinstance(nested, (dict, list)):
+                    visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    lifecycle_time = max(refresh_times or obtained_times or [0.0])
+    return lifecycle_time, store_updated_at
+
+
+def _hermes_entry_identity(entry: dict[str, object]) -> tuple[str, str, str]:
+    identifier = entry.get("id")
+    if isinstance(identifier, str) and identifier:
+        return "id", identifier, ""
+    source = entry.get("source")
+    label = entry.get("label")
+    return "source-label", str(source or ""), str(label or "")
+
+
+def _merge_hermes_auth_stores(
+    stores: Sequence[dict[str, object]],
+) -> dict[str, object] | None:
+    if not stores:
+        return None
+    ordered = sorted(
+        stores,
+        key=lambda store: _parse_hermes_timestamp(store.get("updated_at")),
+    )
+    merged: dict[str, object] = {}
+    provider_freshness: dict[str, tuple[float, float]] = {}
+    entry_freshness: dict[tuple[str, tuple[str, str, str]], tuple[float, float]] = {}
+
+    for store in ordered:
+        store_updated_at = _parse_hermes_timestamp(store.get("updated_at"))
+        for key, value in store.items():
+            if key not in {"providers", "credential_pool"}:
+                merged[key] = value
+
+        providers = store.get("providers")
+        if isinstance(providers, dict):
+            merged_providers = merged.setdefault("providers", {})
+            if isinstance(merged_providers, dict):
+                for provider, state in providers.items():
+                    freshness = _hermes_value_freshness(state, store_updated_at)
+                    if freshness >= provider_freshness.get(provider, (0.0, 0.0)):
+                        merged_providers[provider] = state
+                        provider_freshness[provider] = freshness
+
+        pool = store.get("credential_pool")
+        if not isinstance(pool, dict):
+            continue
+        merged_pool = merged.setdefault("credential_pool", {})
+        if not isinstance(merged_pool, dict):
+            continue
+        for provider, entries in pool.items():
+            if not isinstance(entries, list):
+                continue
+            merged_entries = merged_pool.setdefault(provider, [])
+            if not isinstance(merged_entries, list):
+                continue
+            positions = {
+                _hermes_entry_identity(entry): index
+                for index, entry in enumerate(merged_entries)
+                if isinstance(entry, dict)
+            }
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                identity = _hermes_entry_identity(entry)
+                key = provider, identity
+                freshness = _hermes_value_freshness(entry, store_updated_at)
+                position = positions.get(identity)
+                if position is None:
+                    positions[identity] = len(merged_entries)
+                    merged_entries.append(entry)
+                    entry_freshness[key] = freshness
+                elif freshness >= entry_freshness.get(key, (0.0, 0.0)):
+                    merged_entries[position] = entry
+                    entry_freshness[key] = freshness
+    return merged
+
+
+def _load_hermes_auth(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write_hermes_auth(path: Path, value: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(f"{json.dumps(value, indent=2, sort_keys=True)}\n")
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _reconcile_hermes_credentials(
+    source_home: Path,
+    task_home: Path,
+    state_dir: Path,
+) -> Path:
+    shared_auth = state_dir / "shared-provider-state" / "hermes" / "auth.json"
+    candidates = [source_home / "auth.json", shared_auth]
+    # Recover a rotation even if AOP was interrupted before committing it.
+    candidates.extend(state_dir.glob("provider-state/*/hermes/home/auth.json"))
+    stores = []
+    for path in candidates:
+        store = _load_hermes_auth(path)
+        if store is not None:
+            stores.append(store)
+    merged = _merge_hermes_auth_stores(stores)
+    if merged is not None:
+        _write_hermes_auth(shared_auth, merged)
+        _write_hermes_auth(task_home / "auth.json", merged)
+    return shared_auth
+
+
+@contextmanager
+def _hermes_runtime_environment(
+    environment: dict[str, str],
+) -> Iterator[dict[str, str]]:
+    source_home = _hermes_source_home(environment)
+    if not source_home.is_dir():
+        raise AOPError(
+            f"Hermes home does not exist: {source_home}; authenticate Hermes first"
+        )
+    provider_state = Path(environment["AOP_PROVIDER_STATE_DIR"])
+    task_home = provider_state / "hermes" / "home"
+    _prepare_hermes_home(source_home, task_home)
+    state_dir = provider_state.parent.parent
+    lock_path = state_dir / "locks" / "hermes-credentials.lock"
+    runtime_environment = environment.copy()
+    runtime_environment["HERMES_HOME"] = os.fspath(task_home)
+
+    # Hermes has no separate auth path. Hold the lock for the complete turn so
+    # two task-private homes cannot consume the same single-use refresh token.
+    with exclusive_lock(lock_path, "Hermes credential state", blocking=True):
+        shared_auth = _reconcile_hermes_credentials(source_home, task_home, state_dir)
+        try:
+            yield runtime_environment
+        finally:
+            task_auth = _load_hermes_auth(task_home / "auth.json")
+            if task_auth is not None:
+                _write_hermes_auth(shared_auth, task_auth)
 
 
 def adapter_for(agent: str) -> AgentAdapter:

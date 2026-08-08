@@ -166,13 +166,21 @@ profile with the task. `danger-full-access` retains OpenCode's native global sta
 `AOP_OPENCODE_CONFIG_DIR` or `AOP_OPENCODE_DATA_DIR` only when the authenticated source profile is
 outside the standard XDG locations.
 
-For Hermes in either non-danger sandbox, AOP seeds a persistent task-local Hermes home under
+For Hermes in every sandbox mode, AOP seeds a persistent task-local Hermes home under
 `.aop/provider-state/<task>/` from the authenticated profile. Hermes can read the existing
-configuration, credentials, skills, hooks, and memories even when their host filesystem is
-read-only, while new session databases, logs, token refreshes, and caches stay isolated from the
-global Hermes home. The same state is reused by `aop resume` and removed with the task worktree;
-it requires neither root access nor filesystem overlay support, and no preparation beyond normal
-Hermes authentication. `danger-full-access` keeps Hermes's native filesystem behavior.
+configuration, skills, hooks, and memories even when their host filesystem is read-only, while new
+session databases, logs, and caches stay isolated from the global Hermes home. The same state is
+reused by `aop resume` and removed with the task worktree.
+
+Hermes OAuth refresh tokens may rotate after one use. AOP therefore reconciles the freshest
+credential state from the authenticated profile and surviving task homes into the repository-local
+`.aop/shared-provider-state/hermes/auth.json`. Before each Hermes turn it copies that state into the
+task home, then commits any rotation back after the turn. A repository-level lock serializes Hermes
+turns so concurrent tasks cannot consume the same refresh token; other agents remain concurrent.
+The authenticated global profile is never written, and cleanup removes task sessions without
+removing the shared credential authority needed by future tasks. This runtime-state isolation also
+applies to `danger-full-access`; that mode changes agent filesystem permissions, not where AOP keeps
+provider sessions and credentials.
 
 For a file-producing task, declare each expected path relative to the run's output directory:
 
@@ -434,6 +442,7 @@ Runtime state lives under the ignored `.aop/` directory:
 ├── overlays/<task>/    private copy-on-write upper layers for aop exec
 ├── provider-state/     task-local mutable provider profiles
 ├── runs/<run-id>/      request, result, logs, final message, and accepted artifacts
+├── shared-provider-state/ repository-local credential state shared across tasks
 ├── tasks/               recorded task bases and worktree paths
 ├── worktrees/          one isolated checkout per task
 ├── integration.lock    single-writer main-branch integration lock

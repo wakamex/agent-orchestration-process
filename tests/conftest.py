@@ -849,6 +849,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 args = sys.argv[1:]
 state_path = (
@@ -885,6 +886,18 @@ if prompt.startswith("CHECK_PARTICIPANT"):
         raise RuntimeError(f"participant inherited coding-agent flags: {{args}}")
     if os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_NO_TOOLS"):
         raise RuntimeError("participant inherited internal Hermes mode state")
+if prompt == "ROTATE_AUTH":
+    auth_path = pathlib.Path(os.environ["HERMES_HOME"]) / "auth.json"
+    auth = json.loads(auth_path.read_text())
+    entry = auth["credential_pool"]["xai-oauth"][0]
+    generation = int(entry["access_token"].removeprefix("generation-"))
+    time.sleep(float(os.environ.get("AOP_FAKE_HERMES_ROTATE_DELAY", "0")))
+    generation += 1
+    entry["access_token"] = f"generation-{{generation}}"
+    entry["refresh_token"] = f"refresh-{{generation}}"
+    entry["last_refresh"] = f"2026-08-08T20:{{generation:02d}}:00Z"
+    auth["updated_at"] = f"2026-08-08T20:{{generation:02d}}:01Z"
+    auth_path.write_text(json.dumps(auth))
 session_id = (
     args[args.index("--resume") + 1]
     if "--resume" in args

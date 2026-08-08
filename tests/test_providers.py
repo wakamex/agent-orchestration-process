@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -1218,7 +1219,9 @@ def test_hermes_unknown_session_cost_with_no_usage_remains_unknown() -> None:
     assert HermesAdapter._cost_delta(None, session, "grok-4.5", TokenUsage()) is None
 
 
-@pytest.mark.parametrize("sandbox", ["scratch-write", "workspace-write"])
+@pytest.mark.parametrize(
+    "sandbox", ["scratch-write", "workspace-write", "danger-full-access"]
+)
 def test_hermes_run_and_resume_with_read_only_runtime_home(
     repository: Path,
     fake_hermes: Path,
@@ -1259,11 +1262,87 @@ def test_hermes_run_and_resume_with_read_only_runtime_home(
     )
     assert (isolated_home / "fake-state.json").is_file()
     assert (isolated_home / "auth.json").read_text() == "{}\n"
+    assert (
+        manager.state_dir / "shared-provider-state" / "hermes" / "auth.json"
+    ).read_text() == "{}\n"
     assert not (
         manager.get(f"managed-{sandbox}").path / "scratch" / "provider-state"
     ).exists()
-    assert "--setenv" in first.command
     assert "--overlay" not in first.command
-    assert os.fspath(hermes_home) in first.command
-    assert os.fspath(isolated_home) in first.command
-    assert "--setenv" in resumed.command
+    assert os.fspath(hermes_home) not in first.command
+    assert os.fspath(hermes_home) not in resumed.command
+
+
+def test_hermes_migrates_freshest_rotated_credentials_and_serializes_tasks(
+    repository: Path,
+    fake_hermes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def auth(generation: int, *, updated_minute: int) -> dict[str, object]:
+        refresh_day = 7 if generation == 0 else 8
+        refresh_minute = 5 if generation == 0 else generation
+        return {
+            "version": 1,
+            "updated_at": f"2026-08-08T20:{updated_minute:02d}:01Z",
+            "providers": {},
+            "credential_pool": {
+                "xai-oauth": [
+                    {
+                        "id": "rotating-xai",
+                        "label": "xai-oauth-oauth-1",
+                        "source": "manual:device_code",
+                        "access_token": f"generation-{generation}",
+                        "refresh_token": f"refresh-{generation}",
+                        "last_refresh": (
+                            f"2026-08-{refresh_day:02d}T20:{refresh_minute:02d}:00Z"
+                        ),
+                    }
+                ]
+            },
+        }
+
+    source_home = tmp_path / "hermes-source"
+    source_home.mkdir()
+    source_auth = source_home / "auth.json"
+    source_auth.write_text(json.dumps(auth(0, updated_minute=5)))
+    monkeypatch.setenv("HERMES_HOME", os.fspath(source_home))
+    monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
+    monkeypatch.setenv("AOP_FAKE_HERMES_STATE_IN_HOME", "1")
+    monkeypatch.setenv("AOP_FAKE_HERMES_ROTATE_DELAY", "0.2")
+    manager = WorktreeManager.discover(repository)
+
+    newer_private = (
+        manager.state_dir / "provider-state" / "previous-success" / "hermes" / "home"
+    )
+    newer_private.mkdir(parents=True)
+    (newer_private / "auth.json").write_text(json.dumps(auth(1, updated_minute=14)))
+    later_but_stale = (
+        manager.state_dir / "provider-state" / "later-failure" / "hermes" / "home"
+    )
+    later_but_stale.mkdir(parents=True)
+    (later_but_stale / "auth.json").write_text(json.dumps(auth(0, updated_minute=34)))
+    manager.create("rotate-a")
+    manager.create("rotate-b")
+
+    def run(task: str):
+        return AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes))).run(
+            task=task,
+            prompt="ROTATE_AUTH",
+            sandbox="scratch-write",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(run, ["rotate-a", "rotate-b"]))
+
+    assert all(result.succeeded for result in results)
+    shared_auth = manager.state_dir / "shared-provider-state" / "hermes" / "auth.json"
+    shared = json.loads(shared_auth.read_text())
+    entry = shared["credential_pool"]["xai-oauth"][0]
+    assert entry["access_token"] == "generation-3"
+    assert entry["refresh_token"] == "refresh-3"
+    assert shared_auth.stat().st_mode & 0o777 == 0o600
+    assert json.loads(source_auth.read_text()) == auth(0, updated_minute=5)
+
+    manager.remove("rotate-a", force=True)
+    assert shared_auth.is_file()

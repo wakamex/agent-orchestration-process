@@ -9,7 +9,6 @@ import shutil
 import signal
 import stat
 import subprocess
-import tempfile
 import threading
 import time
 import uuid
@@ -143,8 +142,10 @@ class CodexAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
+        _prepare_codex_environment(environment)
         last_message_path = (
-            Path(tempfile.gettempdir()) / f"aop-codex-{request.run_id}.txt"
+            Path(environment["AOP_SCRATCH_DIR"])
+            / f".codex-last-message-{request.run_id}.txt"
         )
         command = _provider_command(
             self._command(request, worktree, last_message_path),
@@ -2126,7 +2127,14 @@ def _provider_command(
     else:
         wrapped.extend(["--bind", os.fspath(scratch), os.fspath(scratch)])
     wrapped.extend(["--bind", os.fspath(cache), os.fspath(cache)])
-    if request.provider in {"agy", "cursor", "devin", "hermes", "opencode"}:
+    if request.provider in {
+        "agy",
+        "codex",
+        "cursor",
+        "devin",
+        "hermes",
+        "opencode",
+    }:
         wrapped.extend(["--bind", os.fspath(provider_state), os.fspath(provider_state)])
     if request.provider == "agy":
         source_dir = _agy_source_dir(environment)
@@ -2250,6 +2258,17 @@ _AGY_NESTED_SEED_FILES = {
     },
 }
 
+_CODEX_SEED_DIRECTORIES = {"rules", "skills"}
+_CODEX_RUNTIME_FILES = {
+    ".personality_migration",
+    "history.jsonl",
+    "installation_id",
+    "log",
+    "session_index.jsonl",
+    "usage-limits.json",
+    "version.json",
+}
+
 _CURSOR_RUNTIME_DIRECTORIES = {
     "ai-tracking",
     "chats",
@@ -2272,6 +2291,54 @@ _DEVIN_DATA_RUNTIME_NAMES = {
     "sessions.db-shm",
     "sessions.db-wal",
 }
+
+
+def _prepare_codex_environment(environment: dict[str, str]) -> None:
+    source = _codex_source_home(environment)
+    destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "codex" / "home"
+    _prepare_codex_state(source, destination)
+    environment["CODEX_HOME"] = os.fspath(destination)
+
+
+def _codex_source_home(environment: dict[str, str]) -> Path | None:
+    configured = environment.get("AOP_CODEX_SOURCE_HOME")
+    inherited = environment.get("CODEX_HOME")
+    source = Path(configured or inherited or Path(environment["HOME"]) / ".codex")
+    source = source.expanduser()
+    if source.is_dir():
+        return source.resolve()
+    if configured or inherited:
+        raise AOPError(f"Codex home does not exist: {source}")
+    return None
+
+
+def _prepare_codex_state(source: Path | None, destination: Path) -> None:
+    if destination.is_dir():
+        return
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    temporary.mkdir(parents=True, mode=0o700)
+    try:
+        if source:
+            for entry in source.iterdir():
+                target = temporary / entry.name
+                if entry.name in _CODEX_SEED_DIRECTORIES and entry.is_dir():
+                    ignore = (
+                        shutil.ignore_patterns(".system")
+                        if entry.name == "skills"
+                        else None
+                    )
+                    shutil.copytree(entry, target, ignore=ignore)
+                elif entry.is_file() and not _codex_runtime_file(entry.name):
+                    shutil.copy2(entry, target)
+        _make_tree_user_writable(temporary)
+        os.replace(temporary, destination)
+    except OSError as error:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise AOPError(f"could not prepare isolated Codex state: {error}") from error
+
+
+def _codex_runtime_file(name: str) -> bool:
+    return name in _CODEX_RUNTIME_FILES or ".sqlite" in name
 
 
 def _cursor_source_home(environment: dict[str, str]) -> Path:

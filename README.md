@@ -111,6 +111,16 @@ authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE
 `AOP_CURSOR_BIN`, `AOP_DEVIN_BIN`, `AOP_OPENCODE_BIN`, `AOP_AGY_BIN`, `AOP_HERMES_BIN`, and
 `AOP_BWRAP_BIN` may override their respective executables.
 
+Every Codex task uses a persistent private home under
+`.aop/provider-state/<task>/codex/home`, including with `danger-full-access`. AOP seeds
+authentication, root configuration, user rules and skills, and the cached model catalog. Existing
+sessions, history, databases, logs, caches, and generated system skills are not copied. Codex
+creates those mutable files inside the task profile, and exact resumes reuse the same profile.
+This lets Codex run when the authenticated source home is read-only without changing its global
+sessions or databases. Cleanup removes the private profile while preserving run records. Set
+`AOP_CODEX_SOURCE_HOME` only when the authenticated source profile is somewhere other than
+`${CODEX_HOME:-~/.codex}`.
+
 Every Agy task uses a persistent private Gemini profile under
 `.aop/provider-state/<task>/agy/gemini`, including with `danger-full-access`. AOP initializes it
 once from the authenticated `~/.gemini` profile, copying configuration and credentials but not

@@ -108,6 +108,54 @@ def test_run_persists_structured_codex_artifacts(
     assert (run_dir / "stderr.log").read_text() == ""
 
 
+@pytest.mark.parametrize(
+    "sandbox", ["scratch-write", "workspace-write", "danger-full-access"]
+)
+def test_codex_uses_private_runtime_state_with_read_only_global_profile(
+    repository: Path,
+    fake_codex: Path,
+    sandbox: str,
+) -> None:
+    source_home = Path(os.environ["AOP_CODEX_SOURCE_HOME"])
+    for path in source_home.rglob("*"):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    source_home.chmod(0o555)
+    task = f"managed-codex-{sandbox}"
+    manager = WorktreeManager.discover(repository)
+
+    try:
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+        first = runner.run(task=task, prompt="first", sandbox=sandbox)
+        resumed = runner.resume(run_id=first.run_id, prompt="second")
+    finally:
+        source_home.chmod(0o755)
+        for path in source_home.rglob("*"):
+            path.chmod(0o755 if path.is_dir() else 0o644)
+
+    private_home = manager.state_dir / "provider-state" / task / "codex" / "home"
+    worktree = manager.get(task).path
+    assert first.succeeded
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert private_home.joinpath("auth.json").is_file()
+    assert private_home.joinpath("config.toml").is_file()
+    assert private_home.joinpath("models_cache.json").is_file()
+    assert private_home.joinpath("rules", "default.rules").is_file()
+    assert private_home.joinpath("skills", "user-skill", "SKILL.md").is_file()
+    assert not private_home.joinpath("skills", ".system", "generated").exists()
+    assert private_home.joinpath("sessions", SESSION_ID).is_file()
+    assert private_home.joinpath("history.jsonl").read_text() == "first\nsecond\n"
+    assert source_home.joinpath("history.jsonl").read_text() == "global history\n"
+    assert source_home.joinpath("state_5.sqlite").read_text() == "global database\n"
+    assert source_home.joinpath("sessions", "global-session").is_file()
+    assert not list(worktree.rglob("auth.json"))
+
+    manager.remove(task)
+    assert not private_home.exists()
+    assert (manager.state_dir / "runs" / first.run_id / "result.json").is_file()
+    assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
+
+
 def test_codex_records_metered_api_authentication_without_credentials(
     repository: Path,
     fake_codex: Path,

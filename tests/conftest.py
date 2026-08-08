@@ -119,7 +119,25 @@ def repository(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def fake_codex(tmp_path: Path) -> Path:
+def fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    source_home = tmp_path / "codex-home"
+    source_home.mkdir()
+    source_home.joinpath("auth.json").write_text('{"auth_mode": "chatgpt"}\n')
+    source_home.joinpath("config.toml").write_text('model = "test"\n')
+    source_home.joinpath("models_cache.json").write_text('{"models": []}\n')
+    source_home.joinpath("history.jsonl").write_text("global history\n")
+    source_home.joinpath("state_5.sqlite").write_text("global database\n")
+    source_home.joinpath("cache").mkdir()
+    source_home.joinpath("cache", "global-cache").write_text("global cache\n")
+    source_home.joinpath("sessions").mkdir()
+    source_home.joinpath("sessions", "global-session").write_text("global session\n")
+    source_home.joinpath("rules").mkdir()
+    source_home.joinpath("rules", "default.rules").write_text("allow test\n")
+    source_home.joinpath("skills", ".system").mkdir(parents=True)
+    source_home.joinpath("skills", ".system", "generated").write_text("generated\n")
+    source_home.joinpath("skills", "user-skill").mkdir()
+    source_home.joinpath("skills", "user-skill", "SKILL.md").write_text("user\n")
+    monkeypatch.setenv("AOP_CODEX_SOURCE_HOME", os.fspath(source_home))
     executable = tmp_path / "codex"
     executable.write_text(
         f"""#!{sys.executable}
@@ -139,6 +157,21 @@ if args == ["login", "status"]:
     raise SystemExit(0)
 prompt = sys.stdin.read()
 output_path = pathlib.Path(args[args.index("--output-last-message") + 1])
+source_home = pathlib.Path(os.environ["AOP_CODEX_SOURCE_HOME"])
+codex_home = pathlib.Path(os.environ["CODEX_HOME"])
+if codex_home.resolve() == source_home.resolve():
+    print("Codex did not receive private runtime state", file=sys.stderr)
+    raise SystemExit(1)
+for required in ["auth.json", "config.toml", "models_cache.json"]:
+    if not codex_home.joinpath(required).is_file():
+        print(f"missing seeded Codex file: {{required}}", file=sys.stderr)
+        raise SystemExit(1)
+if codex_home.joinpath("sessions", "global-session").exists():
+    print("global Codex sessions were copied", file=sys.stderr)
+    raise SystemExit(1)
+if codex_home.joinpath("skills", ".system", "generated").exists():
+    print("generated Codex skills were copied", file=sys.stderr)
+    raise SystemExit(1)
 
 if prompt == "SLEEP":
     time.sleep(10)
@@ -180,8 +213,15 @@ elif prompt.startswith("SYMLINK_ARTIFACT"):
 session_id = {SESSION_ID!r}
 if "resume" in args:
     session_id = args[args.index("resume") + 1]
+    if not codex_home.joinpath("sessions", session_id).is_file():
+        print("private Codex session is missing", file=sys.stderr)
+        raise SystemExit(1)
 if prompt == "DIFFERENT_SESSION":
     session_id = "different-codex-thread"
+codex_home.joinpath("sessions").mkdir(exist_ok=True)
+codex_home.joinpath("sessions", session_id).write_text("private session\\n")
+with codex_home.joinpath("history.jsonl").open("a") as history:
+    history.write(f"{{prompt}}\\n")
 
 if prompt.startswith("AOP conflict resolution"):
     conflicts = subprocess.run(

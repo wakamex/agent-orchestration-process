@@ -43,10 +43,10 @@ more than an interactive interface.
 The two are complementary. An interactive client can use ACP while an automation system uses AOP
 to schedule and govern bounded work.
 
-Install the CLI directly from GitHub:
+Install the CLI from PyPI:
 
 ```sh
-uv tool install git+https://github.com/wakamex/agent-orchestration-process.git
+uv tool install agent-orchestration-process
 ```
 
 For development, clone the repository and let uv create and synchronize the local environment. The
@@ -54,7 +54,7 @@ default `dev` dependency group contains pytest and Ruff:
 
 ```sh
 git clone https://github.com/wakamex/agent-orchestration-process.git
-cd aop
+cd agent-orchestration-process
 uv sync
 uv run pytest
 uv run ruff check src tests

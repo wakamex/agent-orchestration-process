@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.11.29"
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
       - run: uv run --frozen pytest
       - run: uv run --frozen ruff check src tests
       - run: uv build

@@ -2,18 +2,6 @@ version = 1
 revision = 3
 requires-python = ">=3.11"
 
-[options]
-exclude-newer = "2026-07-03T19:57:32.995776509Z"
-exclude-newer-span = "P7D"
-
-[options.exclude-newer-package]
-clanker-analytics = false
-ghp = false
-search-claude-history = false
-gemini-cli-usage = false
-ccusage = false
-codex-cli-usage = false
-
 [[package]]
 name = "aop"
 version = "0.1.0"

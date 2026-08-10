@@ -4,13 +4,28 @@ build-backend = "uv_build"
 
 [project]
 name = "agent-orchestration-process"
-version = "0.1.0"
-description = "A worktree-first agent orchestration process"
+version = "0.1.1"
+description = "Bounded multi-harness agent orchestration for autoresearch loops"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "AOP contributors" }]
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = [
+    "agent-orchestration",
+    "ai-agents",
+    "autoresearch",
+    "coding-agents",
+    "git-worktrees",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development",
+]
 dependencies = []
 
 [project.urls]

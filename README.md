@@ -43,7 +43,13 @@ more than an interactive interface.
 The two are complementary. An interactive client can use ACP while an automation system uses AOP
 to schedule and govern bounded work.
 
-Install the CLI from PyPI:
+Requirements:
+
+- Linux with Git and `bwrap` for the default safe sandbox modes
+- Python 3.11 or newer, managed through uv
+- At least one installed and authenticated supported agent CLI
+
+Install the CLI from [PyPI](https://pypi.org/project/agent-orchestration-process/):
 
 ```sh
 uv tool install agent-orchestration-process

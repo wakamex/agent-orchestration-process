@@ -111,86 +111,23 @@ Cleanup force-removes that task's disposable worktree, scratch directory, and ov
 the immutable request, result, logs, and archived artifacts under `.aop/runs/`. Repeating cleanup is
 safe. An active task cannot be cleaned while it holds its execution lock.
 
-All providers run inside `bwrap` by default, with their own permission prompts bypassed because the
-OS mount boundary is the enforcement layer. `workspace-write` mounts the main repository read-only,
-rebinds only the isolated task worktree and shared `AOP_CACHE_DIR` writable, and keeps the
-worktree's `.git` pointer read-only. `scratch-write` leaves the task read-only and rebinds only its
-`scratch/` directory plus the shared cache writable; use it for agents that need working space but
-must not edit the repository. `danger-full-access` explicitly skips `bwrap`. Configured
-authentication and user instructions are preserved. `AOP_CODEX_BIN`, `AOP_CLAUDE_BIN`,
-`AOP_CURSOR_BIN`, `AOP_DEVIN_BIN`, `AOP_OPENCODE_BIN`, `AOP_AGY_BIN`, `AOP_HERMES_BIN`, and
-`AOP_BWRAP_BIN` may override their respective executables.
+### Sandboxing
 
-Every Codex task uses a persistent private home under
-`.aop/provider-state/<task>/codex/home`, including with `danger-full-access`. AOP seeds
-authentication, root configuration, user rules and skills, and the cached model catalog. Existing
-sessions, history, databases, logs, caches, and generated system skills are not copied. Codex
-creates those mutable files inside the task profile, and exact resumes reuse the same profile.
-This lets Codex run when the authenticated source home is read-only without changing its global
-sessions or databases. Cleanup removes the private profile while preserving run records. Set
-`AOP_CODEX_SOURCE_HOME` only when the authenticated source profile is somewhere other than
-`${CODEX_HOME:-~/.codex}`.
+AOP uses `bwrap` to enforce repository access in its two safe modes. Provider permission prompts
+are bypassed inside that boundary.
 
-Every Agy task uses a persistent private Gemini profile under
-`.aop/provider-state/<task>/agy/gemini`, including with `danger-full-access`. AOP initializes it
-once from the authenticated `~/.gemini` profile, copying configuration and credentials but not
-conversations, history, caches, logs, scratch files, or databases. Agy writes all new runtime state
-to the private profile. `aop resume` requires the terminal Agy result to report exactly the requested
-conversation ID; a missing or different ID fails closed and is not resumable. Removing the task
-worktree removes its private profile while preserving run records. Set `AOP_AGY_SOURCE_DIR` only
-when the authenticated source profile is somewhere other than `~/.gemini`.
+| Mode | Writable paths |
+| --- | --- |
+| `workspace-write` | The isolated task worktree and shared cache |
+| `scratch-write` | Fresh task scratch space and the shared cache |
+| `danger-full-access` | Native host access without `bwrap` |
 
-For Cursor Agent in either non-danger sandbox, AOP seeds a persistent task-local Cursor profile and
-authentication directory under `.aop/provider-state/<task>/cursor`. Project metadata, chats,
-tracking data, and Cursor-created worktrees start empty and remain private to the AOP task; existing
-CLI configuration, skills, plugins, policies, and authentication are copied without duplicating IDE
-extensions. Cursor caches use the shared AOP cache. This lets the first turn and exact resume work
-when the surrounding home directory is read-only, without modifying global Cursor state. Cleanup
-removes the private profile with the task. `danger-full-access` retains Cursor's native global state.
+The main repository and Git metadata remain read-only in both safe modes. Configured authentication
+and user instructions remain available. AOP also gives adapters task-private runtime state when
+their native global state would prevent isolation or reliable resume.
 
-Every Devin task uses a persistent private XDG profile under
-`.aop/provider-state/<task>/devin`, including with `danger-full-access`. AOP seeds authentication,
-configuration, and MCP state, but excludes Devin's installed CLI versions, sessions, transcripts,
-logs, and databases. New runtime state stays private to the task, exact resumes use that same state,
-and cleanup removes it while preserving run records. Devin's installed bundle remains shared and
-read-only, so task isolation does not duplicate the installation. AOP runs Devin in its
-non-interactive dangerous permission mode because the outer `bwrap` boundary enforces
-`workspace-write` and `scratch-write`; `danger-full-access` retains its explicit meaning. Set
-`AOP_DEVIN_DATA_DIR` or `AOP_DEVIN_CONFIG_DIR` only when the authenticated source profile is outside
-the standard XDG locations. Authenticate once before the first AOP run; on an SSH host use
-`devin auth login --force-manual-token-flow`.
-
-Devin writes a fresh ATIF trajectory export for every invocation. AOP requires that export to
-contain the current prompt, a terminal agent response, and the exact requested session on resume.
-It records the resolved model variant and per-turn prompt, cached-input, and completion tokens, and
-archives the original export as `provider-result.json` with the other immutable run evidence.
-
-For OpenCode in either non-danger sandbox, AOP seeds small user configuration and authentication
-files into a persistent task-local XDG profile under `.aop/provider-state/<task>/opencode`.
-OpenCode's session database, logs, model state, token refreshes, generated config metadata, and
-downloaded tools stay outside the global profile. Existing generated plugin dependencies are
-mounted read-only instead of copied, while downloads use `.aop/cache/opencode`, shared by all tasks.
-This permits a first turn and exact resume when the surrounding home directory is read-only without
-duplicating the plugin tree per task or changing global OpenCode state. Cleanup removes the private
-profile with the task. `danger-full-access` retains OpenCode's native global state. Set
-`AOP_OPENCODE_CONFIG_DIR` or `AOP_OPENCODE_DATA_DIR` only when the authenticated source profile is
-outside the standard XDG locations.
-
-For Hermes in every sandbox mode, AOP seeds a persistent task-local Hermes home under
-`.aop/provider-state/<task>/` from the authenticated profile. Hermes can read the existing
-configuration, skills, hooks, and memories even when their host filesystem is read-only, while new
-session databases, logs, and caches stay isolated from the global Hermes home. The same state is
-reused by `aop resume` and removed with the task worktree.
-
-Hermes OAuth refresh tokens may rotate after one use. AOP therefore reconciles the freshest
-credential state from the authenticated profile and surviving task homes into the repository-local
-`.aop/shared-provider-state/hermes/auth.json`. Before each Hermes turn it copies that state into the
-task home, then commits any rotation back after the turn. A repository-level lock serializes Hermes
-turns so concurrent tasks cannot consume the same refresh token; other agents remain concurrent.
-The authenticated global profile is never written, and cleanup removes task sessions without
-removing the shared credential authority needed by future tasks. This runtime-state isolation also
-applies to `danger-full-access`; that mode changes agent filesystem permissions, not where AOP keeps
-provider sessions and credentials.
+See [Harness isolation and runtime state](https://github.com/wakamex/aop/blob/main/docs/harnesses.md)
+for provider-specific behavior, credential handling, state paths, and environment overrides.
 
 For a file-producing task, declare each expected path relative to the run's output directory:
 
@@ -462,8 +399,25 @@ Runtime state lives under the ignored `.aop/` directory:
 AOP creates its state and run directories with user-only permissions because provider profiles,
 prompts, logs, and artifacts may contain sensitive information.
 
-The current CLI does not configure language-specific build caches. That interface will be added
-when a real project needs it.
+### Harness-level limitations
+
+AOP normalizes bounded execution, but it cannot create capabilities that an installed harness does
+not expose.
+
+| Harness | Current limitation |
+| --- | --- |
+| Codex | No participant mode |
+| Claude | Catalog-only model list; global runtime state; no participant mode |
+| Cursor | Effort is part of the model ID; private state only in safe modes |
+| Devin | Effort is part of the model ID; successful runs require a valid ATIF export |
+| OpenCode | Private state applies only in safe modes |
+| Agy | No participant mode; exact resume fails if the conversation ID changes |
+| Hermes | Experimental participant mode; OAuth rotation serializes Hermes turns |
+
+Cursor, Agy, and Devin do not report an API-equivalent cost. AOP also does not configure
+language-specific build caches. See
+[Harness isolation and runtime state](https://github.com/wakamex/aop/blob/main/docs/harnesses.md)
+for the full adapter contract.
 
 ### Roadmap
 

@@ -9,7 +9,14 @@ description = "A worktree-first agent orchestration process"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "AOP contributors" }]
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/wakamex/aop"
+Repository = "https://github.com/wakamex/aop.git"
+Issues = "https://github.com/wakamex/aop/issues"
 
 [dependency-groups]
 dev = [

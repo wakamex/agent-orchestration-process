@@ -1,5 +1,6 @@
 /.aop/
 /.pytest_cache/
+/.ruff_cache/
 /.venv/
 /build/
 /dist/

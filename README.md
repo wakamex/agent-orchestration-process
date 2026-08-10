@@ -19,7 +19,7 @@ Devin CLI, OpenCode, Antigravity (`agy`), and Hermes concurrently in isolated Gi
 adapter records a normalized result and resumes the exact provider session associated with an
 earlier run.
 
-### Bounded adapter design
+### Why use AOP when ACP exists?
 
 AOP is built for bounded automation, not as a general interactive agent host. Its provider adapters
 deliberately invoke the installed CLIs directly for one turn at a time and normalize only the
@@ -27,24 +27,34 @@ contract needed by an automated worker: model and effort selection, a final resu
 identity, timing and usage, durable logs, process termination, and declared artifacts. Worktrees,
 filesystem isolation, deadlines, and integration remain AOP responsibilities outside the adapters.
 
-This direct design keeps each provider process disposable and makes timeout recovery and
-process-group cleanup explicit. AOP does not attempt to reproduce interactive host features such as
-live steering, approval dialogs, terminal rendering, session browsing, or mid-turn configuration.
-ACP adapters provide those features through a larger persistent protocol and state-machine surface;
-their implementations are useful references for provider event and resume semantics, but they are
-not AOP runtime dependencies. AOP should adopt an ACP transport only if a demonstrated bounded-work
-requirement becomes simpler and more reliable with it, rather than for general protocol parity.
+[Agent Client Protocol (ACP)](https://agentclientprotocol.com/) standardizes communication between
+coding agents and interactive clients such as editors and IDEs. Use ACP when a person needs to chat
+with different agents through one client, approve actions, see live progress, and steer a session.
 
-Install the CLI from this checkout:
+Use AOP when software needs to run bounded agent jobs unattended. AOP was designed to support
+autoresearch loops across multiple agent harnesses without reimplementing each harness's model
+selection, session resume, output parsing, permissions, runtime state, and failure handling in every
+research project. It starts disposable CLI turns, runs jobs concurrently in isolated worktrees,
+enforces deadlines, validates declared artifacts, records durable evidence and usage, resumes exact
+sessions, cleans up runtime state, and keeps integration explicit. It is suited to fanout,
+independent experiment cycles, evaluation pipelines, and other automation where the result matters
+more than an interactive interface.
+
+The two are complementary. An interactive client can use ACP while an automation system uses AOP
+to schedule and govern bounded work.
+
+Install the CLI directly from GitHub:
 
 ```sh
-uv tool install /code/aop
+uv tool install git+https://github.com/wakamex/aop.git
 ```
 
-For development, let uv create and synchronize the local environment. The default `dev` dependency
-group contains pytest and Ruff:
+For development, clone the repository and let uv create and synchronize the local environment. The
+default `dev` dependency group contains pytest and Ruff:
 
 ```sh
+git clone https://github.com/wakamex/aop.git
+cd aop
 uv sync
 uv run pytest
 uv run ruff check src tests
@@ -448,6 +458,9 @@ Runtime state lives under the ignored `.aop/` directory:
 ├── integration.lock    single-writer main-branch integration lock
 └── worktrees.lock      lifecycle-operation lock
 ```
+
+AOP creates its state and run directories with user-only permissions because provider profiles,
+prompts, logs, and artifacts may contain sensitive information.
 
 The current CLI does not configure language-specific build caches. That interface will be added
 when a real project needs it.

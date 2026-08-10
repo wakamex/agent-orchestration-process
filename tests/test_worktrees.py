@@ -21,8 +21,14 @@ def git(cwd: Path, *args: str) -> str:
 
 def test_worktree_lifecycle(repository: Path) -> None:
     manager = WorktreeManager.discover(repository)
+    manager.state_dir.mkdir(mode=0o755)
     manager.initialize()
     manager.initialize()
+
+    assert manager.state_dir.stat().st_mode & 0o777 == 0o700
+    assert manager.worktrees_dir.stat().st_mode & 0o777 == 0o700
+    assert manager.cache_dir.stat().st_mode & 0o777 == 0o700
+    assert (manager.state_dir / "tasks").stat().st_mode & 0o777 == 0o700
 
     created = manager.create("task-one")
 

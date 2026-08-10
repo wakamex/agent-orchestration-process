@@ -91,9 +91,14 @@ class WorktreeManager:
         return cls(Path(first.removeprefix("worktree ")))
 
     def initialize(self) -> None:
-        self.worktrees_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        (self.state_dir / "tasks").mkdir(parents=True, exist_ok=True)
+        for directory in (
+            self.state_dir,
+            self.worktrees_dir,
+            self.cache_dir,
+            self.state_dir / "tasks",
+        ):
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory.chmod(0o700)
         self._ensure_ignored()
 
     def create(self, task: str, base: str = "HEAD") -> Worktree:
@@ -325,7 +330,8 @@ class WorktreeManager:
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.state_dir.chmod(0o700)
         with self.lock_file.open("a+") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:

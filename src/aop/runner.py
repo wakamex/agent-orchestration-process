@@ -63,9 +63,11 @@ class RunStore:
         self.root = root
 
     def create(self, request: RunRequest) -> Path:
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.chmod(0o700)
         run_dir = self.root / request.run_id
         try:
-            run_dir.mkdir(parents=True, exist_ok=False)
+            run_dir.mkdir(mode=0o700)
         except FileExistsError as error:
             raise AOPError(f"run already exists: {request.run_id}") from error
         self.write_json(run_dir / "request.json", request.to_dict())

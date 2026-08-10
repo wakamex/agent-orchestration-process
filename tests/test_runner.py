@@ -86,6 +86,8 @@ def test_run_persists_structured_codex_artifacts(
     assert result.command[-1] == "-"
 
     run_dir = repository / ".aop" / "runs" / result.run_id
+    assert (repository / ".aop" / "runs").stat().st_mode & 0o777 == 0o700
+    assert run_dir.stat().st_mode & 0o777 == 0o700
     request = json.loads((run_dir / "request.json").read_text())
     persisted_result = json.loads((run_dir / "result.json").read_text())
     events = (run_dir / "events.jsonl").read_text()

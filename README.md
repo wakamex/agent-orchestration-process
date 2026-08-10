@@ -148,12 +148,13 @@ aop run analysis \
 ```
 
 Each `--read` source remains available at its resolved absolute path and is also mounted beneath a
-fresh per-run `AOP_INPUT_DIR` using its basename. Both locations are read-only, and AOP adds their
-mapping to the prompt. AOP rejects missing paths, symlinks, special files, and duplicate basenames.
-It hashes every regular file and records the mapping, sizes, and SHA-256 values in `request.json`,
-`result.json`, and `input-manifest.json`. The files themselves are not copied. Read paths require
-`workspace-write` or `scratch-write`; AOP rejects them with `danger-full-access`, where it could not
-enforce the read-only contract.
+fresh per-run `AOP_INPUT_DIR` using its basename. Both locations are read-only inside the provider
+sandbox, and AOP adds their mapping to the prompt. AOP rejects missing paths, symlinks, special
+files, and duplicate basenames. It hashes every regular file before launch and records the mapping,
+sizes, and SHA-256 values in `request.json`, `result.json`, and `input-manifest.json`. The files
+themselves are not copied or snapshotted, so another host process can still change them during a
+run. Read paths require `workspace-write` or `scratch-write`; AOP rejects them with
+`danger-full-access`, where it could not enforce the read-only contract.
 
 `aop resume` inherits the parent run's read paths unless new `--read` options replace them. Every
 invocation creates fresh aliases and hashes the current source contents.
@@ -505,7 +506,7 @@ AOP_WORKTREE    isolated task worktree
 AOP_CACHE_DIR   shared cache root
 AOP_PROVIDER_STATE_DIR  task-local provider runtime state
 AOP_INPUT_DIR   fresh directory containing task-local read-only aliases
-AOP_INPUT_MANIFEST  durable JSON manifest for declared read paths
+AOP_INPUT_MANIFEST  durable JSON manifest, set only when read paths are declared
 AOP_RUN_ID      current structured run identifier (model runs only)
 ```
 

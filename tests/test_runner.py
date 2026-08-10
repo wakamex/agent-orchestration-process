@@ -62,6 +62,12 @@ def test_cli_reports_version_and_provider_neutral_resume_help(
     )
     assert read_args.read_paths == ["/sources/one", "/sources/two"]
 
+    with pytest.raises(SystemExit) as help_exit:
+        parser.parse_args(["resume", "--help"])
+    assert help_exit.value.code == 0
+    resume_help = capsys.readouterr().out
+    assert "replace inherited read paths" in resume_help
+
 
 def test_run_persists_structured_codex_artifacts(
     repository: Path, fake_codex: Path

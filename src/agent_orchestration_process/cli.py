@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="print the normalized result as JSON"
     )
     _add_artifact_arguments(run)
-    _add_read_arguments(run, default=[])
+    _add_read_arguments(run, default=[], resume=False)
     _add_prompt_arguments(run)
 
     resume = commands.add_parser("resume", help="resume an agent session from a run")
@@ -115,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="print the normalized result as JSON"
     )
     _add_artifact_arguments(resume)
-    _add_read_arguments(resume, default=None)
+    _add_read_arguments(resume, default=None, resume=True)
     _add_prompt_arguments(resume)
 
     worktree = commands.add_parser("worktree", help="manage task worktrees")
@@ -292,15 +292,23 @@ def _add_artifact_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_read_arguments(
-    parser: argparse.ArgumentParser, *, default: list[str] | None
+    parser: argparse.ArgumentParser,
+    *,
+    default: list[str] | None,
+    resume: bool,
 ) -> None:
+    help_text = (
+        "replace inherited read paths with PATH; repeat for additional paths"
+        if resume
+        else "expose PATH read-only; repeat for additional paths"
+    )
     parser.add_argument(
         "--read",
         action="append",
         default=default,
         dest="read_paths",
         metavar="PATH",
-        help="expose PATH read-only at its absolute and task-local locations",
+        help=help_text,
     )
 
 

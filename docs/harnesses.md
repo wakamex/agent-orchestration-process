@@ -22,8 +22,10 @@ writes can succeed.
 Repeatable `--read` paths add explicit read-only bindings without changing the selected mode. Each
 source is bound both at its resolved absolute path and beneath the run's `AOP_INPUT_DIR`, allowing
 providers with workspace-scoped file tools to use the task-local alias. AOP records a hashed input
-manifest but does not copy the source data. Declared read paths are unavailable in
-`danger-full-access` because that mode intentionally skips the enforceable mount boundary.
+manifest but does not copy or snapshot the source data. The bindings prevent writes from inside the
+provider sandbox, not concurrent changes by other host processes. Declared read paths are
+unavailable in `danger-full-access` because that mode intentionally skips the enforceable mount
+boundary.
 
 ## Task-private provider state
 

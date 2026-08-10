@@ -33,6 +33,7 @@ TASK_FIELDS = {
     "sandbox",
     "timeout",
     "artifacts",
+    "read_paths",
 }
 
 
@@ -53,6 +54,7 @@ class BatchTask:
     sandbox: str = "workspace-write"
     timeout_seconds: float | None = None
     artifacts: tuple[str, ...] = ()
+    read_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,7 @@ class BatchRunner:
                 sandbox=task.sandbox,
                 timeout_seconds=task.timeout_seconds,
                 artifacts=task.artifacts,
+                read_paths=task.read_paths,
             )
         except Exception as error:
             return BatchTaskResult(
@@ -356,6 +359,18 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
     ):
         raise AOPError(f"{label}.artifacts must be an array of non-empty strings")
 
+    raw_read_paths = value.get("read_paths", [])
+    if not isinstance(raw_read_paths, list) or not all(
+        isinstance(path, str) and path for path in raw_read_paths
+    ):
+        raise AOPError(f"{label}.read_paths must be an array of non-empty strings")
+    resolved_read_paths: list[str] = []
+    for item in raw_read_paths:
+        path = Path(item).expanduser()
+        if not path.is_absolute():
+            path = manifest_dir / path
+        resolved_read_paths.append(os.fspath(path.resolve()))
+
     return BatchTask(
         id=task_id,
         prompt=prompt_text,
@@ -368,6 +383,7 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
         sandbox=sandbox,
         timeout_seconds=timeout,
         artifacts=normalize_artifacts(artifacts),
+        read_paths=tuple(resolved_read_paths),
     )
 
 

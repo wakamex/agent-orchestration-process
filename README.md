@@ -135,6 +135,29 @@ their native global state would prevent isolation or reliable resume.
 See [Harness isolation and runtime state](https://github.com/wakamex/agent-orchestration-process/blob/main/docs/harnesses.md)
 for provider-specific behavior, credential handling, state paths, and environment overrides.
 
+Declare external files or directories that an agent may read without modifying:
+
+```sh
+aop run analysis \
+  --agent agy \
+  --sandbox scratch-write \
+  --read /data/source-material \
+  --read /data/ledger.json \
+  --artifact report.md \
+  --prompt "Analyze the declared sources and write the report"
+```
+
+Each `--read` source remains available at its resolved absolute path and is also mounted beneath a
+fresh per-run `AOP_INPUT_DIR` using its basename. Both locations are read-only, and AOP adds their
+mapping to the prompt. AOP rejects missing paths, symlinks, special files, and duplicate basenames.
+It hashes every regular file and records the mapping, sizes, and SHA-256 values in `request.json`,
+`result.json`, and `input-manifest.json`. The files themselves are not copied. Read paths require
+`workspace-write` or `scratch-write`; AOP rejects them with `danger-full-access`, where it could not
+enforce the read-only contract.
+
+`aop resume` inherits the parent run's read paths unless new `--read` options replace them. Every
+invocation creates fresh aliases and hashes the current source contents.
+
 For a file-producing task, declare each expected path relative to the run's output directory:
 
 ```sh
@@ -304,6 +327,7 @@ model = "sonnet"
 effort = "high"
 timeout = 1800
 artifacts = ["parser-report.md"]
+read_paths = ["fixtures"]
 
 [[tasks]]
 id = "tests"
@@ -317,11 +341,12 @@ effort = "high"
 aop batch tasks.toml --jobs 4
 ```
 
-Prompt-file paths are resolved relative to the manifest. Each task may set `agent`, `base`, `model`,
-`effort`, `sandbox`, `timeout`, and an `artifacts` array; unspecified values use the same defaults as
-`aop run`. The scheduler keeps at most `--jobs` tasks active, prints only concise lifecycle status,
-and stores full agent output in the normal per-run directories. On interruption it launches no
-additional tasks and waits for already-active tasks to finish.
+Prompt-file and `read_paths` entries are resolved relative to the manifest. Each task may set
+`agent`, `base`, `model`, `effort`, `sandbox`, `timeout`, an `artifacts` array, and a `read_paths`
+array; unspecified values use the same defaults as `aop run`. The scheduler keeps at most `--jobs`
+tasks active, prints only concise lifecycle status, and stores full agent output in the normal
+per-run directories. On interruption it launches no additional tasks and waits for already-active
+tasks to finish.
 
 Every batch writes `.aop/batches/<batch-id>.json` with task-order-preserving run IDs, session IDs,
 durations, exit codes, and errors. A batch exits nonzero if any task fails, without discarding
@@ -479,6 +504,8 @@ AOP_TASK        stable task identifier
 AOP_WORKTREE    isolated task worktree
 AOP_CACHE_DIR   shared cache root
 AOP_PROVIDER_STATE_DIR  task-local provider runtime state
+AOP_INPUT_DIR   fresh directory containing task-local read-only aliases
+AOP_INPUT_MANIFEST  durable JSON manifest for declared read paths
 AOP_RUN_ID      current structured run identifier (model runs only)
 ```
 

@@ -19,6 +19,12 @@ The worktree's `.git` pointer and the shared Git directory remain read-only in b
 Provider permission prompts are bypassed because this mount boundary decides whether repository
 writes can succeed.
 
+Repeatable `--read` paths add explicit read-only bindings without changing the selected mode. Each
+source is bound both at its resolved absolute path and beneath the run's `AOP_INPUT_DIR`, allowing
+providers with workspace-scoped file tools to use the task-local alias. AOP records a hashed input
+manifest but does not copy the source data. Declared read paths are unavailable in
+`danger-full-access` because that mode intentionally skips the enforceable mount boundary.
+
 ## Task-private provider state
 
 Private state lives under `.aop/provider-state/<task>/` and is reused for exact resume. Cleanup
@@ -97,3 +103,18 @@ AOP_AGY_BIN
 AOP_HERMES_BIN
 AOP_BWRAP_BIN
 ```
+
+## Live read-path smoke test
+
+The default suite tests the shared mount contract without contacting providers. An opt-in matrix
+checks whether real authenticated harnesses can read a declared path:
+
+```sh
+AOP_LIVE_READ_PATH_AGENTS=agy,codex uv run pytest tests/test_live_read_paths.py
+```
+
+Use `all` to select every adapter. `AOP_LIVE_<AGENT>_MODEL` and
+`AOP_LIVE_<AGENT>_EFFORT` select provider-specific test options, and
+`AOP_LIVE_READ_PATH_TIMEOUT` changes the default 300-second bound. The test uses `scratch-write`,
+verifies a random nonce from an external file, confirms the source was unchanged, and cleans the
+task worktree while retaining normal AOP run evidence.

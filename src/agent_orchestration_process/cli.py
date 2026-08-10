@@ -105,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="print the normalized result as JSON"
     )
     _add_artifact_arguments(run)
+    _add_read_arguments(run, default=[])
     _add_prompt_arguments(run)
 
     resume = commands.add_parser("resume", help="resume an agent session from a run")
@@ -114,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="print the normalized result as JSON"
     )
     _add_artifact_arguments(resume)
+    _add_read_arguments(resume, default=None)
     _add_prompt_arguments(resume)
 
     worktree = commands.add_parser("worktree", help="manage task worktrees")
@@ -232,6 +234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sandbox=args.sandbox,
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
+                read_paths=args.read_paths,
             )
             return _report_run(result, manager, json_output=args.json)
 
@@ -241,6 +244,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prompt=_read_prompt(args),
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
+                read_paths=args.read_paths,
             )
             return _report_run(result, manager, json_output=args.json)
 
@@ -284,6 +288,19 @@ def _add_artifact_arguments(parser: argparse.ArgumentParser) -> None:
         default=[],
         metavar="PATH",
         help="require and archive PATH relative to this run's output directory",
+    )
+
+
+def _add_read_arguments(
+    parser: argparse.ArgumentParser, *, default: list[str] | None
+) -> None:
+    parser.add_argument(
+        "--read",
+        action="append",
+        default=default,
+        dest="read_paths",
+        metavar="PATH",
+        help="expose PATH read-only at its absolute and task-local locations",
     )
 
 

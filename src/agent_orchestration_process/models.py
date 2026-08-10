@@ -9,6 +9,31 @@ from .pricing import EstimatedCost, TokenUsage
 
 
 @dataclass(frozen=True)
+class ReadPathFile:
+    relative_path: str
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class ReadPath:
+    source_path: str
+    mounted_path: str
+    kind: str
+    size_bytes: int
+    sha256: str
+    files: tuple[ReadPathFile, ...]
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> ReadPath:
+        fields = dict(value)
+        fields["files"] = tuple(
+            ReadPathFile(**item) for item in fields.get("files", ())
+        )
+        return cls(**fields)
+
+
+@dataclass(frozen=True)
 class RunRequest:
     run_id: str
     provider: str
@@ -23,6 +48,7 @@ class RunRequest:
     session_id: str | None
     parent_run_id: str | None
     artifacts: tuple[str, ...]
+    read_paths: tuple[ReadPath, ...]
     created_at: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -33,6 +59,9 @@ class RunRequest:
         fields = dict(value)
         fields.setdefault("mode", "agent")
         fields["artifacts"] = tuple(fields.get("artifacts", ()))
+        fields["read_paths"] = tuple(
+            ReadPath.from_dict(item) for item in fields.get("read_paths", ())
+        )
         return cls(**fields)
 
 
@@ -79,6 +108,7 @@ class RunResult:
     api_equivalent_cost: EstimatedCost | None
     billing: BillingProvenance = BillingProvenance()
     artifacts: tuple[RunArtifact, ...] = ()
+    read_paths: tuple[ReadPath, ...] = ()
     provider_duration_seconds: float | None = None
 
     @property
@@ -113,5 +143,8 @@ class RunResult:
         fields["billing"] = BillingProvenance.from_dict(fields.get("billing"))
         fields["artifacts"] = tuple(
             RunArtifact(**artifact) for artifact in fields.get("artifacts", ())
+        )
+        fields["read_paths"] = tuple(
+            ReadPath.from_dict(item) for item in fields.get("read_paths", ())
         )
         return cls(**fields)

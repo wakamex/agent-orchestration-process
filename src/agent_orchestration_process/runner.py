@@ -18,7 +18,14 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Protocol, Sequence
 
-from .models import BillingProvenance, RunArtifact, RunRequest, RunResult
+from .models import (
+    BillingProvenance,
+    ReadPath,
+    ReadPathFile,
+    RunArtifact,
+    RunRequest,
+    RunResult,
+)
 from .locks import exclusive_lock, task_lock_path
 from .pricing import EstimatedCost, TokenUsage, estimate_api_cost
 from .worktrees import AOPError, Worktree, WorktreeManager
@@ -2217,6 +2224,13 @@ def _provider_command(
             wrapped.extend(
                 ["--ro-bind", os.fspath(home_config), os.fspath(home_config)]
             )
+    for read_path in request.read_paths:
+        wrapped.extend(
+            ["--ro-bind", read_path.source_path, read_path.source_path]
+        )
+        wrapped.extend(
+            ["--ro-bind", read_path.source_path, read_path.mounted_path]
+        )
     wrapped.extend(["--chdir", os.fspath(worktree.path), "--", *command])
     return wrapped
 
@@ -2886,8 +2900,11 @@ class AgentRunner:
         sandbox: str = "workspace-write",
         timeout_seconds: float | None = None,
         artifacts: Sequence[str] = (),
+        read_paths: Sequence[str | os.PathLike[str]] = (),
     ) -> RunResult:
         self._validate_mode(mode)
+        if read_paths and sandbox == "danger-full-access":
+            raise AOPError("--read requires workspace-write or scratch-write")
         model, effort = self.adapter.normalize_options(model, effort)
         request = self._request(
             task=task,
@@ -2901,7 +2918,7 @@ class AgentRunner:
             artifacts=artifacts,
         )
         worktree = self._get_or_create_worktree(task, base)
-        return self._execute(request, worktree)
+        return self._execute(request, worktree, read_paths=read_paths)
 
     def resume(
         self,
@@ -2910,6 +2927,7 @@ class AgentRunner:
         prompt: str,
         timeout_seconds: float | None = None,
         artifacts: Sequence[str] = (),
+        read_paths: Sequence[str | os.PathLike[str]] | None = None,
         _task_lock_held: bool = False,
     ) -> RunResult:
         parent_request = self.store.load_request(run_id)
@@ -2927,6 +2945,14 @@ class AgentRunner:
             os.environ.get("AOP_TASK_LOCK_HELD") == parent_request.task
         )
         worktree = self.manager.get(parent_request.task)
+        inherited_read_paths = tuple(
+            item.source_path for item in parent_request.read_paths
+        )
+        selected_read_paths = (
+            inherited_read_paths if read_paths is None else tuple(read_paths)
+        )
+        if selected_read_paths and parent_request.sandbox == "danger-full-access":
+            raise AOPError("--read requires workspace-write or scratch-write")
         request = self._request(
             task=parent_request.task,
             prompt=prompt,
@@ -2944,34 +2970,54 @@ class AgentRunner:
             parent_run_id=run_id,
             artifacts=artifacts,
         )
-        return self._execute(request, worktree, task_lock_held=_task_lock_held)
+        return self._execute(
+            request,
+            worktree,
+            read_paths=selected_read_paths,
+            task_lock_held=_task_lock_held,
+        )
 
     def _execute(
         self,
         request: RunRequest,
         worktree: Worktree,
         *,
+        read_paths: Sequence[str | os.PathLike[str]],
         task_lock_held: bool = False,
     ) -> RunResult:
         if task_lock_held:
-            return self._execute_unlocked(request, worktree)
+            return self._execute_unlocked(request, worktree, read_paths)
         with exclusive_lock(
             task_lock_path(self.manager.state_dir, request.task),
             f"task {request.task}",
         ):
-            return self._execute_unlocked(request, worktree)
+            return self._execute_unlocked(request, worktree, read_paths)
 
-    def _execute_unlocked(self, request: RunRequest, worktree: Worktree) -> RunResult:
+    def _execute_unlocked(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        read_paths: Sequence[str | os.PathLike[str]],
+    ) -> RunResult:
         scratch_dir = worktree.path / "scratch"
         scratch_dir.mkdir(exist_ok=True)
+        input_dir = scratch_dir / "inputs" / request.run_id
+        input_dir.mkdir(parents=True, exist_ok=False)
         output_dir = scratch_dir / "outputs" / request.run_id
         output_dir.mkdir(parents=True, exist_ok=False)
         provider_state = self.manager.state_dir / "provider-state" / request.task
         provider_state.mkdir(parents=True, exist_ok=True, mode=0o700)
         provider_state.chmod(0o700)
+        declared_read_paths = _prepare_read_paths(read_paths, input_dir)
         request = replace(
             request,
-            prompt=_artifact_prompt(request.prompt, request.artifacts, output_dir),
+            prompt=_run_prompt(
+                request.prompt,
+                declared_read_paths,
+                request.artifacts,
+                output_dir,
+            ),
+            read_paths=declared_read_paths,
         )
         environment = os.environ.copy()
         environment.update(
@@ -2982,6 +3028,7 @@ class AgentRunner:
                 "AOP_CACHE_DIR": os.fspath(self.manager.cache_dir),
                 "AOP_PROVIDER_STATE_DIR": os.fspath(provider_state),
                 "AOP_SCRATCH_DIR": os.fspath(scratch_dir),
+                "AOP_INPUT_DIR": os.fspath(input_dir),
                 "AOP_OUTPUT_DIR": os.fspath(output_dir),
                 "AOP_RUN_ID": request.run_id,
             }
@@ -2995,7 +3042,15 @@ class AgentRunner:
                 _agy_source_dir(environment), provider_state / "agy" / "gemini"
             )
         run_dir = self.store.create(request)
+        if request.read_paths:
+            input_manifest = run_dir / "input-manifest.json"
+            self.store.write_json(
+                input_manifest,
+                {"schema_version": 1, "read_paths": request.to_dict()["read_paths"]},
+            )
+            environment["AOP_INPUT_MANIFEST"] = os.fspath(input_manifest)
         result = self.adapter.execute(request, worktree, run_dir, environment)
+        result = replace(result, read_paths=request.read_paths)
         if result.succeeded and request.artifacts:
             result = _archive_artifacts(result, request.artifacts, output_dir, run_dir)
         self.store.write_json(run_dir / "result.json", result.to_dict())
@@ -3030,6 +3085,7 @@ class AgentRunner:
             session_id=session_id,
             parent_run_id=parent_run_id,
             artifacts=normalize_artifacts(artifacts),
+            read_paths=(),
             created_at=_now(),
         )
 
@@ -3066,6 +3122,132 @@ def normalize_artifacts(artifacts: Sequence[str]) -> tuple[str, ...]:
                 )
         normalized.append(logical_path)
     return tuple(normalized)
+
+
+def _prepare_read_paths(
+    values: Sequence[str | os.PathLike[str]], input_dir: Path
+) -> tuple[ReadPath, ...]:
+    prepared: list[ReadPath] = []
+    aliases: set[str] = set()
+    for value in values:
+        raw = os.fspath(value)
+        if not raw or "\0" in raw:
+            raise AOPError("read path must be a non-empty filesystem path")
+        candidate = Path(raw).expanduser()
+        try:
+            initial_status = candidate.lstat()
+            source = candidate.resolve(strict=True)
+        except OSError as error:
+            raise AOPError(f"could not inspect read path {candidate}: {error}") from error
+        if stat.S_ISLNK(initial_status.st_mode):
+            raise AOPError(f"read path may not be a symlink: {candidate}")
+        alias = source.name
+        if not alias:
+            raise AOPError(f"read path must have a basename: {source}")
+        if alias in aliases:
+            raise AOPError(f"read paths have the same basename: {alias}")
+        aliases.add(alias)
+
+        kind, files = _inspect_read_path(source)
+        mounted = input_dir / alias
+        if kind == "directory":
+            mounted.mkdir()
+        else:
+            mounted.touch()
+        size_bytes = sum(item.size_bytes for item in files)
+        prepared.append(
+            ReadPath(
+                source_path=os.fspath(source),
+                mounted_path=os.fspath(mounted),
+                kind=kind,
+                size_bytes=size_bytes,
+                sha256=_read_path_digest(kind, files),
+                files=files,
+            )
+        )
+    return tuple(prepared)
+
+
+def _inspect_read_path(source: Path) -> tuple[str, tuple[ReadPathFile, ...]]:
+    status = source.lstat()
+    if stat.S_ISLNK(status.st_mode):
+        raise AOPError(f"read path may not be a symlink: {source}")
+    if stat.S_ISREG(status.st_mode):
+        return "file", (_read_path_file(source, source.name),)
+    if not stat.S_ISDIR(status.st_mode):
+        raise AOPError(f"read path is not a regular file or directory: {source}")
+
+    files: list[ReadPathFile] = []
+
+    def collect(directory: Path, relative: PurePosixPath) -> None:
+        try:
+            children = sorted(directory.iterdir(), key=lambda child: child.name)
+        except OSError as error:
+            raise AOPError(f"could not read input directory {directory}: {error}") from error
+        for child in children:
+            logical = relative / child.name
+            child_status = child.lstat()
+            if stat.S_ISLNK(child_status.st_mode):
+                raise AOPError(f"read path contains a symlink: {child}")
+            if stat.S_ISDIR(child_status.st_mode):
+                collect(child, logical)
+            elif stat.S_ISREG(child_status.st_mode):
+                files.append(_read_path_file(child, logical.as_posix()))
+            else:
+                raise AOPError(f"read path contains a special file: {child}")
+
+    collect(source, PurePosixPath())
+    return "directory", tuple(files)
+
+
+def _read_path_file(source: Path, relative_path: str) -> ReadPathFile:
+    try:
+        size_bytes = source.stat().st_size
+        with source.open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    except OSError as error:
+        raise AOPError(f"could not hash read path file {source}: {error}") from error
+    return ReadPathFile(
+        relative_path=relative_path,
+        size_bytes=size_bytes,
+        sha256=digest,
+    )
+
+
+def _read_path_digest(kind: str, files: tuple[ReadPathFile, ...]) -> str:
+    if kind == "file":
+        return files[0].sha256
+    digest = hashlib.sha256(b"aop-read-directory-v1\0")
+    for item in files:
+        path = item.relative_path.encode()
+        digest.update(len(path).to_bytes(8, "big"))
+        digest.update(path)
+        digest.update(item.size_bytes.to_bytes(8, "big"))
+        digest.update(bytes.fromhex(item.sha256))
+    return digest.hexdigest()
+
+
+def _run_prompt(
+    prompt: str,
+    read_paths: tuple[ReadPath, ...],
+    artifacts: tuple[str, ...],
+    output_dir: Path,
+) -> str:
+    if read_paths:
+        paths = "\n".join(
+            f"- Preferred: {json.dumps(item.mounted_path)}\n"
+            f"  Original: {json.dumps(item.source_path)}\n"
+            f"  SHA-256: {item.sha256} ({item.size_bytes} bytes, {item.kind})"
+            for item in read_paths
+        )
+        prompt = (
+            f"{prompt.rstrip()}\n\n"
+            "AOP declared read-only paths:\n"
+            f"{paths}\n"
+            "Both locations are read-only. Prefer the task-local path when the provider "
+            "limits file access to the workspace."
+        )
+    return _artifact_prompt(prompt, artifacts, output_dir)
 
 
 def _artifact_prompt(prompt: str, artifacts: tuple[str, ...], output_dir: Path) -> str:

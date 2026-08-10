@@ -48,6 +48,19 @@ def test_cli_reports_version_and_provider_neutral_resume_help(
     assert parser.parse_args(
         ["run", "worker", "--agent", "opencode", "--prompt", "fix"]
     ).agent == "opencode"
+    read_args = parser.parse_args(
+        [
+            "run",
+            "reader",
+            "--read",
+            "/sources/one",
+            "--read",
+            "/sources/two",
+            "--prompt",
+            "inspect",
+        ]
+    )
+    assert read_args.read_paths == ["/sources/one", "/sources/two"]
 
 
 def test_run_persists_structured_codex_artifacts(
@@ -95,8 +108,11 @@ def test_run_persists_structured_codex_artifacts(
     assert request["prompt"] == "make the change"
     assert request["model"] == "gpt-5.6-sol"
     assert request["artifacts"] == []
+    assert request["read_paths"] == []
     assert persisted_result["succeeded"] is True
     assert persisted_result["artifacts"] == []
+    assert persisted_result["read_paths"] == []
+    assert not (run_dir / "input-manifest.json").exists()
     assert persisted_result["billing"] == {
         "route": "subscription",
         "credential_source": "chatgpt-oauth",
@@ -108,6 +124,134 @@ def test_run_persists_structured_codex_artifacts(
     )
     assert '"type": "thread.started"' in events
     assert (run_dir / "stderr.log").read_text() == ""
+
+
+@pytest.mark.parametrize("sandbox", ["scratch-write", "workspace-write"])
+def test_declared_read_paths_are_hashed_mounted_twice_and_recorded(
+    repository: Path,
+    fake_codex: Path,
+    tmp_path: Path,
+    sandbox: str,
+) -> None:
+    sources = tmp_path / "sources"
+    transcripts = sources / "transcripts"
+    transcripts.mkdir(parents=True)
+    day_four = transcripts / "day-4.md"
+    day_four.write_text("Day four\n")
+    nested = transcripts / "nested"
+    nested.mkdir()
+    day_five = nested / "day-5.md"
+    day_five.write_text("Day five\n")
+    ledger = sources / "ledger.json"
+    ledger.write_text('{"status":"verified"}\n')
+    manager = WorktreeManager.discover(repository)
+
+    result = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+        task="reader",
+        prompt="CHECK_READ_PATHS",
+        sandbox=sandbox,
+        read_paths=[transcripts, ledger],
+    )
+
+    assert result.succeeded
+    assert [Path(item.mounted_path).name for item in result.read_paths] == [
+        "transcripts",
+        "ledger.json",
+    ]
+    transcript_input, ledger_input = result.read_paths
+    assert transcript_input.source_path == os.fspath(transcripts.resolve())
+    assert transcript_input.kind == "directory"
+    assert transcript_input.size_bytes == len(b"Day four\nDay five\n")
+    assert [item.relative_path for item in transcript_input.files] == [
+        "day-4.md",
+        "nested/day-5.md",
+    ]
+    assert transcript_input.files[0].sha256 == hashlib.sha256(b"Day four\n").hexdigest()
+    assert ledger_input.kind == "file"
+    assert ledger_input.sha256 == hashlib.sha256(ledger.read_bytes()).hexdigest()
+    assert ledger_input.files[0].relative_path == "ledger.json"
+    assert not (transcripts / "forbidden").exists()
+    assert ledger.read_text() == '{"status":"verified"}\n'
+
+    for item in result.read_paths:
+        assert ["--ro-bind", item.source_path, item.source_path] in [
+            result.command[index : index + 3]
+            for index in range(len(result.command) - 2)
+        ]
+        assert ["--ro-bind", item.source_path, item.mounted_path] in [
+            result.command[index : index + 3]
+            for index in range(len(result.command) - 2)
+        ]
+
+    run_dir = manager.state_dir / "runs" / result.run_id
+    request = json.loads((run_dir / "request.json").read_text())
+    persisted_result = json.loads((run_dir / "result.json").read_text())
+    manifest = json.loads((run_dir / "input-manifest.json").read_text())
+    assert request["read_paths"] == persisted_result["read_paths"]
+    assert manifest == {"schema_version": 1, "read_paths": request["read_paths"]}
+    assert transcript_input.mounted_path in request["prompt"]
+    assert transcript_input.source_path in request["prompt"]
+    assert list(Path(transcript_input.mounted_path).iterdir()) == []
+    assert Path(ledger_input.mounted_path).read_bytes() == b""
+
+
+def test_resume_inherits_read_paths_and_refreshes_their_hashes(
+    repository: Path,
+    fake_codex: Path,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("first\n")
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    first = runner.run(task="reader-resume", prompt="first", read_paths=[source])
+    source.write_text("second\n")
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert resumed.read_paths[0].source_path == first.read_paths[0].source_path
+    assert resumed.read_paths[0].sha256 == hashlib.sha256(b"second\n").hexdigest()
+    assert resumed.read_paths[0].sha256 != first.read_paths[0].sha256
+    assert resumed.read_paths[0].mounted_path != first.read_paths[0].mounted_path
+
+
+def test_declared_read_paths_reject_unsafe_or_ambiguous_sources(
+    repository: Path,
+    fake_codex: Path,
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first" / "source.md"
+    second = tmp_path / "second" / "source.md"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_text("one\n")
+    second.write_text("two\n")
+    linked = tmp_path / "linked.md"
+    linked.symlink_to(first)
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    (directory / "linked.md").symlink_to(first)
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    with pytest.raises(AOPError, match="same basename"):
+        runner.run(task="duplicate-read", prompt="unused", read_paths=[first, second])
+    with pytest.raises(AOPError, match="may not be a symlink"):
+        runner.run(task="linked-read", prompt="unused", read_paths=[linked])
+    with pytest.raises(AOPError, match="contains a symlink"):
+        runner.run(task="nested-linked-read", prompt="unused", read_paths=[directory])
+    with pytest.raises(AOPError, match="requires workspace-write or scratch-write"):
+        runner.run(
+            task="danger-read",
+            prompt="unused",
+            sandbox="danger-full-access",
+            read_paths=[first],
+        )
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,8 @@ from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 def test_manifest_resolves_prompt_files_and_options(tmp_path: Path) -> None:
     (tmp_path / "prompt.md").write_text("Implement the parser.\n")
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "ledger.md").write_text("verified\n")
     manifest = tmp_path / "tasks.toml"
     manifest.write_text(
         """
@@ -26,6 +28,7 @@ effort = "xhigh"
 sandbox = "workspace-write"
 timeout = 30
 artifacts = ["paper.md"]
+read_paths = ["sources", "ledger.md"]
 
 [[tasks]]
 id = "tests"
@@ -45,6 +48,10 @@ prompt = "Add tests"
     assert tasks[0].sandbox == "workspace-write"
     assert tasks[0].timeout_seconds == 30
     assert tasks[0].artifacts == ("paper.md",)
+    assert tasks[0].read_paths == (
+        os.fspath(tmp_path / "sources"),
+        os.fspath(tmp_path / "ledger.md"),
+    )
     assert tasks[1].prompt_source == "inline"
 
 
@@ -129,8 +136,49 @@ artifacts = ["paper.md"]
     )
     assert run_result["artifacts"][0]["logical_path"] == "paper.md"
     assert (
-        manager.state_dir / "runs" / run_id / run_result["artifacts"][0]["archive_path"]
+        manager.state_dir
+        / "runs"
+        / run_id
+        / run_result["artifacts"][0]["archive_path"]
     ).read_text() == "# Extracted\n"
+
+
+def test_batch_mounts_declared_read_paths(
+    repository: Path,
+    fake_codex: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+    sources = repository.parent / "review-sources"
+    transcripts = sources / "transcripts"
+    transcripts.mkdir(parents=True)
+    (transcripts / "day.md").write_text("transcript\n")
+    ledger = sources / "ledger.md"
+    ledger.write_text("ledger\n")
+    manifest = repository / "read-paths.toml"
+    manifest.write_text(
+        f'''
+[[tasks]]
+id = "reader"
+prompt = "CHECK_READ_PATHS"
+sandbox = "scratch-write"
+read_paths = ["{transcripts}", "{ledger}"]
+'''
+    )
+    manager = WorktreeManager.discover(repository)
+
+    result = BatchRunner(manager).run(manifest)
+
+    assert result.succeeded
+    run_id = result.tasks[0].run_id
+    assert run_id is not None
+    request = json.loads(
+        (manager.state_dir / "runs" / run_id / "request.json").read_text()
+    )
+    assert [Path(item["source_path"]).name for item in request["read_paths"]] == [
+        "transcripts",
+        "ledger.md",
+    ]
 
 
 def test_cli_batch_returns_failure_and_keeps_other_results(

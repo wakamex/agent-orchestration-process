@@ -159,6 +159,28 @@ prompt = sys.stdin.read()
 output_path = pathlib.Path(args[args.index("--output-last-message") + 1])
 source_home = pathlib.Path(os.environ["AOP_CODEX_SOURCE_HOME"])
 codex_home = pathlib.Path(os.environ["CODEX_HOME"])
+if prompt.startswith("CHECK_READ_PATHS"):
+    manifest = json.loads(pathlib.Path(os.environ["AOP_INPUT_MANIFEST"]).read_text())
+    input_dir = pathlib.Path(os.environ["AOP_INPUT_DIR"])
+    if not input_dir.is_dir() or len(manifest["read_paths"]) != 2:
+        raise RuntimeError("declared read paths were not exposed")
+    for item in manifest["read_paths"]:
+        source = pathlib.Path(item["source_path"])
+        mounted = pathlib.Path(item["mounted_path"])
+        if mounted.parent != input_dir or not source.exists() or not mounted.exists():
+            raise RuntimeError(f"invalid read path mapping: {{item}}")
+        for protected in (source, mounted):
+            target = protected / "forbidden" if protected.is_dir() else protected
+            try:
+                if protected.is_dir():
+                    target.write_text("forbidden")
+                else:
+                    with target.open("a") as handle:
+                        handle.write("forbidden")
+            except OSError:
+                pass
+            else:
+                raise RuntimeError(f"declared read path was writable: {{protected}}")
 if codex_home.resolve() == source_home.resolve():
     print("Codex did not receive private runtime state", file=sys.stderr)
     raise SystemExit(1)

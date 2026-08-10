@@ -3,4 +3,4 @@
 from importlib.metadata import version
 
 
-__version__ = version("aop")
+__version__ = version("agent-orchestration-process")

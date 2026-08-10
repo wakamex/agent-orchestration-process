@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from aop.worktrees import AOPError, WorktreeManager
+from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
 def git(cwd: Path, *args: str) -> str:

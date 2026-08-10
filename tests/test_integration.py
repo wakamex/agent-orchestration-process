@@ -7,15 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from aop.integration import (
+from agent_orchestration_process.integration import (
     CheckpointManager,
     IntegrationManager,
     _latest_resumable_run_id,
     _source_run_ids,
 )
-from aop.locks import task_lock_path
-from aop.runner import AgentRunner, CodexAdapter, HermesAdapter
-from aop.worktrees import AOPError, WorktreeManager
+from agent_orchestration_process.locks import task_lock_path
+from agent_orchestration_process.runner import AgentRunner, CodexAdapter, HermesAdapter
+from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 from conftest import git
 

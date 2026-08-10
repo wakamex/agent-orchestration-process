@@ -46,14 +46,14 @@ to schedule and govern bounded work.
 Install the CLI directly from GitHub:
 
 ```sh
-uv tool install git+https://github.com/wakamex/aop.git
+uv tool install git+https://github.com/wakamex/agent-orchestration-process.git
 ```
 
 For development, clone the repository and let uv create and synchronize the local environment. The
 default `dev` dependency group contains pytest and Ruff:
 
 ```sh
-git clone https://github.com/wakamex/aop.git
+git clone https://github.com/wakamex/agent-orchestration-process.git
 cd aop
 uv sync
 uv run pytest
@@ -126,7 +126,7 @@ The main repository and Git metadata remain read-only in both safe modes. Config
 and user instructions remain available. AOP also gives adapters task-private runtime state when
 their native global state would prevent isolation or reliable resume.
 
-See [Harness isolation and runtime state](https://github.com/wakamex/aop/blob/main/docs/harnesses.md)
+See [Harness isolation and runtime state](https://github.com/wakamex/agent-orchestration-process/blob/main/docs/harnesses.md)
 for provider-specific behavior, credential handling, state paths, and environment overrides.
 
 For a file-producing task, declare each expected path relative to the run's output directory:
@@ -416,7 +416,7 @@ not expose.
 
 Cursor, Agy, and Devin do not report an API-equivalent cost. AOP also does not configure
 language-specific build caches. See
-[Harness isolation and runtime state](https://github.com/wakamex/aop/blob/main/docs/harnesses.md)
+[Harness isolation and runtime state](https://github.com/wakamex/agent-orchestration-process/blob/main/docs/harnesses.md)
 for the full adapter contract.
 
 ### Roadmap

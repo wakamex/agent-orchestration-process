@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from aop.batch import BatchRunner, load_manifest
-from aop.cli import main
-from aop.worktrees import AOPError, WorktreeManager
+from agent_orchestration_process.batch import BatchRunner, load_manifest
+from agent_orchestration_process.cli import main
+from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
 def test_manifest_resolves_prompt_files_and_options(tmp_path: Path) -> None:

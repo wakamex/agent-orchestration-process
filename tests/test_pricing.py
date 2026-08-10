@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from aop.pricing import TokenUsage, estimate_api_cost
+from agent_orchestration_process.pricing import TokenUsage, estimate_api_cost
 
 
 @pytest.mark.parametrize(

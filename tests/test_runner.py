@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from aop import __version__
-from aop.cli import build_parser, main
-from aop.locks import exclusive_lock, task_lock_path
-from aop.runner import AgentRunner, CodexAdapter
-from aop.worktrees import AOPError, WorktreeManager
+from agent_orchestration_process import __version__
+from agent_orchestration_process.cli import build_parser, main
+from agent_orchestration_process.locks import exclusive_lock, task_lock_path
+from agent_orchestration_process.runner import AgentRunner, CodexAdapter
+from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"

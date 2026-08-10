@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from aop.pricing import TokenUsage
-from aop.runner import (
+from agent_orchestration_process.pricing import TokenUsage
+from agent_orchestration_process.runner import (
     AgyAdapter,
     AgentRunner,
     ClaudeAdapter,
@@ -19,7 +19,7 @@ from aop.runner import (
     _HermesSession,
     OpenCodeAdapter,
 )
-from aop.worktrees import AOPError, WorktreeManager
+from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
 def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> None:

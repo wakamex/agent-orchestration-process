@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from aop import cli, model_catalog, model_listing
-from aop.model_catalog import ModelCatalog, ensure_catalog_fresh
-from aop.worktrees import AOPError
+from agent_orchestration_process import cli, model_catalog, model_listing
+from agent_orchestration_process.model_catalog import ModelCatalog, ensure_catalog_fresh
+from agent_orchestration_process.worktrees import AOPError
 
 
 def test_fresh_catalog_does_not_contact_network(

@@ -3,7 +3,7 @@ requires = ["uv_build>=0.11.29,<0.12"]
 build-backend = "uv_build"
 
 [project]
-name = "aop"
+name = "agent-orchestration-process"
 version = "0.1.0"
 description = "A worktree-first agent orchestration process"
 readme = "README.md"
@@ -14,9 +14,9 @@ license-files = ["LICENSE"]
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/wakamex/aop"
-Repository = "https://github.com/wakamex/aop.git"
-Issues = "https://github.com/wakamex/aop/issues"
+Homepage = "https://github.com/wakamex/agent-orchestration-process"
+Repository = "https://github.com/wakamex/agent-orchestration-process.git"
+Issues = "https://github.com/wakamex/agent-orchestration-process/issues"
 
 [dependency-groups]
 dev = [
@@ -25,7 +25,7 @@ dev = [
 ]
 
 [project.scripts]
-aop = "aop.cli:main"
+aop = "agent_orchestration_process.cli:main"
 
 [tool.pytest.ini_options]
 addopts = "-q"

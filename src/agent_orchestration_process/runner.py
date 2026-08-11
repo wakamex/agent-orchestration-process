@@ -1882,6 +1882,8 @@ class HermesAdapter:
         command.extend(["--source", "tool"])
         if request.session_id:
             command.extend(["--resume", request.session_id, "--no-restore-cwd"])
+        if request.inference_provider:
+            command.extend(["--provider", request.inference_provider])
         if request.model:
             command.extend(["--model", request.model])
         if request.effort:
@@ -2895,6 +2897,7 @@ class AgentRunner:
         prompt: str,
         base: str = "HEAD",
         model: str | None = None,
+        inference_provider: str | None = None,
         effort: str | None = None,
         mode: str = "agent",
         sandbox: str = "workspace-write",
@@ -2903,6 +2906,7 @@ class AgentRunner:
         read_paths: Sequence[str | os.PathLike[str]] = (),
     ) -> RunResult:
         self._validate_mode(mode)
+        self._validate_inference_provider(inference_provider, model)
         if read_paths and sandbox == "danger-full-access":
             raise AOPError("--read requires workspace-write or scratch-write")
         model, effort = self.adapter.normalize_options(model, effort)
@@ -2911,6 +2915,7 @@ class AgentRunner:
             prompt=prompt,
             base=base,
             model=model,
+            inference_provider=inference_provider,
             effort=effort,
             mode=mode,
             sandbox=sandbox,
@@ -2958,6 +2963,7 @@ class AgentRunner:
             prompt=prompt,
             base=parent_request.base,
             model=parent_request.model,
+            inference_provider=parent_request.inference_provider,
             effort=parent_request.effort,
             mode=parent_request.mode,
             sandbox=parent_request.sandbox,
@@ -3050,7 +3056,11 @@ class AgentRunner:
             )
             environment["AOP_INPUT_MANIFEST"] = os.fspath(input_manifest)
         result = self.adapter.execute(request, worktree, run_dir, environment)
-        result = replace(result, read_paths=request.read_paths)
+        result = replace(
+            result,
+            inference_provider=request.inference_provider,
+            read_paths=request.read_paths,
+        )
         if result.succeeded and request.artifacts:
             result = _archive_artifacts(result, request.artifacts, output_dir, run_dir)
         self.store.write_json(run_dir / "result.json", result.to_dict())
@@ -3063,6 +3073,7 @@ class AgentRunner:
         prompt: str,
         base: str,
         model: str | None,
+        inference_provider: str | None,
         effort: str | None,
         mode: str,
         sandbox: str,
@@ -3079,6 +3090,7 @@ class AgentRunner:
             prompt=prompt,
             base=base,
             model=model,
+            inference_provider=inference_provider,
             effort=effort,
             sandbox=sandbox,
             timeout_seconds=timeout_seconds,
@@ -3094,6 +3106,18 @@ class AgentRunner:
             raise AOPError(f"unknown agent mode: {mode}")
         if mode not in self.adapter.modes:
             raise AOPError(f"{self.adapter.provider} does not support {mode} mode")
+
+    def _validate_inference_provider(
+        self, inference_provider: str | None, model: str | None
+    ) -> None:
+        if inference_provider is None:
+            return
+        if self.adapter.provider != "hermes":
+            raise AOPError(
+                f"{self.adapter.provider} does not support --provider overrides"
+            )
+        if model is None:
+            raise AOPError("Hermes --provider requires an explicit --model")
 
     def _get_or_create_worktree(self, task: str, base: str) -> Worktree:
         for worktree in self.manager.list():

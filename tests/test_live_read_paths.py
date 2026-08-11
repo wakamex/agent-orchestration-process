@@ -37,6 +37,9 @@ def test_provider_reads_declared_path(
     manager = WorktreeManager.discover(root)
     task = f"live-read-{provider}-{nonce[:8]}"
     model = os.environ.get(f"AOP_LIVE_{provider.upper()}_MODEL")
+    inference_provider = os.environ.get(
+        f"AOP_LIVE_{provider.upper()}_PROVIDER"
+    )
     effort = os.environ.get(f"AOP_LIVE_{provider.upper()}_EFFORT")
     timeout = float(os.environ.get("AOP_LIVE_READ_PATH_TIMEOUT", "300"))
 
@@ -48,6 +51,7 @@ def test_provider_reads_declared_path(
                 f"Reply with exactly AOP_READ_OK:{nonce} and no other text."
             ),
             model=model,
+            inference_provider=inference_provider,
             effort=effort,
             sandbox="scratch-write",
             timeout_seconds=timeout,

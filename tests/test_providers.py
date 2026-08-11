@@ -970,6 +970,68 @@ def test_hermes_run_and_exact_resume_report_per_turn_usage(
     assert resumed.api_equivalent_cost.amount_usd == 0.000001
 
 
+def test_hermes_provider_override_is_recorded_and_reused_on_resume(
+    repository: Path,
+    fake_hermes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes)))
+
+    first = runner.run(
+        task="hermes-routed",
+        prompt="first",
+        model="grok-build-0.1",
+        inference_provider="xai-oauth",
+    )
+    resumed = AgentRunner(manager).resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded
+    assert resumed.succeeded
+    assert first.inference_provider == "xai-oauth"
+    assert resumed.inference_provider == "xai-oauth"
+    for result in (first, resumed):
+        assert ["--provider", "xai-oauth"] == result.command[
+            result.command.index("--provider") : result.command.index("--provider")
+            + 2
+        ]
+        assert ["--model", "grok-build-0.1"] == result.command[
+            result.command.index("--model") : result.command.index("--model") + 2
+        ]
+
+    first_request = json.loads(
+        (manager.state_dir / "runs" / first.run_id / "request.json").read_text()
+    )
+    resumed_result = json.loads(
+        (manager.state_dir / "runs" / resumed.run_id / "result.json").read_text()
+    )
+    assert first_request["inference_provider"] == "xai-oauth"
+    assert resumed_result["inference_provider"] == "xai-oauth"
+
+
+def test_provider_override_requires_hermes_and_an_explicit_model(
+    repository: Path,
+    fake_codex: Path,
+    fake_hermes: Path,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+
+    with pytest.raises(AOPError, match="codex does not support --provider"):
+        AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+            task="unsupported-provider",
+            prompt="unused",
+            model="gpt-5.6-sol",
+            inference_provider="openai",
+        )
+    with pytest.raises(AOPError, match="requires an explicit --model"):
+        AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes))).run(
+            task="missing-provider-model",
+            prompt="unused",
+            inference_provider="xai-oauth",
+        )
+
+
 def test_hermes_participant_mode_is_tool_free_bounded_and_stable_across_resume(
     repository: Path,
     fake_hermes: Path,

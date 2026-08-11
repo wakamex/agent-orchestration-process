@@ -42,6 +42,7 @@ class RunRequest:
     prompt: str
     base: str
     model: str | None
+    inference_provider: str | None
     effort: str | None
     sandbox: str
     timeout_seconds: float | None
@@ -58,6 +59,7 @@ class RunRequest:
     def from_dict(cls, value: dict[str, Any]) -> RunRequest:
         fields = dict(value)
         fields.setdefault("mode", "agent")
+        fields.setdefault("inference_provider", None)
         fields["artifacts"] = tuple(fields.get("artifacts", ()))
         fields["read_paths"] = tuple(
             ReadPath.from_dict(item) for item in fields.get("read_paths", ())
@@ -107,6 +109,7 @@ class RunResult:
     usage: TokenUsage
     api_equivalent_cost: EstimatedCost | None
     billing: BillingProvenance = BillingProvenance()
+    inference_provider: str | None = None
     artifacts: tuple[RunArtifact, ...] = ()
     read_paths: tuple[ReadPath, ...] = ()
     provider_duration_seconds: float | None = None
@@ -141,6 +144,7 @@ class RunResult:
             fields.get("api_equivalent_cost")
         )
         fields["billing"] = BillingProvenance.from_dict(fields.get("billing"))
+        fields.setdefault("inference_provider", None)
         fields["artifacts"] = tuple(
             RunArtifact(**artifact) for artifact in fields.get("artifacts", ())
         )

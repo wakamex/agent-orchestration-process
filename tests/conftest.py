@@ -931,7 +931,11 @@ state = (
     else {{
         "id": session_id,
         "model": args[args.index("--model") + 1],
-        "billing_provider": "nous",
+        "billing_provider": (
+            args[args.index("--provider") + 1]
+            if "--provider" in args
+            else "nous"
+        ),
         "input_tokens": 0,
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,

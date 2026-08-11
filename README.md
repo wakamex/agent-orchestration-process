@@ -188,8 +188,9 @@ task scratch, but receives a fresh output directory and only validates artifacts
 Claude accepts its normal model aliases and effort levels `low`, `medium`, `high`, `xhigh`, and
 `max`. Agy accepts its native model names and effort levels `low`, `medium`, and `high`.
 
-Hermes uses the provider selected in the Hermes profile and AOP does not override it. Install
-Hermes 0.20 or newer and authenticate the desired provider once. For example, on a headless host:
+Hermes uses the provider selected in its profile unless `--provider` explicitly overrides it.
+Install Hermes 0.20 or newer and authenticate the desired provider once. For example, on a
+headless host:
 
 ```sh
 hermes auth add nous --type oauth --no-browser
@@ -197,8 +198,20 @@ hermes auth add xai-oauth --type oauth --no-browser
 ```
 
 Hermes defaults to `deepseek/deepseek-v4-flash-0731`, which expects a compatible configured
-provider such as Nous. Pass another model ID unchanged with `--model`; AOP passes `--effort` through
-as Hermes's native reasoning level. Supported levels are
+provider such as Nous. To choose another authenticated route explicitly, provide its model too:
+
+```sh
+aop run grok-task \
+  --agent hermes \
+  --provider xai-oauth \
+  --model grok-build-0.1 \
+  --prompt "Implement the change"
+```
+
+AOP rejects provider overrides without an explicit model and rejects them for other adapters. It
+records the override in the request and normalized result and reapplies it on exact resume. Pass
+model IDs unchanged with `--model`; AOP passes `--effort` through as Hermes's native reasoning
+level. Supported levels are
 `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. AOP uses Hermes's quiet
 programmatic mode, tags sessions as tool-created, and resumes the exact session without restoring
 its old working directory. It reasserts the original model and reasoning level on resume
@@ -335,6 +348,7 @@ id = "tests"
 agent = "hermes"
 prompt = "Add adversarial parser tests"
 model = "deepseek/deepseek-v4-flash-0731"
+provider = "nous"
 effort = "high"
 ```
 
@@ -343,11 +357,11 @@ aop batch tasks.toml --jobs 4
 ```
 
 Prompt-file and `read_paths` entries are resolved relative to the manifest. Each task may set
-`agent`, `base`, `model`, `effort`, `sandbox`, `timeout`, an `artifacts` array, and a `read_paths`
-array; unspecified values use the same defaults as `aop run`. The scheduler keeps at most `--jobs`
-tasks active, prints only concise lifecycle status, and stores full agent output in the normal
-per-run directories. On interruption it launches no additional tasks and waits for already-active
-tasks to finish.
+`agent`, `base`, `model`, `provider`, `effort`, `sandbox`, `timeout`, an `artifacts` array, and a
+`read_paths` array; `provider` is currently Hermes-only and requires `model`. Unspecified values use
+the same defaults as `aop run`. The scheduler keeps at most `--jobs` tasks active, prints only
+concise lifecycle status, and stores full agent output in the normal per-run directories. On
+interruption it launches no additional tasks and waits for already-active tasks to finish.
 
 Every batch writes `.aop/batches/<batch-id>.json` with task-order-preserving run IDs, session IDs,
 durations, exit codes, and errors. A batch exits nonzero if any task fails, without discarding

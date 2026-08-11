@@ -270,6 +270,7 @@ prompt = "opencode"
 id = "hermes-task"
 agent = "hermes"
 model = "deepseek/deepseek-v4-flash-0731"
+provider = "nous"
 effort = "high"
 prompt = "three"
 """
@@ -292,6 +293,7 @@ prompt = "three"
     assert result.tasks[3].model == "gemini-3.1-pro"
     assert result.tasks[4].model == "opencode/deepseek-v4-flash"
     assert result.tasks[5].model == "deepseek/deepseek-v4-flash-0731"
+    assert result.tasks[5].inference_provider == "nous"
 
 
 def test_batch_runs_hermes_participant_mode_and_records_provenance(

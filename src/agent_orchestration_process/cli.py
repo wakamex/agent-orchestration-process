@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--base", default="HEAD", help="commit for a new task worktree")
     run.add_argument("--model", help="override the agent model")
     run.add_argument(
+        "--provider",
+        dest="inference_provider",
+        help="override the inference provider; currently Hermes-only",
+    )
+    run.add_argument(
         "--mode",
         choices=["agent", "participant"],
         default="agent",
@@ -229,6 +234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prompt=_read_prompt(args),
                 base=args.base,
                 model=args.model,
+                inference_provider=args.inference_provider,
                 effort=args.effort,
                 mode=args.mode,
                 sandbox=args.sandbox,
@@ -362,6 +368,8 @@ def _report_run(
         metrics += f" api_equiv=${result.api_equivalent_cost.amount_usd:.6f}"
     else:
         metrics += " api_equiv=n/a"
+    if result.inference_provider:
+        metrics += f" provider={result.inference_provider}"
     metrics += f" billing={result.billing.route}"
     print(
         f"aop: run_id={result.run_id} session_id={result.session_id or '-'} {metrics} "
@@ -390,7 +398,7 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
         file=sys.stderr,
     )
     print(
-        "aop: task\tagent\tmodel\teffort\ttime\ttokens\tapi-equiv\tbilling",
+        "aop: task\tagent\tprovider\tmodel\teffort\ttime\ttokens\tapi-equiv\tbilling",
         file=sys.stderr,
     )
     for task in result.tasks:
@@ -410,7 +418,9 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
             else "n/a"
         )
         print(
-            f"aop: {task.task}\t{task.agent}\t{task.model or '(configured)'}\t"
+            f"aop: {task.task}\t{task.agent}\t"
+            f"{task.inference_provider or '(configured)'}\t"
+            f"{task.model or '(configured)'}\t"
             f"{task.effort or '(configured)'}\t{duration}\t{tokens}\t{cost}\t"
             f"{task.billing_route or 'unknown'}",
             file=sys.stderr,

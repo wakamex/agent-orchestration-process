@@ -28,6 +28,7 @@ TASK_FIELDS = {
     "prompt_file",
     "base",
     "model",
+    "provider",
     "mode",
     "effort",
     "sandbox",
@@ -49,6 +50,7 @@ class BatchTask:
     agent: str = "codex"
     base: str = "HEAD"
     model: str | None = None
+    inference_provider: str | None = None
     effort: str | None = None
     mode: str = "agent"
     sandbox: str = "workspace-write"
@@ -64,6 +66,7 @@ class BatchTaskResult:
     status: str
     mode: str
     model: str | None
+    inference_provider: str | None
     effort: str | None
     run_id: str | None
     session_id: str | None
@@ -168,6 +171,7 @@ class BatchRunner:
                     status="not_started",
                     mode=task.mode,
                     model=task.model,
+                    inference_provider=task.inference_provider,
                     effort=task.effort,
                     run_id=None,
                     session_id=None,
@@ -202,6 +206,7 @@ class BatchRunner:
                 prompt=task.prompt,
                 base=task.base,
                 model=task.model,
+                inference_provider=task.inference_provider,
                 effort=task.effort,
                 mode=task.mode,
                 sandbox=task.sandbox,
@@ -216,6 +221,7 @@ class BatchRunner:
                 status="error",
                 mode=task.mode,
                 model=task.model,
+                inference_provider=task.inference_provider,
                 effort=task.effort,
                 run_id=None,
                 session_id=None,
@@ -235,6 +241,7 @@ class BatchRunner:
             status="succeeded" if result.succeeded else "failed",
             mode=result.mode,
             model=result.model,
+            inference_provider=result.inference_provider,
             effort=result.effort,
             run_id=result.run_id,
             session_id=result.session_id,
@@ -331,6 +338,7 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
 
     base = _optional_string(value, "base", label) or "HEAD"
     model = _optional_string(value, "model", label)
+    inference_provider = _optional_string(value, "provider", label)
     mode = _optional_string(value, "mode", label) or "agent"
     if mode not in MODES:
         raise AOPError(f"{label}.mode must be one of: {', '.join(sorted(MODES))}")
@@ -378,6 +386,7 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
         agent=agent,
         base=base,
         model=model,
+        inference_provider=inference_provider,
         effort=effort,
         mode=mode,
         sandbox=sandbox,

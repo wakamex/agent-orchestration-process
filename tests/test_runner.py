@@ -45,6 +45,21 @@ def test_cli_reports_version_and_provider_neutral_resume_help(
         ]
     )
     assert args.mode == "participant"
+    provider_args = parser.parse_args(
+        [
+            "run",
+            "routed",
+            "--agent",
+            "hermes",
+            "--provider",
+            "xai-oauth",
+            "--model",
+            "grok-build-0.1",
+            "--prompt",
+            "test",
+        ]
+    )
+    assert provider_args.inference_provider == "xai-oauth"
     assert parser.parse_args(
         ["run", "worker", "--agent", "opencode", "--prompt", "fix"]
     ).agent == "opencode"
@@ -113,10 +128,12 @@ def test_run_persists_structured_codex_artifacts(
 
     assert request["prompt"] == "make the change"
     assert request["model"] == "gpt-5.6-sol"
+    assert request["inference_provider"] is None
     assert request["artifacts"] == []
     assert request["read_paths"] == []
     assert persisted_result["succeeded"] is True
     assert persisted_result["artifacts"] == []
+    assert persisted_result["inference_provider"] is None
     assert persisted_result["read_paths"] == []
     assert not (run_dir / "input-manifest.json").exists()
     assert persisted_result["billing"] == {

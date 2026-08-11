@@ -89,7 +89,8 @@ AOP seeds configuration, skills, hooks, and memories while keeping new sessions,
 and caches private. Some Hermes OAuth refresh tokens rotate after use, so AOP maintains the freshest
 credentials under `.aop/shared-provider-state/hermes/auth.json`. A repository lock serializes Hermes
 turns to prevent concurrent tasks from consuming the same refresh token. Other harnesses remain
-concurrent.
+concurrent. `aop run --provider NAME --model MODEL` overrides the profile's inference provider for
+the task, records that choice, and reuses it on resume.
 
 ## Executable overrides
 
@@ -116,7 +117,8 @@ AOP_LIVE_READ_PATH_AGENTS=agy,codex uv run pytest tests/test_live_read_paths.py
 ```
 
 Use `all` to select every adapter. `AOP_LIVE_<AGENT>_MODEL` and
-`AOP_LIVE_<AGENT>_EFFORT` select provider-specific test options, and
+`AOP_LIVE_<AGENT>_EFFORT` select harness-specific test options.
+`AOP_LIVE_HERMES_PROVIDER` selects the Hermes inference provider, and
 `AOP_LIVE_READ_PATH_TIMEOUT` changes the default 300-second bound. The test uses `scratch-write`,
 verifies a random nonce from an external file, confirms the source was unchanged, and cleans the
 task worktree while retaining normal AOP run evidence.

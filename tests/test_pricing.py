@@ -48,6 +48,26 @@ def test_reasoning_tokens_are_not_double_counted() -> None:
     assert with_reasoning.amount_usd == without_reasoning.amount_usd
 
 
+def test_additive_cached_input_is_priced_separately() -> None:
+    estimate = estimate_api_cost(
+        "gemini-3.5-flash-low",
+        TokenUsage(
+            input_tokens=100,
+            cached_input_tokens=300,
+            output_tokens=20,
+            reasoning_output_tokens=7,
+        ),
+        providers=("google",),
+        additive_cached_input=True,
+        catalog_model="gemini-3.5-flash",
+    )
+
+    assert estimate is not None
+    assert estimate.amount_usd == 0.000375
+    assert estimate.model == "gemini-3.5-flash-low"
+    assert estimate.priced_as == "gemini-3.5-flash"
+
+
 def test_long_context_multiplier_is_applied_when_documented() -> None:
     estimate = estimate_api_cost(
         "gpt-5.5",

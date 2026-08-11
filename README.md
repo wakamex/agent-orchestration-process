@@ -290,10 +290,12 @@ rather than account-verified. The `availability` and `price_scope` fields keep t
 
 Every run records wall-clock time and time to first event and agent response. Adapters also record
 input, cached-input, output, and reasoning-output tokens when the provider exposes them. When
-`--model` names a priced OpenAI model, the result also contains an estimated standard API-equivalent
-USD cost.
+the resolved model has catalog pricing, the result also contains an estimated standard
+API-equivalent USD cost.
 This is a comparison metric for subscription runs, not an amount billed to the account. Reasoning
 tokens are reported separately but are already included in output tokens and are not charged twice.
+Agy cache-read tokens are reported separately from uncached input and are priced as an additive
+category using the resolved Google model rate.
 
 Each normalized run result also records sanitized `billing` provenance separately from that
 comparison cost. `route` is one of `subscription`, `provider-credits`, `metered-api`, `local`, or

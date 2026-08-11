@@ -1591,12 +1591,13 @@ class AgyAdapter:
             error = parsed["error"]
         else:
             error = None
+        model = parsed["model"] or request.model
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
             mode=request.mode,
             task=request.task,
-            model=parsed["model"] or request.model,
+            model=model,
             effort=request.effort,
             session_id=session_id,
             command=command,
@@ -1610,7 +1611,13 @@ class AgyAdapter:
             error=error,
             final_message=final_message,
             usage=parsed["usage"],
-            api_equivalent_cost=None,
+            api_equivalent_cost=estimate_api_cost(
+                model,
+                parsed["usage"],
+                providers=("google",),
+                additive_cached_input=True,
+                catalog_model=_agy_catalog_model(model),
+            ),
             billing=BillingProvenance(
                 route="subscription",
                 credential_source="google-oauth",
@@ -1723,6 +1730,15 @@ class AgyAdapter:
             "usage": usage,
             "has_result": has_result,
         }
+
+
+def _agy_catalog_model(model: str | None) -> str | None:
+    if model is None:
+        return None
+    for suffix in ("-low", "-medium", "-high"):
+        if model.endswith(suffix):
+            return model.removesuffix(suffix)
+    return model
 
 
 @dataclass(frozen=True)

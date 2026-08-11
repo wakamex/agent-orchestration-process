@@ -74,11 +74,13 @@ def estimate_api_cost(
     catalog: ModelCatalog | None = None,
     *,
     providers: tuple[str, ...] = ("openai",),
+    additive_cached_input: bool = False,
+    catalog_model: str | None = None,
 ) -> EstimatedCost | None:
     if model is None:
         return None
     catalog = catalog or ensure_catalog_fresh()
-    resolved = _catalog_price(catalog, model, providers)
+    resolved = _catalog_price(catalog, catalog_model or model, providers)
     if resolved is None:
         return None
     priced_as, price = resolved
@@ -101,13 +103,16 @@ def estimate_api_cost(
         if long_context
         else price.output_per_million_usd
     )
-    assert input_rate is not None and cached_rate is not None and output_rate is not None
-    cached = min(usage.cached_input_tokens, usage.input_tokens)
-    uncached = usage.input_tokens - cached
+    assert (
+        input_rate is not None and cached_rate is not None and output_rate is not None
+    )
+    cached = usage.cached_input_tokens
+    uncached = usage.input_tokens
+    if not additive_cached_input:
+        cached = min(cached, uncached)
+        uncached -= cached
     amount = (
-        uncached * input_rate
-        + cached * cached_rate
-        + usage.output_tokens * output_rate
+        uncached * input_rate + cached * cached_rate + usage.output_tokens * output_rate
     ) / 1_000_000
     return EstimatedCost(
         amount_usd=round(amount, 8),

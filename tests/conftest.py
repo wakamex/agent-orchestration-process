@@ -68,7 +68,14 @@ def fresh_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
             }
         },
         "anthropic": {"models": {}},
-        "google": {"models": {}},
+        "google": {
+            "models": {
+                "gemini-3.5-flash": {
+                    "name": "Gemini 3.5 Flash",
+                    "cost": {"input": 1.5, "cache_read": 0.15, "output": 9},
+                }
+            }
+        },
         "opencode": {"models": {}},
         "xai": {
             "models": {

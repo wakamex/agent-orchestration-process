@@ -639,7 +639,11 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     assert first.usage.reasoning_output_tokens == 7
     assert first.provider_duration_seconds == 1.25
     assert first.time_to_first_response_seconds is not None
-    assert first.api_equivalent_cost is None
+    assert first.api_equivalent_cost is not None
+    assert first.api_equivalent_cost.amount_usd == 0.0003345
+    assert first.api_equivalent_cost.model == "gemini-3.5-flash"
+    assert first.api_equivalent_cost.priced_as == "gemini-3.5-flash"
+    assert first.api_equivalent_cost.estimated
     assert first.billing.route == "subscription"
     assert first.billing.credential_source == "google-oauth"
     assert not first.billing.actual_cost_known

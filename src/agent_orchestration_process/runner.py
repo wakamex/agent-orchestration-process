@@ -851,6 +851,307 @@ class ClaudeAdapter:
         }
 
 
+class GrokAdapter:
+    provider = "grok"
+    modes = frozenset({"agent"})
+    DEFAULT_MODEL = "grok-build"
+    EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_GROK_BIN", "grok")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        if effort is not None and effort not in self.EFFORTS:
+            raise AOPError(
+                f"Grok effort must be one of: {', '.join(sorted(self.EFFORTS))}"
+            )
+        return model or self.DEFAULT_MODEL, effort
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        _prepare_grok_environment(environment)
+        prompt_path = (
+            Path(environment["AOP_SCRATCH_DIR"]) / f".grok-prompt-{request.run_id}.txt"
+        )
+        _atomic_write_private(prompt_path, request.prompt)
+        command = _provider_command(
+            self._command(request, worktree, prompt_path),
+            request,
+            worktree,
+            environment,
+        )
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=None,
+            timeout_seconds=request.timeout_seconds,
+            is_response=self._is_response,
+        )
+        _atomic_write(run_dir / "events.jsonl", capture.stdout)
+        _atomic_write(run_dir / "stderr.log", capture.stderr)
+        parsed = self._parse(capture.stdout, request.model)
+        final_message = parsed["final_message"]
+        if final_message is not None:
+            _atomic_write(run_dir / "last-message.txt", final_message)
+
+        reported_session_id = parsed["session_id"]
+        session_id = reported_session_id
+        resume_error = None
+        if request.session_id and reported_session_id != request.session_id:
+            session_id = None
+            if reported_session_id is None:
+                resume_error = (
+                    "Grok resume result did not report the requested session ID "
+                    f"{request.session_id}"
+                )
+            else:
+                resume_error = (
+                    f"Grok resumed as session {reported_session_id} instead of "
+                    f"the requested session {request.session_id}"
+                )
+
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif parsed["error"]:
+            error = parsed["error"]
+        elif capture.exit_code:
+            error = (
+                capture.stderr.strip() or f"Grok exited with status {capture.exit_code}"
+            )
+        elif resume_error:
+            error = resume_error
+        elif reported_session_id is None:
+            error = "Grok did not report a session ID"
+        elif not parsed["completed"]:
+            error = "Grok did not emit a terminal end event"
+        elif final_message is None:
+            error = "Grok did not emit a final response"
+        else:
+            error = None
+
+        model = parsed["model"] or request.model
+        usage = parsed["usage"]
+        billing = self._billing_provenance(environment)
+        reported_cost = (
+            parsed["reported_cost"]
+            if billing.route in {"metered-api", "provider-credits"}
+            else None
+        )
+        return RunResult(
+            run_id=request.run_id,
+            provider=self.provider,
+            mode=request.mode,
+            task=request.task,
+            model=model,
+            effort=request.effort,
+            session_id=session_id,
+            command=_recorded_command(command),
+            started_at=started_at,
+            finished_at=_now(),
+            duration_seconds=capture.duration_seconds,
+            time_to_first_event_seconds=capture.first_event_seconds,
+            time_to_first_response_seconds=capture.first_response_seconds,
+            exit_code=capture.exit_code,
+            timed_out=capture.timed_out,
+            error=error,
+            final_message=final_message,
+            usage=usage,
+            calculated_cost=estimate_api_cost(model, usage, providers=("xai",)),
+            provider_reported_cost=reported_cost,
+            billing=billing,
+        )
+
+    def _command(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        prompt_path: Path,
+    ) -> list[str]:
+        command = [
+            self.binary,
+            "--cwd",
+            os.fspath(worktree.path),
+            "--output-format",
+            "streaming-json",
+            "--always-approve",
+            "--no-plan",
+            "--no-leader",
+            "--no-auto-update",
+            "--verbatim",
+            "--sandbox",
+            "off",
+            "--prompt-file",
+            os.fspath(prompt_path),
+        ]
+        if request.model:
+            command.extend(["--model", request.model])
+        if request.effort:
+            command.extend(["--reasoning-effort", request.effort])
+        if request.session_id:
+            command.extend(["--resume", request.session_id])
+        return command
+
+    @staticmethod
+    def _is_response(line: str) -> bool:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        return (
+            isinstance(event, dict)
+            and event.get("type") == "text"
+            and isinstance(event.get("data"), str)
+            and bool(event["data"])
+        )
+
+    @staticmethod
+    def _parse(output: str, requested_model: str | None) -> dict[str, object]:
+        session_id = None
+        final_message = None
+        response_parts: list[str] = []
+        error = None
+        completed = False
+        usage = TokenUsage()
+        reported_cost = None
+        model = None
+
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type")
+            if event_type == "text" and isinstance(event.get("data"), str):
+                response_parts.append(event["data"])
+                continue
+            if event_type == "usage":
+                if response_parts:
+                    final_message = "".join(response_parts)
+                    response_parts = []
+                continue
+            if event_type not in {"end", "error"}:
+                continue
+
+            raw_usage = event.get("usage")
+            if isinstance(raw_usage, dict):
+                uncached = GrokAdapter._integer(raw_usage.get("input_tokens"))
+                cached = GrokAdapter._integer(raw_usage.get("cache_read_input_tokens"))
+                created = GrokAdapter._integer(
+                    raw_usage.get("cache_creation_input_tokens")
+                )
+                visible_output = GrokAdapter._integer(raw_usage.get("output_tokens"))
+                reasoning = GrokAdapter._integer(raw_usage.get("reasoning_tokens"))
+                usage = TokenUsage(
+                    input_tokens=uncached + cached + created,
+                    cached_input_tokens=cached,
+                    output_tokens=visible_output,
+                    reasoning_output_tokens=reasoning,
+                )
+            event_session_id = event.get("sessionId")
+            if isinstance(event_session_id, str) and event_session_id:
+                session_id = event_session_id
+            model_usage = event.get("modelUsage")
+            if isinstance(model_usage, dict):
+                if requested_model in model_usage:
+                    model = requested_model
+                elif len(model_usage) == 1:
+                    only_model = next(iter(model_usage))
+                    if isinstance(only_model, str) and only_model:
+                        model = only_model
+            amount = GrokAdapter._number(event.get("total_cost_usd"))
+            if amount is not None:
+                reported_cost = ProviderReportedCost(
+                    amount_usd=round(amount, 8),
+                    currency="USD",
+                    source="Grok headless terminal usage",
+                )
+            if event_type == "end":
+                completed = True
+                stop_reason = event.get("stopReason")
+                if stop_reason != "end_turn":
+                    error = (
+                        f"Grok stopped with reason {stop_reason}"
+                        if isinstance(stop_reason, str) and stop_reason
+                        else "Grok terminal event did not report a stop reason"
+                    )
+            elif isinstance(event.get("message"), str):
+                error = event["message"]
+            else:
+                error = "Grok turn failed"
+
+        if response_parts:
+            final_message = "".join(response_parts)
+        return {
+            "session_id": session_id,
+            "model": model,
+            "final_message": final_message,
+            "usage": usage,
+            "reported_cost": reported_cost,
+            "completed": completed,
+            "error": error,
+        }
+
+    @staticmethod
+    def _billing_provenance(environment: dict[str, str]) -> BillingProvenance:
+        auth_path = Path(environment["GROK_HOME"]) / "auth.json"
+        try:
+            raw_auth = json.loads(auth_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            raw_auth = None
+        modes = (
+            {
+                value.get("auth_mode")
+                for value in raw_auth.values()
+                if isinstance(value, dict) and isinstance(value.get("auth_mode"), str)
+            }
+            if isinstance(raw_auth, dict)
+            else set()
+        )
+        if modes and "api_key" not in modes and modes <= {"oidc", "web_login"}:
+            return BillingProvenance(
+                route="subscription",
+                credential_source="xai-oauth",
+                detected_by="Grok authentication metadata",
+            )
+        if modes == {"api_key"} or (not modes and environment.get("XAI_API_KEY")):
+            return BillingProvenance(
+                route="metered-api",
+                credential_source="xai-api-key",
+                detected_by=(
+                    "Grok authentication metadata"
+                    if modes == {"api_key"}
+                    else "environment"
+                ),
+            )
+        return BillingProvenance(
+            credential_source="external-auth" if modes == {"external"} else None,
+            detected_by="Grok authentication metadata" if modes else None,
+        )
+
+    @staticmethod
+    def _integer(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(value, 0)
+
+    @staticmethod
+    def _number(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return max(float(value), 0.0)
+
+
 class CursorAdapter:
     provider = "cursor"
     modes = frozenset({"agent"})
@@ -2437,6 +2738,7 @@ def _provider_command(
         "cursor",
         "devin",
         "dsh",
+        "grok",
         "hermes",
         "opencode",
     }:
@@ -2700,6 +3002,7 @@ def _guest_environment(
         "AOP_OUTPUT_DIR",
         "CODEX_HOME",
         "DSH_HOME",
+        "GROK_HOME",
         "HERMES_HOME",
         "HERMES_REAL_HOME",
         "AOP_INPUT_MANIFEST",
@@ -2786,6 +3089,7 @@ def _filtered_environment(environment: dict[str, str]) -> dict[str, str]:
         "DEVIN_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
+        "GROK_STORAGE_MODE",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -2888,6 +3192,30 @@ _CODEX_RUNTIME_FILES = {
     "version.json",
 }
 
+_GROK_RUNTIME_NAMES = {
+    ".metadata_version",
+    "auth.json.lock",
+    "bin",
+    "bundled",
+    "cache",
+    "campaigns_state.json",
+    "claude_import_state.json",
+    "crash",
+    "last-copy.txt",
+    "leader.log",
+    "leader.sock",
+    "logs",
+    "marketplace-cache",
+    "memory",
+    "models_cache.json",
+    "plugin-data",
+    "sandbox-events.jsonl",
+    "sessions",
+    "trace-exports",
+    "version.json",
+    "worktrees",
+}
+
 _CURSOR_RUNTIME_DIRECTORIES = {
     "ai-tracking",
     "chats",
@@ -2917,6 +3245,13 @@ def _prepare_codex_environment(environment: dict[str, str]) -> None:
     destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "codex" / "home"
     _prepare_codex_state(source, destination, sealed=_sealed(environment))
     environment["CODEX_HOME"] = os.fspath(destination)
+
+
+def _prepare_grok_environment(environment: dict[str, str]) -> None:
+    source = _grok_source_home(environment)
+    destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "grok" / "home"
+    _prepare_grok_state(source, destination, sealed=_sealed(environment))
+    environment["GROK_HOME"] = os.fspath(destination)
 
 
 def _prepare_dsh_environment(request: RunRequest, environment: dict[str, str]) -> Path:
@@ -3118,6 +3453,44 @@ def _prepare_codex_state(
 
 def _codex_runtime_file(name: str) -> bool:
     return name in _CODEX_RUNTIME_FILES or ".sqlite" in name
+
+
+def _grok_source_home(environment: dict[str, str]) -> Path | None:
+    configured = environment.get("AOP_GROK_SOURCE_HOME")
+    inherited = environment.get("GROK_HOME")
+    source = Path(configured or inherited or Path(environment["HOME"]) / ".grok")
+    source = source.expanduser()
+    if source.is_dir():
+        return source.resolve()
+    if configured or inherited:
+        raise AOPError(f"Grok home does not exist: {source}")
+    return None
+
+
+def _prepare_grok_state(
+    source: Path | None, destination: Path, *, sealed: bool = False
+) -> None:
+    if destination.is_dir():
+        return
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    temporary.mkdir(parents=True, mode=0o700)
+    try:
+        if source:
+            for entry in source.iterdir():
+                if entry.name in _GROK_RUNTIME_NAMES:
+                    continue
+                if sealed and entry.name != "auth.json":
+                    continue
+                target = temporary / entry.name
+                if entry.is_dir():
+                    shutil.copytree(entry, target, symlinks=True)
+                elif entry.is_file():
+                    shutil.copy2(entry, target)
+        _make_tree_user_writable(temporary)
+        os.replace(temporary, destination)
+    except OSError as error:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise AOPError(f"could not prepare isolated Grok state: {error}") from error
 
 
 def _cursor_source_home(environment: dict[str, str]) -> Path:
@@ -3742,6 +4115,8 @@ def adapter_for(agent: str) -> AgentAdapter:
         return DevinAdapter()
     if agent == "dsh":
         return DeepSeekHarnessAdapter()
+    if agent == "grok":
+        return GrokAdapter()
     if agent == "opencode":
         return OpenCodeAdapter()
     if agent == "agy":
@@ -4206,6 +4581,25 @@ def _instruction_sources(
             )
     elif request.provider == "agy":
         candidates.append(_agy_source_dir(environment) / "config")
+    elif request.provider == "grok":
+        source = _grok_source_home(environment)
+        if source:
+            candidates.extend(
+                source / name
+                for name in (
+                    "AGENTS.md",
+                    "agents",
+                    "commands",
+                    "config.toml",
+                    "hooks",
+                    "personas",
+                    "plugins",
+                    "rules",
+                    "settings.json",
+                    "skills",
+                    "workflows",
+                )
+            )
     elif request.provider == "hermes":
         home = _hermes_source_home(environment)
         candidates.extend(home / name for name in sorted(_HERMES_SEED_DIRECTORIES))

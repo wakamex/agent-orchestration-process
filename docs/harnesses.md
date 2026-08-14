@@ -53,6 +53,7 @@ never the shared `.aop/cache` used by non-sealed tasks.
 | Cursor | `cursor` | Project and chat state start private |
 | Devin | `devin` | The installed CLI bundle is not copied into task state |
 | OpenCode | `opencode` | Plugin dependencies are copied into private state |
+| Grok Build | `grok/home` | Global sessions, logs, caches, and memory are never copied |
 | Hermes | `hermes/home` | Rotating OAuth credentials are coordinated across tasks |
 | DeepSeek Harness | `dsh/home` | AOP supplies a structured, resumable runner as a final dsh patch layer |
 
@@ -100,6 +101,25 @@ model state, refreshed tokens, generated metadata, and downloads private. Existi
 dependencies are copied into private state. `sealed` omits user configuration and instructions.
 `host` uses native global state. Set
 `AOP_OPENCODE_CONFIG_DIR` or `AOP_OPENCODE_DATA_DIR` for nonstandard source locations.
+
+### Grok Build
+
+AOP seeds Grok authentication, configuration, user rules, skills, agents, commands, hooks,
+personas, plugins, and workflows into task-private `GROK_HOME` state for `edit` and `review`.
+Existing sessions, logs, caches, cross-session memory, plugin data, model caches, crash reports,
+trace exports, worktrees, and installed binaries are not copied. `sealed` retains only
+`auth.json`. Set `AOP_GROK_SOURCE_HOME` when the authenticated source is not
+`${GROK_HOME:-~/.grok}`.
+
+The adapter invokes Grok's native single-turn `streaming-json` interface with always-approve mode,
+no plan mode, no shared leader, no auto-update, verbatim prompts, and its nested sandbox disabled inside AOP's outer
+profile boundary. It records the terminal session ID, response, model, disjoint prompt cache
+buckets, the reasoning-token subset, timing, cost evidence, and exact resume identity. Grok defaults to `grok-build` and
+accepts native reasoning levels from `none` through `max`.
+
+`GROK_STORAGE_MODE` is part of the filtered child environment only when the user set it. AOP passes
+`local` or `writeback` through unchanged and does not create a default, so an unset value retains
+Grok's native configuration and remote-setting behavior.
 
 ### Hermes
 
@@ -167,6 +187,7 @@ AOP_CURSOR_BIN
 AOP_DEVIN_BIN
 AOP_OPENCODE_BIN
 AOP_AGY_BIN
+AOP_GROK_BIN
 AOP_HERMES_BIN
 AOP_DSH_BIN
 AOP_BWRAP_BIN
@@ -183,7 +204,7 @@ The default suite tests the shared mount contract without contacting providers. 
 checks whether real authenticated harnesses can read a declared path:
 
 ```sh
-AOP_LIVE_INPUT_AGENTS=agy,codex,devin,hermes uv --no-config run --locked pytest tests/test_live_read_paths.py
+AOP_LIVE_INPUT_AGENTS=agy,codex,devin,grok,hermes uv --no-config run --locked pytest tests/test_live_read_paths.py
 ```
 
 Use `all` to select every adapter. `AOP_LIVE_<AGENT>_MODEL` and

@@ -1236,3 +1236,148 @@ print(json.dumps({{
     )
     executable.chmod(0o755)
     return executable
+
+
+@pytest.fixture
+def fake_grok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    source_home = tmp_path / "grok-home"
+    source_home.mkdir()
+    source_home.joinpath("auth.json").write_text(
+        json.dumps(
+            {
+                "grok.com": {
+                    "key": "test-token",
+                    "auth_mode": "oidc",
+                    "create_time": "2026-01-01T00:00:00Z",
+                    "user_id": "test-user",
+                }
+            }
+        )
+    )
+    source_home.joinpath("config.toml").write_text('[agent]\nname = "grok"\n')
+    source_home.joinpath("rules").mkdir()
+    source_home.joinpath("rules", "default.rules").write_text("test rule\n")
+    source_home.joinpath("skills", "test-skill").mkdir(parents=True)
+    source_home.joinpath("skills", "test-skill", "SKILL.md").write_text("test skill\n")
+    source_home.joinpath("sessions").mkdir()
+    source_home.joinpath("sessions", "global-session").write_text("global\n")
+    source_home.joinpath("logs").mkdir()
+    source_home.joinpath("logs", "unified.jsonl").write_text("global log\n")
+    monkeypatch.setenv("AOP_GROK_SOURCE_HOME", os.fspath(source_home))
+
+    executable = tmp_path / "grok"
+    executable.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+if args == ["models"]:
+    print("Available models:")
+    print("  * grok-build (default)")
+    print("  * grok-4.5")
+    raise SystemExit(0)
+
+required = {{
+    "--cwd", "--output-format", "--always-approve", "--no-plan",
+    "--no-leader", "--no-auto-update", "--verbatim", "--sandbox", "--prompt-file",
+    "--model",
+}}
+if not required.issubset(args):
+    raise RuntimeError(f"unexpected Grok invocation: {{args}}")
+if args[args.index("--output-format") + 1] != "streaming-json":
+    raise RuntimeError("Grok output format is not streaming-json")
+if args[args.index("--sandbox") + 1] != "off":
+    raise RuntimeError("Grok nested sandbox was not disabled")
+
+prompt = pathlib.Path(args[args.index("--prompt-file") + 1]).read_text()
+{SEALED_PROVIDER_PROBE}
+grok_home = pathlib.Path(os.environ["GROK_HOME"])
+if not grok_home.joinpath("auth.json").is_file():
+    raise RuntimeError("missing private Grok authentication")
+if grok_home.joinpath("sessions", "global-session").exists():
+    raise RuntimeError("global Grok sessions were copied")
+if grok_home.joinpath("logs", "unified.jsonl").exists():
+    raise RuntimeError("global Grok logs were copied")
+if prompt == "CHECK_GROK_STORAGE" and os.environ.get("GROK_STORAGE_MODE") != "local":
+    raise RuntimeError("GROK_STORAGE_MODE was not inherited")
+if prompt == "CHECK_GROK_NO_STORAGE" and "GROK_STORAGE_MODE" in os.environ:
+    raise RuntimeError("unset GROK_STORAGE_MODE was synthesized")
+
+model = args[args.index("--model") + 1]
+session_id = {SESSION_ID!r}
+state_dir = grok_home / "sessions" / "fake-project"
+state_dir.mkdir(parents=True, exist_ok=True)
+state_path = state_dir / "session.json"
+if "--resume" in args:
+    session_id = args[args.index("--resume") + 1]
+    state = json.loads(state_path.read_text())
+    if state["session_id"] != session_id:
+        raise RuntimeError("Grok session is absent from private state")
+else:
+    state_path.write_text(json.dumps({{"session_id": session_id}}))
+if prompt == "GROK_DIFFERENT_SESSION":
+    session_id = "11111111-2222-4333-8444-555555555555"
+
+if prompt.startswith("WRITE_ARTIFACT"):
+    pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("report.md").write_text(
+        "# Grok artifact\\n"
+    )
+
+usage = {{
+    "input_tokens": 40,
+    "cache_read_input_tokens": 10,
+    "cache_creation_input_tokens": 5,
+    "output_tokens": 20,
+    "reasoning_tokens": 7,
+    "total_tokens": 75,
+}}
+terminal = {{
+    "sessionId": session_id,
+    "requestId": "grok-request",
+    "usage": usage,
+    "num_turns": 2,
+    "modelUsage": {{
+        model: {{
+            "inputTokens": 40,
+            "cacheReadInputTokens": 10,
+            "cacheCreationInputTokens": 5,
+            "outputTokens": 20,
+            "modelCalls": 2,
+            "costUSD": 0.00045678,
+        }}
+    }},
+    "total_cost_usd": 0.00045678,
+}}
+if prompt == "GROK_ERROR":
+    terminal.update({{"type": "error", "message": "synthetic Grok failure"}})
+    print(json.dumps(terminal), flush=True)
+    raise SystemExit(1)
+
+print(json.dumps({{"type": "text", "data": "working"}}), flush=True)
+print(json.dumps({{
+    "type": "usage",
+    "messageId": "intermediate",
+    "stopReason": "tool_use",
+}}), flush=True)
+print(json.dumps({{"type": "text", "data": f"answer:{{prompt}}"}}), flush=True)
+print(json.dumps({{
+    "type": "usage",
+    "messageId": "final",
+    "stopReason": "end_turn",
+}}), flush=True)
+if prompt == "GROK_INCOMPLETE":
+    raise SystemExit(0)
+terminal.update({{
+    "type": "end",
+    "stopReason": (
+        "max_turn_requests" if prompt == "GROK_MAX_TURNS" else "end_turn"
+    ),
+}})
+print(json.dumps(terminal), flush=True)
+"""
+    )
+    executable.chmod(0o755)
+    return executable

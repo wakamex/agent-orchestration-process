@@ -38,8 +38,8 @@ each project.
 ## Reference implementation
 
 This repository includes a small Python CLI for running Codex, Claude Code, Cursor Agent,
-Devin CLI, OpenCode, Antigravity (`agy`), Hermes, and DeepSeek Harness (`dsh`) concurrently in
-isolated Git worktrees. Each
+Devin CLI, OpenCode, Antigravity (`agy`), Grok Build, Hermes, and DeepSeek Harness (`dsh`)
+concurrently in isolated Git worktrees. Each
 adapter records a normalized result and resumes the exact provider session associated with an
 earlier run.
 
@@ -116,6 +116,8 @@ aop run task-opencode --agent opencode --effort high \
   --prompt "Fix the parser and run its tests"
 aop run task-c --agent agy --model gemini-3.5-flash --effort low \
   --prompt "Add adversarial parser tests"
+aop run task-grok --agent grok --model grok-build --effort high \
+  --prompt "Implement the parser and run its tests"
 aop run task-d --agent hermes --model deepseek/deepseek-v4-flash-0731 --effort high \
   --prompt "Investigate and fix the failing benchmark"
 aop run task-deepseek --agent dsh --model deepseek-v4-pro --effort max \
@@ -307,6 +309,18 @@ The agy default is `gemini-3.5-flash` at `medium` effort.
 For example, `--model gemini-3.5-flash --effort low` is passed directly to agy. An exact model
 printed by `agy models` can instead be passed without `--effort`.
 
+Grok defaults to `grok-build` and accepts the native reasoning levels `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, and `max`. AOP runs `grok` in its native headless
+`streaming-json` mode, disables its nested sandbox and leader process inside AOP's outer boundary,
+passes the task prompt verbatim, and resumes the exact reported session ID. Grok's configuration and authentication are seeded into
+task-private `GROK_HOME` state without copying global sessions, logs, caches, memory, worktrees, or
+installed binaries. Set `AOP_GROK_SOURCE_HOME` for a nonstandard source profile.
+
+`GROK_STORAGE_MODE` remains optional. When users set it, AOP's filtered environment passes the
+value through unchanged so Grok applies its native `local` or `writeback` behavior. When it is
+unset, AOP does not synthesize a value or override Grok's normal configuration and remote-setting
+precedence.
+
 Cursor Agent uses `composer-2.5` by default. Pass any model ID printed by `agent models` through
 `--model`. Cursor encodes reasoning effort and fast variants in its model IDs, so its adapter rejects
 a separate `--effort`. AOP disables Cursor's native sandbox and permission prompts inside the outer
@@ -356,7 +370,7 @@ aop models --agent hermes --json
 aop models --refresh
 ```
 
-Codex, Cursor, Devin, Agy, and OpenCode results are queried from their non-interactive model
+Codex, Cursor, Devin, Agy, Grok, and OpenCode results are queried from their non-interactive model
 interfaces. Devin prices come from its authenticated account inventory, including zero-dollar
 models and provider-reported per-million-token rates.
 DeepSeek Harness does not currently expose model discovery on its headless command, so AOP reports
@@ -416,7 +430,9 @@ currently supplies timing and token usage from its structured result stream. Dev
 supplies the resolved model variant and token usage for every inference in the current turn. Cursor,
 OpenCode, and Agy each report provider duration separately from AOP's wall-clock duration. OpenCode
 also reports per-step billed USD cost; AOP sums it for the invocation and records it as a
-`provider_reported_cost`. Cursor, Devin, and Agy do not currently provide enough information for
+`provider_reported_cost`. Grok's complete terminal usage can also provide a reported cost, which
+AOP retains for API-key billing and keeps separate from the catalog calculation. Cursor, Devin, and
+Agy do not currently provide enough information for
 a calculated cost, so that field remains `n/a`.
 
 Run independent tasks concurrently from a TOML manifest:

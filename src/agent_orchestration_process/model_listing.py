@@ -19,7 +19,17 @@ from .model_catalog import ModelCatalog
 from .worktrees import AOPError
 
 
-AGENTS = ("codex", "claude", "cursor", "devin", "opencode", "agy", "hermes", "dsh")
+AGENTS = (
+    "codex",
+    "claude",
+    "cursor",
+    "devin",
+    "opencode",
+    "agy",
+    "grok",
+    "hermes",
+    "dsh",
+)
 NOUS_MODELS_URL = "https://inference-api.nousresearch.com/v1/models"
 
 
@@ -62,6 +72,8 @@ def list_models(agent: str, catalog: ModelCatalog) -> list[AvailableModel]:
         binary = _binary("hermes", "AOP_HERMES_BIN", "hermes")
         provider = _run([binary, "config", "get", "model.provider"]).strip()
         return _hermes_models(catalog, provider)
+    if agent == "grok":
+        return _grok_models(catalog)
     if agent == "dsh":
         _binary("dsh", "AOP_DSH_BIN", "dsh")
         return [
@@ -243,6 +255,32 @@ def _opencode_models(catalog: ModelCatalog) -> list[AvailableModel]:
         )
     if not records:
         raise AOPError("OpenCode did not return any models")
+    return records
+
+
+def _grok_models(catalog: ModelCatalog) -> list[AvailableModel]:
+    binary = _binary("grok", "AOP_GROK_BIN", "grok")
+    output = _run([binary, "models"])
+    records = []
+    for line in output.splitlines():
+        match = re.fullmatch(r"\s*\*\s+(.+?)(?:\s+\(default\))?\s*", line)
+        if match is None:
+            continue
+        model = match.group(1)
+        records.append(
+            _record(
+                "grok",
+                model,
+                _name(catalog.model("xai", model), model),
+                "account",
+                "api-equivalent",
+                catalog,
+                "xai",
+                model,
+            )
+        )
+    if not records:
+        raise AOPError("Grok did not return any models")
     return records
 
 

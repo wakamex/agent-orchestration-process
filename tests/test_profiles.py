@@ -270,6 +270,7 @@ def test_dry_run_does_not_create_a_task_worktree(
         ("devin", "fake_devin"),
         ("opencode", "fake_opencode"),
         ("agy", "fake_agy"),
+        ("grok", "fake_grok"),
         ("hermes", "fake_hermes"),
         ("dsh", "fake_dsh"),
     ],

@@ -16,12 +16,20 @@ from agent_orchestration_process.models import RunResult
 from agent_orchestration_process.runner import (
     AgentRunner,
     CodexAdapter,
+    _filtered_environment,
     _provider_runtime,
 )
 from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
+
+
+def test_filtered_environment_allows_optional_grok_storage_mode() -> None:
+    assert _filtered_environment(
+        {"GROK_STORAGE_MODE": "local", "AOP_INTERNAL_SECRET": "hidden"}
+    ) == {"GROK_STORAGE_MODE": "local"}
+    assert _filtered_environment({"AOP_INTERNAL_SECRET": "hidden"}) == {}
 
 
 def test_dsh_runtime_preserves_a_user_npm_installation(

@@ -16,6 +16,7 @@ from agent_orchestration_process.runner import (
     CursorAdapter,
     DevinAdapter,
     DeepSeekHarnessAdapter,
+    GrokAdapter,
     HermesAdapter,
     _HermesSession,
     OpenCodeAdapter,
@@ -106,6 +107,152 @@ def test_dsh_maps_none_effort_and_normalizes_failures(
 
     with pytest.raises(AOPError, match="dsh effort must be one of"):
         runner.run(task="dsh-bad-effort", prompt="test", effort="ultra")
+
+
+def test_grok_run_and_exact_resume_use_native_headless_protocol(
+    repository: Path,
+    fake_grok: Path,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, GrokAdapter(os.fspath(fake_grok)))
+
+    first = runner.run(
+        task="grok-task",
+        prompt="first",
+        model="grok-4.5",
+        effort="high",
+        timeout_seconds=5,
+    )
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded, first.error
+    assert first.provider == "grok"
+    assert first.model == "grok-4.5"
+    assert first.effort == "high"
+    assert first.final_message == "answer:first"
+    assert first.usage.input_tokens == 55
+    assert first.usage.cached_input_tokens == 10
+    assert first.usage.output_tokens == 20
+    assert first.usage.reasoning_output_tokens == 7
+    assert first.calculated_cost is not None
+    assert first.calculated_cost.amount_usd == 0.000213
+    assert first.provider_reported_cost is None
+    assert first.billing.route == "subscription"
+    assert first.billing.credential_source == "xai-oauth"
+    assert first.provider_duration_seconds is None
+    assert first.command[0] == "bwrap"
+    assert ["--output-format", "streaming-json"] == first.command[
+        first.command.index("--output-format") : first.command.index("--output-format")
+        + 2
+    ]
+    for flag in (
+        "--always-approve",
+        "--no-plan",
+        "--no-leader",
+        "--no-auto-update",
+        "--verbatim",
+    ):
+        assert flag in first.command
+    assert ["--sandbox", "off"] == first.command[
+        first.command.index("--sandbox") : first.command.index("--sandbox") + 2
+    ]
+
+    private_home = manager.state_dir / "provider-state" / "grok-task" / "grok" / "home"
+    assert private_home.joinpath("auth.json").is_file()
+    assert private_home.joinpath("config.toml").is_file()
+    assert private_home.joinpath("rules", "default.rules").is_file()
+    assert private_home.joinpath("skills", "test-skill", "SKILL.md").is_file()
+    assert not private_home.joinpath("sessions", "global-session").exists()
+    assert not private_home.joinpath("logs").exists()
+
+    assert resumed.succeeded, resumed.error
+    assert resumed.session_id == first.session_id
+    assert resumed.model == first.model
+    assert resumed.effort == first.effort
+    assert resumed.final_message == "answer:second"
+    assert ["--resume", first.session_id] == resumed.command[
+        resumed.command.index("--resume") : resumed.command.index("--resume") + 2
+    ]
+
+
+def test_grok_normalizes_failures_resume_identity_and_effort(
+    repository: Path,
+    fake_grok: Path,
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository),
+        GrokAdapter(os.fspath(fake_grok)),
+    )
+
+    failed = runner.run(task="grok-failure", prompt="GROK_ERROR")
+    incomplete = runner.run(task="grok-incomplete", prompt="GROK_INCOMPLETE")
+    max_turns = runner.run(task="grok-max-turns", prompt="GROK_MAX_TURNS")
+    first = runner.run(task="grok-resume", prompt="first")
+    mismatched = runner.resume(
+        run_id=first.run_id,
+        prompt="GROK_DIFFERENT_SESSION",
+    )
+
+    assert failed.error == "synthetic Grok failure"
+    assert failed.exit_code == 1
+    assert not incomplete.succeeded
+    assert incomplete.error == "Grok did not report a session ID"
+    assert not max_turns.succeeded
+    assert max_turns.error == "Grok stopped with reason max_turn_requests"
+    assert not mismatched.succeeded
+    assert mismatched.session_id is None
+    assert "instead of the requested session" in mismatched.error
+    with pytest.raises(AOPError, match="Grok effort must be one of"):
+        runner.run(task="grok-bad-effort", prompt="test", effort="ultra")
+
+
+def test_grok_storage_mode_is_optional_and_inherited_when_set(
+    repository: Path,
+    fake_grok: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+
+    monkeypatch.setenv("GROK_STORAGE_MODE", "local")
+    inherited = AgentRunner(manager, GrokAdapter(os.fspath(fake_grok))).run(
+        task="grok-storage", prompt="CHECK_GROK_STORAGE"
+    )
+    assert inherited.succeeded, inherited.error
+    index = inherited.command.index("GROK_STORAGE_MODE")
+    assert inherited.command[index - 1 : index + 2] == [
+        "--setenv",
+        "GROK_STORAGE_MODE",
+        "local",
+    ]
+
+    monkeypatch.delenv("GROK_STORAGE_MODE")
+    absent = AgentRunner(manager, GrokAdapter(os.fspath(fake_grok))).run(
+        task="grok-no-storage", prompt="CHECK_GROK_NO_STORAGE"
+    )
+    assert absent.succeeded, absent.error
+    assert "GROK_STORAGE_MODE" not in absent.command
+
+
+def test_grok_keeps_reported_cost_for_api_key_billing(
+    repository: Path,
+    fake_grok: Path,
+) -> None:
+    source_home = Path(os.environ["AOP_GROK_SOURCE_HOME"])
+    source_home.joinpath("auth.json").write_text(
+        json.dumps({"xai-api": {"auth_mode": "api_key", "key": "secret"}})
+    )
+
+    result = AgentRunner(
+        WorktreeManager.discover(repository),
+        GrokAdapter(os.fspath(fake_grok)),
+    ).run(task="grok-api-key", prompt="test", model="grok-4.5")
+
+    assert result.succeeded, result.error
+    assert result.billing.route == "metered-api"
+    assert result.billing.credential_source == "xai-api-key"
+    assert result.provider_reported_cost is not None
+    assert result.provider_reported_cost.amount_usd == 0.00045678
+    assert "secret" not in json.dumps(result.to_dict())
 
 
 def test_dsh_projects_the_selected_provider_and_its_exact_credential_ref(

@@ -107,6 +107,8 @@ def test_native_model_parsers_and_pricing(
             return "Fetching available models...\ngemini-3.5-flash-low\tGemini Flash\n"
         if command[0] == "opencode":
             return "opencode/deepseek-v4-flash\n"
+        if command[0] == "grok":
+            return "Available models:\n  * grok-build (default)\n  * grok-4.5\n"
         if command[0] == "devin":
             return json.dumps(
                 {
@@ -141,6 +143,7 @@ def test_native_model_parsers_and_pricing(
     agy = model_listing.list_models("agy", catalog)[0]
     devin = model_listing.list_models("devin", catalog)
     opencode = model_listing.list_models("opencode", catalog)[0]
+    grok = model_listing.list_models("grok", catalog)
     dsh = model_listing.list_models("dsh", catalog)
 
     assert codex.input_per_million_usd == 5
@@ -154,6 +157,10 @@ def test_native_model_parsers_and_pricing(
     assert devin[1].output_per_million_usd == 12.5
     assert devin[1].pricing_source == "Devin CLI account model inventory"
     assert opencode.availability == "account"
+    assert [item.model for item in grok] == ["grok-build", "grok-4.5"]
+    assert grok[0].price_scope == "unknown"
+    assert grok[1].input_per_million_usd == 2
+    assert grok[1].output_per_million_usd == 6
     assert [item.model for item in dsh] == [
         "deepseek-v4-flash",
         "deepseek-v4-pro",

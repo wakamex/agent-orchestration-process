@@ -194,6 +194,7 @@ def resolve_policy(
                     "AOP_SCRATCH_DIR",
                     "CODEX_HOME",
                     "HERMES_HOME",
+                    "HERMES_REAL_HOME",
                     "XDG_CACHE_HOME",
                     "XDG_CONFIG_HOME",
                     "XDG_DATA_HOME",

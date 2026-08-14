@@ -19,6 +19,10 @@ if prompt.startswith("SEALED_PROVIDER_PROBE"):
     leaked = forbidden_environment.intersection(os.environ)
     if leaked:
         raise RuntimeError(f"sealed environment leaked: {sorted(leaked)}")
+    if "HERMES_HOME" in os.environ and os.environ.get(
+        "HERMES_REAL_HOME"
+    ) != os.environ.get("HERMES_HOME"):
+        raise RuntimeError("sealed Hermes real home is not its task-private guest home")
     pid_one_environment = pathlib.Path("/proc/1/environ").read_bytes().split(b"\0")
     pid_one_names = {
         entry.partition(b"=")[0].decode(errors="replace")

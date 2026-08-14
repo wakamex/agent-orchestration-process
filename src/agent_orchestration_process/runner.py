@@ -2444,6 +2444,7 @@ def _provider_command(
         isolated_home = Path(environment["HERMES_HOME"])
         if isolated_home != provider_state / "hermes" / "home":
             raise AOPError("Hermes runtime home is outside its task-private state")
+        environment["HERMES_REAL_HOME"] = os.fspath(isolated_home)
     if request.provider == "opencode":
         source_config = _opencode_source_config(environment)
         source_data = _opencode_source_data(environment)
@@ -2687,6 +2688,7 @@ def _guest_environment(
         "CODEX_HOME",
         "DSH_HOME",
         "HERMES_HOME",
+        "HERMES_REAL_HOME",
         "AOP_INPUT_MANIFEST",
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",

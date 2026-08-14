@@ -3698,7 +3698,10 @@ def _hermes_runtime_environment(
     provider_state = Path(environment["AOP_PROVIDER_STATE_DIR"])
     task_home = provider_state / "hermes" / "home"
     _prepare_hermes_home(source_home, task_home, sealed=_sealed(environment))
-    state_dir = provider_state.parent.parent
+    configured_state = environment.get("AOP_HERMES_SHARED_STATE_DIR")
+    state_dir = (
+        Path(configured_state) if configured_state else provider_state.parent.parent
+    )
     lock_path = state_dir / "locks" / "hermes-credentials.lock"
     runtime_environment = environment.copy()
     runtime_environment["HERMES_HOME"] = os.fspath(task_home)
@@ -4023,6 +4026,9 @@ class AgentRunner:
             }
         )
         if request.provider == "hermes":
+            environment["AOP_HERMES_SHARED_STATE_DIR"] = os.fspath(
+                self.manager.state_dir
+            )
             environment.pop("HERMES_NO_TOOLS", None)
             if request.mode == "participant":
                 environment.pop("HERMES_KANBAN_TASK", None)

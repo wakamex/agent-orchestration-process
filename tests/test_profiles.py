@@ -78,6 +78,9 @@ def test_sealed_run_needs_no_git_and_exposes_only_snapshotted_input(
     assert request["effective_policy"]["instructions"]["inherited_local"] == "none"
     assert request["effective_policy"]["instruction_sources"] == []
     assert os.fspath(source) not in request["prompt"]
+    controller_paths = json.dumps(request["effective_policy"]["controller"])
+    assert os.fspath(manager.state_dir) not in controller_paths
+    assert os.fspath(manager.sealed_runtime_dir) in controller_paths
 
     snapshot = (
         Path(request["effective_policy"]["controller"]["input_snapshot"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -64,6 +65,13 @@ class WorktreeManager:
         self.worktrees_dir = self.state_dir / "worktrees"
         self.cache_dir = self.state_dir / "cache"
         self.lock_file = self.state_dir / "worktrees.lock"
+
+    @property
+    def sealed_runtime_dir(self) -> Path:
+        identity = hashlib.sha256(os.fsencode(self.root)).hexdigest()[:24]
+        user_runtime = Path("/run/user") / str(os.getuid())
+        base = user_runtime if user_runtime.is_dir() else Path("/tmp")
+        return base / f"aop-sealed-{os.getuid()}" / identity
 
     @classmethod
     def discover(cls, start: Path | None = None) -> WorktreeManager:

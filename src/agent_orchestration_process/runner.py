@@ -3817,7 +3817,7 @@ class AgentRunner:
             if not isinstance(workspace_path, str):
                 raise AOPError("sealed run is missing its controller workspace path")
             path = Path(workspace_path).resolve()
-            sealed_root = (self.manager.state_dir / "sealed").resolve()
+            sealed_root = (self.manager.sealed_runtime_dir / "sealed").resolve()
             if not path.is_relative_to(sealed_root) or not path.is_dir():
                 raise AOPError("sealed run workspace is missing or outside AOP state")
             worktree = Worktree(task=parent_request.run_id, path=path, head="")
@@ -3830,7 +3830,7 @@ class AgentRunner:
             if not isinstance(snapshot_root, str):
                 raise AOPError("sealed run is missing its controller input snapshot")
             resolved_snapshot = Path(snapshot_root).resolve()
-            snapshots_root = (self.manager.state_dir / "snapshots").resolve()
+            snapshots_root = (self.manager.sealed_runtime_dir / "snapshots").resolve()
             if (
                 not resolved_snapshot.is_relative_to(snapshots_root)
                 or not resolved_snapshot.is_dir()
@@ -3917,16 +3917,24 @@ class AgentRunner:
             parent = self.store.load_request(request.parent_run_id)
             parent_controller = parent.effective_policy.get("controller", {})
         state_key = request.run_id if request.profile == "sealed" else request.task
+        runtime_dir = (
+            self.manager.sealed_runtime_dir
+            if request.profile == "sealed"
+            else self.manager.state_dir
+        )
+        runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        runtime_dir.parent.chmod(0o700)
+        runtime_dir.chmod(0o700)
         recorded_scratch = parent_controller.get("scratch")
         scratch_dir = (
             Path(recorded_scratch)
             if isinstance(recorded_scratch, str)
-            else self.manager.state_dir / "scratch" / state_key
+            else runtime_dir / "scratch" / state_key
         )
         scratch_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         scratch_dir.parent.chmod(0o700)
         scratch_dir.chmod(0o700)
-        input_dir = self.manager.state_dir / "snapshots" / request.run_id
+        input_dir = runtime_dir / "snapshots" / request.run_id
         input_dir.mkdir(parents=True, exist_ok=False)
         input_dir.parent.chmod(0o700)
         input_dir.chmod(0o700)
@@ -3938,7 +3946,7 @@ class AgentRunner:
                 raise AOPError("sealed run is missing its controller state path")
             provider_state = Path(recorded_state)
         else:
-            provider_state = self.manager.state_dir / "provider-state" / state_key
+            provider_state = runtime_dir / "provider-state" / state_key
         provider_state.mkdir(parents=True, exist_ok=True, mode=0o700)
         provider_state.chmod(0o700)
         (provider_state / "home").mkdir(exist_ok=True, mode=0o700)
@@ -3947,7 +3955,7 @@ class AgentRunner:
             cache_dir = (
                 Path(recorded_cache)
                 if isinstance(recorded_cache, str)
-                else self.manager.state_dir / "sealed-cache" / state_key
+                else runtime_dir / "sealed-cache" / state_key
             )
             cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             cache_dir.parent.chmod(0o700)
@@ -4115,9 +4123,10 @@ class AgentRunner:
         return self.manager.create(task, base)
 
     def _create_sealed_workspace(self, run_id: str) -> Worktree:
-        path = self.manager.state_dir / "sealed" / run_id / "workspace"
+        path = self.manager.sealed_runtime_dir / "sealed" / run_id / "workspace"
         path.mkdir(parents=True, mode=0o700)
-        (self.manager.state_dir / "sealed").chmod(0o700)
+        self.manager.sealed_runtime_dir.chmod(0o700)
+        (self.manager.sealed_runtime_dir / "sealed").chmod(0o700)
         path.parent.chmod(0o700)
         return Worktree(task=run_id, path=path, head="")
 

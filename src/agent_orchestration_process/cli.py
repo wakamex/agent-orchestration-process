@@ -480,26 +480,26 @@ def _cleanup_sealed(manager: WorktreeManager, request: RunRequest) -> None:
         controller_path = workspace.get("controller_path")
         if isinstance(controller_path, str):
             sealed_run_dir = Path(controller_path).parent
-            sealed_root = (manager.state_dir / "sealed").resolve()
+            sealed_root = (manager.sealed_runtime_dir / "sealed").resolve()
             resolved = sealed_run_dir.resolve()
             if resolved.is_relative_to(sealed_root) and resolved.exists():
                 shutil.rmtree(resolved)
         provider_state = controller.get("provider_state")
         if isinstance(provider_state, str):
             state_path = Path(provider_state).resolve()
-            state_root = (manager.state_dir / "provider-state").resolve()
+            state_root = (manager.sealed_runtime_dir / "provider-state").resolve()
             if state_path.is_relative_to(state_root) and state_path.exists():
                 shutil.rmtree(state_path)
         scratch = controller.get("scratch")
         if isinstance(scratch, str):
             scratch_path = Path(scratch).resolve()
-            scratch_root = (manager.state_dir / "scratch").resolve()
+            scratch_root = (manager.sealed_runtime_dir / "scratch").resolve()
             if scratch_path.is_relative_to(scratch_root) and scratch_path.exists():
                 shutil.rmtree(scratch_path)
         cache = controller.get("cache")
         if isinstance(cache, str):
             cache_path = Path(cache).resolve()
-            cache_root = (manager.state_dir / "sealed-cache").resolve()
+            cache_root = (manager.sealed_runtime_dir / "sealed-cache").resolve()
             if cache_path.is_relative_to(cache_root) and cache_path.exists():
                 shutil.rmtree(cache_path)
 

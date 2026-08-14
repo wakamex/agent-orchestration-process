@@ -41,6 +41,8 @@ if prompt.startswith("SEALED_PROVIDER_PROBE"):
         raise RuntimeError("sealed PID 1 command exposed a controller path")
     if b"--ro-bind" in pid_one_command or b"--bind" in pid_one_command:
         raise RuntimeError("sealed PID 1 command exposed sandbox mount arguments")
+    if b"/.aop/" in pathlib.Path("/proc/self/mountinfo").read_bytes():
+        raise RuntimeError("sealed mount metadata exposed controller state")
     workspace = pathlib.Path("/workspace")
     if pathlib.Path.cwd() != workspace or any(workspace.iterdir()):
         raise RuntimeError("sealed workspace is not empty and neutral")

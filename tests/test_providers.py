@@ -187,7 +187,7 @@ def test_sealed_dsh_projects_only_its_managed_credential(
 
     assert result.succeeded
     private_credentials = (
-        manager.state_dir
+        manager.sealed_runtime_dir
         / "provider-state"
         / result.run_id
         / "dsh"

@@ -32,8 +32,11 @@ if prompt.startswith("SEALED_PROVIDER_PROBE"):
         )
     if b"/code/" in b"\0".join(pid_one_environment):
         raise RuntimeError("sealed PID 1 environment exposed a controller path")
-    if b"/code/" in pathlib.Path("/proc/1/cmdline").read_bytes():
+    pid_one_command = pathlib.Path("/proc/1/cmdline").read_bytes()
+    if b"/code/" in pid_one_command:
         raise RuntimeError("sealed PID 1 command exposed a controller path")
+    if b"--ro-bind" in pid_one_command or b"--bind" in pid_one_command:
+        raise RuntimeError("sealed PID 1 command exposed sandbox mount arguments")
     workspace = pathlib.Path("/workspace")
     if pathlib.Path.cwd() != workspace or any(workspace.iterdir()):
         raise RuntimeError("sealed workspace is not empty and neutral")

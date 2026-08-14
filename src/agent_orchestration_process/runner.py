@@ -2500,6 +2500,7 @@ def _isolated_root_command(bwrap: str) -> list[str]:
         "--cap-drop",
         "ALL",
         "--unshare-pid",
+        "--as-pid-1",
         "--unshare-ipc",
         "--unshare-uts",
         "--proc",

@@ -216,7 +216,7 @@ class CodexAdapter:
             process = subprocess.Popen(
                 command,
                 cwd=worktree.path,
-                env=environment,
+                env=_launch_environment(command, environment),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -493,7 +493,7 @@ def _capture_process(
         process = subprocess.Popen(
             command,
             cwd=cwd,
-            env=environment,
+            env=_launch_environment(command, environment),
             stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -573,6 +573,20 @@ def _capture_process(
         first_event_seconds=_rounded(first_event_seconds),
         first_response_seconds=_rounded(first_response_seconds),
     )
+
+
+def _launch_environment(
+    command: list[str], environment: dict[str, str]
+) -> dict[str, str]:
+    if "--clearenv" not in command or "--unshare-pid" not in command:
+        return environment
+    selected = {
+        key: environment[key]
+        for key in ("LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ")
+        if key in environment
+    }
+    selected["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+    return selected
 
 
 class ClaudeAdapter:

@@ -19,6 +19,21 @@ if prompt.startswith("SEALED_PROVIDER_PROBE"):
     leaked = forbidden_environment.intersection(os.environ)
     if leaked:
         raise RuntimeError(f"sealed environment leaked: {sorted(leaked)}")
+    pid_one_environment = pathlib.Path("/proc/1/environ").read_bytes().split(b"\0")
+    pid_one_names = {
+        entry.partition(b"=")[0].decode(errors="replace")
+        for entry in pid_one_environment
+        if entry
+    }
+    pid_one_leaked = forbidden_environment.intersection(pid_one_names)
+    if pid_one_leaked:
+        raise RuntimeError(
+            f"sealed PID 1 environment leaked: {sorted(pid_one_leaked)}"
+        )
+    if b"/code/" in b"\0".join(pid_one_environment):
+        raise RuntimeError("sealed PID 1 environment exposed a controller path")
+    if b"/code/" in pathlib.Path("/proc/1/cmdline").read_bytes():
+        raise RuntimeError("sealed PID 1 command exposed a controller path")
     workspace = pathlib.Path("/workspace")
     if pathlib.Path.cwd() != workspace or any(workspace.iterdir()):
         raise RuntimeError("sealed workspace is not empty and neutral")

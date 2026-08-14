@@ -76,7 +76,8 @@ class BatchTaskResult:
     cached_input_tokens: int | None
     output_tokens: int | None
     reasoning_output_tokens: int | None
-    api_equivalent_cost_usd: float | None
+    calculated_cost_usd: float | None
+    provider_reported_cost_usd: float | None
     billing_route: str | None
     exit_code: int | None
     error: str | None
@@ -192,7 +193,8 @@ class BatchRunner:
                     cached_input_tokens=None,
                     output_tokens=None,
                     reasoning_output_tokens=None,
-                    api_equivalent_cost_usd=None,
+                    calculated_cost_usd=None,
+                    provider_reported_cost_usd=None,
                     billing_route=None,
                     exit_code=None,
                     error="batch interrupted before launch",
@@ -242,7 +244,8 @@ class BatchRunner:
                 cached_input_tokens=None,
                 output_tokens=None,
                 reasoning_output_tokens=None,
-                api_equivalent_cost_usd=None,
+                calculated_cost_usd=None,
+                provider_reported_cost_usd=None,
                 billing_route=None,
                 exit_code=None,
                 error=str(error),
@@ -262,9 +265,12 @@ class BatchRunner:
             cached_input_tokens=result.usage.cached_input_tokens,
             output_tokens=result.usage.output_tokens,
             reasoning_output_tokens=result.usage.reasoning_output_tokens,
-            api_equivalent_cost_usd=(
-                result.api_equivalent_cost.amount_usd
-                if result.api_equivalent_cost
+            calculated_cost_usd=(
+                result.calculated_cost.amount_usd if result.calculated_cost else None
+            ),
+            provider_reported_cost_usd=(
+                result.provider_reported_cost.amount_usd
+                if result.provider_reported_cost
                 else None
             ),
             billing_route=result.billing.route,

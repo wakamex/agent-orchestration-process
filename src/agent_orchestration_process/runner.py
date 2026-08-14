@@ -30,10 +30,11 @@ from .models import (
     RunArtifact,
     RunRequest,
     RunResult,
+    ProviderReportedCost,
 )
 from .locks import exclusive_lock, task_lock_path
 from .isolation import PROFILES, resolve_policy
-from .pricing import EstimatedCost, TokenUsage, estimate_api_cost
+from .pricing import CalculatedCost, TokenUsage, estimate_api_cost
 from .worktrees import AOPError, Worktree, WorktreeManager
 
 
@@ -345,7 +346,7 @@ class CodexAdapter:
             error=error,
             final_message=final_message,
             usage=usage,
-            api_equivalent_cost=estimate_api_cost(request.model, usage),
+            calculated_cost=estimate_api_cost(request.model, usage),
             billing=billing,
         )
 
@@ -684,7 +685,7 @@ class ClaudeAdapter:
             error=error,
             final_message=final_message,
             usage=parsed["usage"],
-            api_equivalent_cost=parsed["cost"],
+            calculated_cost=parsed["cost"],
             billing=billing,
         )
 
@@ -830,10 +831,9 @@ class ClaudeAdapter:
             amount = event.get("total_cost_usd")
             if isinstance(amount, (int, float)) and not isinstance(amount, bool):
                 priced_as = model or "claude"
-                cost = EstimatedCost(
+                cost = CalculatedCost(
                     amount_usd=round(float(amount), 8),
                     currency="USD",
-                    estimated=False,
                     model=priced_as,
                     priced_as=priced_as,
                     pricing_version="claude-cli-reported",
@@ -946,7 +946,7 @@ class CursorAdapter:
             error=error,
             final_message=final_message,
             usage=parsed["usage"],
-            api_equivalent_cost=None,
+            calculated_cost=None,
             billing=BillingProvenance(
                 route="provider-credits",
                 credential_source=(
@@ -1148,7 +1148,7 @@ class DevinAdapter:
             error=error,
             final_message=final_message,
             usage=parsed["usage"],
-            api_equivalent_cost=None,
+            calculated_cost=None,
             billing=BillingProvenance(
                 route="provider-credits",
                 credential_source="devin-account",
@@ -1348,7 +1348,13 @@ class OpenCodeAdapter:
             error = "OpenCode did not emit a final response"
         else:
             error = None
-        billing = self._billing_provenance(request.model, environment, parsed["cost"])
+        billing = self._billing_provenance(request.model, environment)
+        usage = parsed["usage"]
+        reported_cost = (
+            parsed["reported_cost"]
+            if billing.route in {"metered-api", "provider-credits"}
+            else None
+        )
 
         return RunResult(
             run_id=request.run_id,
@@ -1368,8 +1374,9 @@ class OpenCodeAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=parsed["usage"],
-            api_equivalent_cost=parsed["cost"],
+            usage=usage,
+            calculated_cost=self._calculated_cost(request.model, usage),
+            provider_reported_cost=reported_cost,
             billing=billing,
             provider_duration_seconds=parsed["duration_seconds"],
         )
@@ -1378,7 +1385,6 @@ class OpenCodeAdapter:
     def _billing_provenance(
         model: str | None,
         environment: dict[str, str],
-        cost: object,
     ) -> BillingProvenance:
         provider = model.partition("/")[0] if model else ""
         route = "unknown"
@@ -1409,17 +1415,18 @@ class OpenCodeAdapter:
                 route = "metered-api"
                 credential_source = f"{provider}-api-key"
                 detected_by = "OpenCode authentication metadata"
-        actual_cost_known = (
-            isinstance(cost, EstimatedCost)
-            and not cost.estimated
-            and route in {"provider-credits", "metered-api"}
-        )
         return BillingProvenance(
             route=route,
             credential_source=credential_source,
             detected_by=detected_by,
-            actual_cost_known=actual_cost_known,
         )
+
+    @staticmethod
+    def _calculated_cost(model: str | None, usage: TokenUsage) -> CalculatedCost | None:
+        provider = model.partition("/")[0] if model else ""
+        if provider in {"ollama", "lmstudio"}:
+            return None
+        return estimate_api_cost(model, usage, providers=(provider,))
 
     def _command(self, request: RunRequest, worktree: Worktree) -> list[str]:
         command = [
@@ -1463,6 +1470,7 @@ class OpenCodeAdapter:
         output_tokens = 0
         reasoning_output_tokens = 0
         cost_usd = 0.0
+        has_reported_cost = False
         first_timestamp = None
         last_timestamp = None
 
@@ -1520,6 +1528,7 @@ class OpenCodeAdapter:
                 amount = part.get("cost")
                 if isinstance(amount, (int, float)) and not isinstance(amount, bool):
                     cost_usd += max(float(amount), 0.0)
+                    has_reported_cost = True
 
         usage = TokenUsage(
             input_tokens=input_tokens,
@@ -1527,18 +1536,12 @@ class OpenCodeAdapter:
             output_tokens=output_tokens,
             reasoning_output_tokens=reasoning_output_tokens,
         )
-        cost = None
-        if has_finish:
-            priced_as = model or "opencode"
-            cost = EstimatedCost(
+        reported_cost = None
+        if has_finish and has_reported_cost:
+            reported_cost = ProviderReportedCost(
                 amount_usd=round(cost_usd, 8),
                 currency="USD",
-                estimated=False,
-                model=priced_as,
-                priced_as=priced_as,
-                pricing_version="opencode-cli-reported",
-                pricing_source="OpenCode step_finish events",
-                long_context_pricing=False,
+                source="OpenCode step_finish events",
             )
         duration_seconds = None
         if first_timestamp is not None and last_timestamp is not None:
@@ -1549,7 +1552,7 @@ class OpenCodeAdapter:
             "error": error,
             "has_finish": has_finish,
             "usage": usage,
-            "cost": cost,
+            "reported_cost": reported_cost,
             "duration_seconds": duration_seconds,
         }
 
@@ -1669,7 +1672,7 @@ class AgyAdapter:
             error=error,
             final_message=final_message,
             usage=parsed["usage"],
-            api_equivalent_cost=estimate_api_cost(
+            calculated_cost=estimate_api_cost(
                 model,
                 parsed["usage"],
                 providers=("google",),
@@ -1870,8 +1873,12 @@ class HermesAdapter:
             _atomic_write(run_dir / "last-message.txt", final_message)
         baseline = before if request.session_id == session_id else None
         usage = self._usage_delta(baseline, after)
-        cost = self._cost_delta(baseline, after, request.model, usage)
-        billing = self._billing_provenance(after, cost)
+        calculated_cost, reported_cost = self._cost_delta(
+            baseline, after, request.model, usage
+        )
+        billing = self._billing_provenance(after)
+        if billing.route not in {"metered-api", "provider-credits"}:
+            reported_cost = None
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
@@ -1902,14 +1909,13 @@ class HermesAdapter:
             error=error,
             final_message=final_message,
             usage=usage,
-            api_equivalent_cost=cost,
+            calculated_cost=calculated_cost,
+            provider_reported_cost=reported_cost,
             billing=billing,
         )
 
     @staticmethod
-    def _billing_provenance(
-        session: _HermesSession | None, cost: EstimatedCost | None
-    ) -> BillingProvenance:
+    def _billing_provenance(session: _HermesSession | None) -> BillingProvenance:
         provider = session.billing_provider if session else None
         routes = {
             "nous": ("subscription", "nous-oauth"),
@@ -1928,13 +1934,6 @@ class HermesAdapter:
             route=route,
             credential_source=credential_source,
             detected_by="Hermes session billing provider" if provider else None,
-            actual_cost_known=(
-                cost is not None
-                and session is not None
-                and session.cost_usd is not None
-                and not session.cost_estimated
-                and route in {"metered-api", "provider-credits"}
-            ),
         )
 
     def _command(self, request: RunRequest) -> list[str]:
@@ -2124,28 +2123,42 @@ class HermesAdapter:
         after: _HermesSession | None,
         requested_model: str | None,
         usage: TokenUsage,
-    ) -> EstimatedCost | None:
+    ) -> tuple[CalculatedCost | None, ProviderReportedCost | None]:
         if after is None:
-            return None
+            return None, None
         model = after.model or requested_model or "hermes"
+        provider = HermesAdapter._catalog_provider(after.billing_provider)
         if after.cost_source == "none":
-            provider = HermesAdapter._catalog_provider(after.billing_provider)
             if provider is None or usage.total_tokens == 0:
-                return None
-            return estimate_api_cost(model, usage, providers=(provider,))
+                return None, None
+            return estimate_api_cost(model, usage, providers=(provider,)), None
         if after.cost_usd is None:
-            return None
+            return None, None
         previous = before.cost_usd if before and before.cost_usd is not None else 0.0
         amount = max(after.cost_usd - previous, 0.0)
-        return EstimatedCost(
+        source = f"Hermes CLI session accounting ({after.cost_source})"
+        if after.cost_estimated:
+            return (
+                CalculatedCost(
+                    amount_usd=round(amount, 8),
+                    currency="USD",
+                    model=model,
+                    priced_as=model,
+                    pricing_version=after.pricing_version,
+                    pricing_source=source,
+                    long_context_pricing=False,
+                ),
+                None,
+            )
+        calculated = (
+            estimate_api_cost(model, usage, providers=(provider,))
+            if provider is not None
+            else None
+        )
+        return calculated, ProviderReportedCost(
             amount_usd=round(amount, 8),
             currency="USD",
-            estimated=after.cost_estimated,
-            model=model,
-            priced_as=model,
-            pricing_version=after.pricing_version,
-            pricing_source=f"Hermes CLI session accounting ({after.cost_source})",
-            long_context_pricing=False,
+            source=source,
         )
 
     @staticmethod
@@ -2281,7 +2294,7 @@ class DeepSeekHarnessAdapter:
             error=error,
             final_message=final_message,
             usage=usage,
-            api_equivalent_cost=self._estimate_cost(request, model, usage),
+            calculated_cost=self._estimate_cost(request, model, usage),
             billing=BillingProvenance(
                 route="metered-api",
                 credential_source=(
@@ -2296,7 +2309,7 @@ class DeepSeekHarnessAdapter:
     @staticmethod
     def _estimate_cost(
         request: RunRequest, model: str | None, usage: TokenUsage
-    ) -> EstimatedCost | None:
+    ) -> CalculatedCost | None:
         provider = request.inference_provider or "deepseek-official"
         catalog_provider = {
             "deepseek-official": "deepseek",

@@ -539,10 +539,16 @@ def _report_run(
             end="" if result.final_message.endswith("\n") else "\n",
         )
     metrics = f"time={result.duration_seconds:.2f}s tokens={result.usage.total_tokens}"
-    if result.api_equivalent_cost:
-        metrics += f" api_equiv=${result.api_equivalent_cost.amount_usd:.6f}"
+    if result.calculated_cost:
+        metrics += f" calculated_cost=${result.calculated_cost.amount_usd:.6f}"
     else:
-        metrics += " api_equiv=n/a"
+        metrics += " calculated_cost=n/a"
+    if result.provider_reported_cost:
+        metrics += (
+            f" provider_reported_cost=${result.provider_reported_cost.amount_usd:.6f}"
+        )
+    else:
+        metrics += " provider_reported_cost=n/a"
     if result.inference_provider:
         metrics += f" provider={result.inference_provider}"
     metrics += f" billing={result.billing.route}"
@@ -573,7 +579,8 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
         file=sys.stderr,
     )
     print(
-        "aop: task\tagent\tprovider\tmodel\teffort\ttime\ttokens\tapi-equiv\tbilling",
+        "aop: task\tagent\tprovider\tmodel\teffort\ttime\ttokens\tcalculated"
+        "\tprovider-reported-cost\tbilling",
         file=sys.stderr,
     )
     for task in result.tasks:
@@ -588,8 +595,13 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
             else "-"
         )
         cost = (
-            f"${task.api_equivalent_cost_usd:.6f}"
-            if task.api_equivalent_cost_usd is not None
+            f"${task.calculated_cost_usd:.6f}"
+            if task.calculated_cost_usd is not None
+            else "n/a"
+        )
+        reported_cost = (
+            f"${task.provider_reported_cost_usd:.6f}"
+            if task.provider_reported_cost_usd is not None
             else "n/a"
         )
         print(
@@ -597,6 +609,7 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
             f"{task.inference_provider or '(configured)'}\t"
             f"{task.model or '(configured)'}\t"
             f"{task.effort or '(configured)'}\t{duration}\t{tokens}\t{cost}\t"
+            f"{reported_cost}\t"
             f"{task.billing_route or 'unknown'}",
             file=sys.stderr,
         )

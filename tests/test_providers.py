@@ -47,8 +47,9 @@ def test_dsh_run_and_exact_resume_use_the_native_patch_interface(
     assert first.usage.cached_input_tokens == 30
     assert first.usage.output_tokens == 20
     assert first.usage.reasoning_output_tokens == 7
-    assert first.api_equivalent_cost is not None
-    assert first.api_equivalent_cost.amount_usd == 0.0001038
+    assert first.calculated_cost is not None
+    assert first.calculated_cost.amount_usd == 0.0001038
+    assert first.provider_reported_cost is None
     assert first.billing.route == "metered-api"
     assert first.billing.credential_source == "deepseek-api-key"
     assert first.command[0] == "bwrap"
@@ -243,12 +244,12 @@ def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> Non
     assert first.usage.input_tokens == 60
     assert first.usage.cached_input_tokens == 20
     assert first.usage.output_tokens == 40
-    assert first.api_equivalent_cost is not None
-    assert first.api_equivalent_cost.amount_usd == 0.0123
+    assert first.calculated_cost is not None
+    assert first.calculated_cost.amount_usd == 0.0123
+    assert first.provider_reported_cost is None
     assert first.billing.route == "subscription"
     assert first.billing.credential_source == "claude-oauth"
     assert first.billing.detected_by == "claude auth status"
-    assert not first.billing.actual_cost_known
     assert first.command[0] == "bwrap"
     assert "--dangerously-skip-permissions" in first.command
     assert ["--model", "opus"] == first.command[
@@ -275,7 +276,6 @@ def test_claude_records_metered_api_authentication_without_credentials(
     assert result.succeeded
     assert result.billing.route == "metered-api"
     assert result.billing.credential_source == "anthropic-api-key"
-    assert not result.billing.actual_cost_known
 
 
 def test_claude_requires_a_terminal_result_event(
@@ -328,10 +328,10 @@ def test_cursor_defaults_to_composer_and_resumes_exact_chat(
     assert first.usage.cached_input_tokens == 30
     assert first.usage.output_tokens == 20
     assert first.provider_duration_seconds == 1.25
-    assert first.api_equivalent_cost is None
+    assert first.calculated_cost is None
+    assert first.provider_reported_cost is None
     assert first.billing.route == "provider-credits"
     assert first.billing.credential_source == "cursor-account"
-    assert not first.billing.actual_cost_known
     assert ["--model", "composer-2.5"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
     ]
@@ -480,10 +480,10 @@ def test_devin_defaults_to_swe_and_resumes_exact_session(
     assert first.usage.input_tokens == 100
     assert first.usage.cached_input_tokens == 30
     assert first.usage.output_tokens == 20
-    assert first.api_equivalent_cost is None
+    assert first.calculated_cost is None
+    assert first.provider_reported_cost is None
     assert first.billing.route == "provider-credits"
     assert first.billing.credential_source == "devin-account"
-    assert not first.billing.actual_cost_known
     assert ["--model", "swe-1-7"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
     ]
@@ -621,12 +621,11 @@ def test_opencode_defaults_to_zen_model_and_resumes_exact_session(
     assert first.usage.output_tokens == 5
     assert first.usage.reasoning_output_tokens == 2
     assert first.provider_duration_seconds == 0.5
-    assert first.api_equivalent_cost is not None
-    assert first.api_equivalent_cost.amount_usd == 0.00012345
-    assert not first.api_equivalent_cost.estimated
+    assert first.provider_reported_cost is not None
+    assert first.provider_reported_cost.amount_usd == 0.00012345
+    assert first.provider_reported_cost.source == "OpenCode step_finish events"
     assert first.billing.route == "provider-credits"
     assert first.billing.credential_source == "opencode-api-key"
-    assert first.billing.actual_cost_known
     assert first.time_to_first_response_seconds is not None
     assert ["--model", "opencode/deepseek-v4-flash"] == first.command[
         first.command.index("--model") : first.command.index("--model") + 2
@@ -696,8 +695,8 @@ def test_opencode_normalizes_multi_step_tool_loop(
     assert result.usage.cached_input_tokens == 13
     assert result.usage.output_tokens == 7
     assert result.usage.reasoning_output_tokens == 3
-    assert result.api_equivalent_cost is not None
-    assert result.api_equivalent_cost.amount_usd == 0.00022345
+    assert result.provider_reported_cost is not None
+    assert result.provider_reported_cost.amount_usd == 0.00022345
 
 
 def test_opencode_workspace_sandbox_and_artifact(
@@ -841,14 +840,12 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     assert first.usage.reasoning_output_tokens == 7
     assert first.provider_duration_seconds == 1.25
     assert first.time_to_first_response_seconds is not None
-    assert first.api_equivalent_cost is not None
-    assert first.api_equivalent_cost.amount_usd == 0.0003345
-    assert first.api_equivalent_cost.model == "gemini-3.5-flash"
-    assert first.api_equivalent_cost.priced_as == "gemini-3.5-flash"
-    assert first.api_equivalent_cost.estimated
+    assert first.calculated_cost is not None
+    assert first.calculated_cost.amount_usd == 0.0003345
+    assert first.calculated_cost.model == "gemini-3.5-flash"
+    assert first.calculated_cost.priced_as == "gemini-3.5-flash"
     assert first.billing.route == "subscription"
     assert first.billing.credential_source == "google-oauth"
-    assert not first.billing.actual_cost_known
     events_path = manager.state_dir / "runs" / first.run_id / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text().splitlines()]
     assert [event["event"] for event in events] == [
@@ -1146,12 +1143,10 @@ def test_hermes_run_and_exact_resume_report_per_turn_usage(
     assert first.usage.cached_input_tokens == 3
     assert first.usage.output_tokens == 5
     assert first.usage.reasoning_output_tokens == 1
-    assert first.api_equivalent_cost is not None
-    assert first.api_equivalent_cost.amount_usd == 0.000001
-    assert first.api_equivalent_cost.estimated
+    assert first.calculated_cost is not None
+    assert first.calculated_cost.amount_usd == 0.000001
     assert first.billing.route == "subscription"
     assert first.billing.credential_source == "nous-oauth"
-    assert not first.billing.actual_cost_known
 
     assert resumed.succeeded
     assert resumed.session_id == first.session_id
@@ -1168,8 +1163,8 @@ def test_hermes_run_and_exact_resume_report_per_turn_usage(
         resumed.command.index("--reasoning") : resumed.command.index("--reasoning") + 2
     ]
     assert resumed.usage == first.usage
-    assert resumed.api_equivalent_cost is not None
-    assert resumed.api_equivalent_cost.amount_usd == 0.000001
+    assert resumed.calculated_cost is not None
+    assert resumed.calculated_cost.amount_usd == 0.000001
 
 
 def test_hermes_provider_override_is_recorded_and_reused_on_resume(
@@ -1462,12 +1457,12 @@ def test_hermes_unknown_session_cost_uses_catalog_api_equivalent() -> None:
         output_tokens=1_000,
     )
 
-    cost = HermesAdapter._cost_delta(None, session, "grok-4.5", usage)
+    cost, reported_cost = HermesAdapter._cost_delta(None, session, "grok-4.5", usage)
 
     assert cost is not None
     assert cost.amount_usd == 0.00915
-    assert cost.estimated
     assert cost.pricing_source == "https://models.dev/api.json"
+    assert reported_cost is None
 
 
 def test_hermes_unknown_session_cost_with_no_usage_remains_unknown() -> None:
@@ -1483,7 +1478,37 @@ def test_hermes_unknown_session_cost_with_no_usage_remains_unknown() -> None:
         pricing_version="hermes-cli-reported",
     )
 
-    assert HermesAdapter._cost_delta(None, session, "grok-4.5", TokenUsage()) is None
+    assert HermesAdapter._cost_delta(None, session, "grok-4.5", TokenUsage()) == (
+        None,
+        None,
+    )
+
+
+def test_hermes_separates_calculated_cost_from_provider_reported_cost() -> None:
+    session = _HermesSession(
+        model="grok-4.5",
+        billing_provider="xai",
+        final_message="answer",
+        last_assistant_id="2",
+        usage=TokenUsage(),
+        cost_usd=0.02,
+        cost_estimated=False,
+        cost_source="provider",
+        pricing_version="hermes-cli-reported",
+    )
+    usage = TokenUsage(
+        input_tokens=2_000,
+        cached_input_tokens=500,
+        output_tokens=1_000,
+    )
+
+    cost, reported_cost = HermesAdapter._cost_delta(None, session, "grok-4.5", usage)
+
+    assert cost is not None
+    assert cost.amount_usd == 0.00915
+    assert reported_cost is not None
+    assert reported_cost.amount_usd == 0.02
+    assert reported_cost.source == "Hermes CLI session accounting (provider)"
 
 
 @pytest.mark.parametrize("profile", ["review", "edit", "host"])

@@ -370,30 +370,35 @@ rather than account-verified. The `availability` and `price_scope` fields keep t
 `provider` prices are rates reported by that provider endpoint.
 
 Every run records wall-clock time and time to first event and agent response. Adapters also record
-input, cached-input, output, and reasoning-output tokens when the provider exposes them. When
-the resolved model has catalog pricing, the result also contains an estimated standard
-API-equivalent USD cost.
-This is a comparison metric for subscription runs, not an amount billed to the account. Reasoning
+input, cached-input, output, and reasoning-output tokens when the provider exposes them. When the
+resolved model has pricing, the result also contains `calculated_cost`: a standard API-equivalent
+USD amount calculated from the reported token buckets and a versioned price schedule. This is a
+comparison metric for subscription runs, not an amount billed to the account. Reasoning
 tokens are reported separately but are already included in output tokens and are not charged twice.
 Agy cache-read tokens are reported separately from uncached input and priced as an additive
 category. DeepSeek Harness uses additive cache pricing for its direct DeepSeek route and the
 selected provider's catalog convention for other known routes.
 
-Each normalized run result also records sanitized `billing` provenance separately from that
-comparison cost. `route` is one of `subscription`, `provider-credits`, `metered-api`, `local`, or
-`unknown`; `credential_source` identifies only the credential class, and `detected_by` identifies
-the provider metadata used to infer it. `actual_cost_known` is true only when the agent CLI reports
-an actual cost for a route that can incur a per-use charge. AOP never copies credential values,
-account identifiers, or provider configuration into the result. When an adapter cannot distinguish
-the active billing route reliably, it records `unknown` instead of guessing. The terse run summary
-prints the route as `billing=...`.
+`provider_reported_cost` is separate and remains null unless the harness or provider explicitly
+emits a monetary cost for the invocation. A calculated cost can match the eventual bill exactly,
+but AOP does not label it as provider-reported evidence. A provider-reported cost can also be
+provisional or consume provider credits rather than produce a separate cash payment.
+
+Each normalized run result records sanitized `billing` provenance separately from both monetary
+fields. `route` is one of `subscription`, `provider-credits`, `metered-api`, `local`, or `unknown`;
+`credential_source` identifies only the credential class, and `detected_by` identifies the provider
+metadata used to infer it. AOP never copies credential values, account identifiers, or provider
+configuration into the result. When an adapter cannot distinguish the active billing route
+reliably, it records `unknown` instead of guessing. The terse run summary prints all three concepts
+independently as `calculated_cost=...`, `provider_reported_cost=...`, and `billing=...`.
 
 Before dispatching a provider run, the CLI verifies that its global models.dev catalog cache is
 less than 24 hours old. A stale or missing cache is refreshed under a process lock and replaced
 atomically. If refresh fails, AOP fails closed instead of reporting or using expired prices. Set
 `AOP_MODEL_CATALOG_CACHE` to relocate the cache; its default is
 `${XDG_CACHE_HOME:-~/.cache}/aop/models-dev.json`. `aop models --refresh` refreshes immediately.
-Every estimated cost records the catalog URL, retrieval time, and content hash-derived version.
+Every calculated cost records its pricing source, retrieval time when applicable, and a
+content-hash-derived or harness-reported pricing version.
 models.dev is a community-maintained machine-readable registry, not an official provider price
 guarantee, and the provenance is retained so results remain auditable.
 
@@ -401,18 +406,18 @@ The refreshed price data includes direct long-context tiers. AOP displays cache-
 the source provides them, but Codex currently reports cached reads without identifying cache writes,
 so run-cost estimates do not add cache-write charges. If the model is implicit or unknown, token and
 timing metrics remain available while cost is reported as `n/a`. Claude's result stream supplies its
-resolved model, token usage, and CLI-reported USD API-equivalent cost. Hermes's session accounting
-supplies its resolved model, cache and reasoning token buckets, and provider-aware estimated or
-actual cost; AOP records the delta for each invocation so resumed turns are not double-counted. If
+resolved model, token usage, and CLI-calculated USD API-equivalent cost. Hermes's session accounting
+supplies its resolved model, cache and reasoning token buckets, and provider-aware calculated cost
+or provider-reported cost; AOP records the delta for each invocation so resumed turns are not double-counted. If
 Hermes reports `cost_source: none`, AOP uses the fresh catalog for the session's billing provider
-and records an API-equivalent estimate instead of treating Hermes's zero-initialized counter as a
-real zero-dollar cost. A zero-token failed turn remains unpriced. Agy
+and records a calculated cost instead of treating Hermes's zero-initialized counter as a real
+zero-dollar charge. A zero-token failed turn remains unpriced. Agy
 currently supplies timing and token usage from its structured result stream. Devin's trajectory
 supplies the resolved model variant and token usage for every inference in the current turn. Cursor,
 OpenCode, and Agy each report provider duration separately from AOP's wall-clock duration. OpenCode
-also reports per-step billed USD cost; AOP sums it for the invocation and records it as an actual
-CLI-reported cost instead of applying AOP's API price table. Cursor, Devin, and Agy do not report
-API-equivalent cost, so that field remains `n/a`.
+also reports per-step billed USD cost; AOP sums it for the invocation and records it as a
+`provider_reported_cost`. Cursor, Devin, and Agy do not currently provide enough information for
+a calculated cost, so that field remains `n/a`.
 
 Run independent tasks concurrently from a TOML manifest:
 

@@ -95,7 +95,8 @@ prompt = "four"
     assert all(task.run_id for task in result.tasks)
     assert result.tasks[0].input_tokens == 1
     assert result.tasks[0].output_tokens == 1
-    assert result.tasks[0].api_equivalent_cost_usd == 0.000035
+    assert result.tasks[0].calculated_cost_usd == 0.000035
+    assert result.tasks[0].provider_reported_cost_usd is None
     assert result.tasks[0].billing_route == "subscription"
     assert {item.task for item in manager.list()} == {"alpha", "beta", "gamma", "delta"}
     assert sum(message.endswith("started") for message in messages) == 4

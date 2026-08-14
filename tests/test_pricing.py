@@ -27,7 +27,6 @@ def test_estimated_standard_api_cost(model: str, expected: float) -> None:
 
     assert estimate is not None
     assert estimate.amount_usd == expected
-    assert estimate.estimated is True
     assert estimate.pricing_version.startswith("models-dev-")
     assert estimate.pricing_source == "https://models.dev/api.json"
     assert estimate.pricing_retrieved_at is not None

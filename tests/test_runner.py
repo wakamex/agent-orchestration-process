@@ -12,6 +12,7 @@ import pytest
 from agent_orchestration_process import __version__
 from agent_orchestration_process.cli import build_parser, main
 from agent_orchestration_process.locks import exclusive_lock, task_lock_path
+from agent_orchestration_process.models import RunResult
 from agent_orchestration_process.runner import (
     AgentRunner,
     CodexAdapter,
@@ -191,12 +192,12 @@ def test_run_persists_structured_codex_artifacts(
     assert result.usage.input_tokens == 1
     assert result.usage.output_tokens == 1
     assert result.usage.reasoning_output_tokens == 0
-    assert result.api_equivalent_cost is not None
-    assert result.api_equivalent_cost.amount_usd == 0.000035
+    assert result.calculated_cost is not None
+    assert result.calculated_cost.amount_usd == 0.000035
+    assert result.provider_reported_cost is None
     assert result.billing.route == "subscription"
     assert result.billing.credential_source == "chatgpt-oauth"
     assert result.billing.detected_by == "codex login status"
-    assert not result.billing.actual_cost_known
     assert result.time_to_first_event_seconds is not None
     assert result.time_to_first_response_seconds is not None
     assert result.provider_duration_seconds is None
@@ -225,11 +226,24 @@ def test_run_persists_structured_codex_artifacts(
         "route": "subscription",
         "credential_source": "chatgpt-oauth",
         "detected_by": "codex login status",
-        "actual_cost_known": False,
     }
-    assert persisted_result["api_equivalent_cost"]["pricing_version"].startswith(
+    assert persisted_result["calculated_cost"]["pricing_version"].startswith(
         "models-dev-"
     )
+    assert persisted_result["provider_reported_cost"] is None
+
+    legacy_result = dict(persisted_result)
+    legacy_result["api_equivalent_cost"] = dict(legacy_result.pop("calculated_cost"))
+    legacy_result["api_equivalent_cost"]["estimated"] = True
+    legacy_result.pop("provider_reported_cost")
+    legacy_result["billing"] = {
+        **legacy_result["billing"],
+        "actual_cost_known": False,
+    }
+    loaded_legacy = RunResult.from_dict(legacy_result)
+    assert loaded_legacy.calculated_cost is not None
+    assert loaded_legacy.calculated_cost.amount_usd == 0.000035
+    assert loaded_legacy.provider_reported_cost is None
     assert '"type": "thread.started"' in events
     assert (run_dir / "stderr.log").read_text() == ""
 
@@ -420,7 +434,6 @@ def test_codex_records_metered_api_authentication_without_credentials(
     assert result.succeeded
     assert result.billing.route == "metered-api"
     assert result.billing.credential_source == "openai-api-key"
-    assert not result.billing.actual_cost_known
     persisted = repository / ".aop" / "runs" / result.run_id / "result.json"
     assert "must-not-be-persisted" not in persisted.read_text()
 
@@ -698,7 +711,7 @@ def test_resume_uses_recorded_session_and_links_runs(
     assert resumed.session_id == SESSION_ID
     assert resumed.model == "gpt-5.6-terra"
     assert resumed.effort == "medium"
-    assert resumed.api_equivalent_cost is not None
+    assert resumed.calculated_cost is not None
     assert resumed.final_message == "answer:second"
     resume_index = resumed.command.index("resume")
     assert resumed.command[resume_index + 1 : resume_index + 3] == [SESSION_ID, "-"]

@@ -1,4 +1,4 @@
-"""Fresh estimates of standard API-equivalent token cost."""
+"""Fresh calculations of standard API-equivalent token cost."""
 
 from __future__ import annotations
 
@@ -47,10 +47,9 @@ class ModelPrice:
 
 
 @dataclass(frozen=True)
-class EstimatedCost:
+class CalculatedCost:
     amount_usd: float
     currency: str
-    estimated: bool
     model: str
     priced_as: str
     pricing_version: str
@@ -62,10 +61,12 @@ class EstimatedCost:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: dict[str, object] | None) -> EstimatedCost | None:
+    def from_dict(cls, value: dict[str, object] | None) -> CalculatedCost | None:
         if value is None:
             return None
-        return cls(**value)
+        fields = dict(value)
+        fields.pop("estimated", None)
+        return cls(**fields)
 
 
 def estimate_api_cost(
@@ -76,7 +77,7 @@ def estimate_api_cost(
     providers: tuple[str, ...] = ("openai",),
     additive_cached_input: bool = False,
     catalog_model: str | None = None,
-) -> EstimatedCost | None:
+) -> CalculatedCost | None:
     if model is None:
         return None
     catalog = catalog or ensure_catalog_fresh()
@@ -114,10 +115,9 @@ def estimate_api_cost(
     amount = (
         uncached * input_rate + cached * cached_rate + usage.output_tokens * output_rate
     ) / 1_000_000
-    return EstimatedCost(
+    return CalculatedCost(
         amount_usd=round(amount, 8),
         currency="USD",
-        estimated=True,
         model=model,
         priced_as=priced_as,
         pricing_version=catalog.version,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .pricing import EstimatedCost, TokenUsage
+from .pricing import CalculatedCost, TokenUsage
 
 
 @dataclass(frozen=True)
@@ -80,11 +80,25 @@ class BillingProvenance:
     route: str = "unknown"
     credential_source: str | None = None
     detected_by: str | None = None
-    actual_cost_known: bool = False
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> BillingProvenance:
-        return cls(**value) if value is not None else cls()
+        if value is None:
+            return cls()
+        fields = dict(value)
+        fields.pop("actual_cost_known", None)
+        return cls(**fields)
+
+
+@dataclass(frozen=True)
+class ProviderReportedCost:
+    amount_usd: float
+    currency: str
+    source: str
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> ProviderReportedCost | None:
+        return cls(**value) if value is not None else None
 
 
 @dataclass(frozen=True)
@@ -107,7 +121,8 @@ class RunResult:
     error: str | None
     final_message: str | None
     usage: TokenUsage
-    api_equivalent_cost: EstimatedCost | None
+    calculated_cost: CalculatedCost | None
+    provider_reported_cost: ProviderReportedCost | None = None
     billing: BillingProvenance = BillingProvenance()
     inference_provider: str | None = None
     artifacts: tuple[RunArtifact, ...] = ()
@@ -140,10 +155,28 @@ class RunResult:
         fields.setdefault("time_to_first_response_seconds", None)
         fields.setdefault("provider_duration_seconds", None)
         fields["usage"] = TokenUsage.from_dict(fields.get("usage"))
-        fields["api_equivalent_cost"] = EstimatedCost.from_dict(
-            fields.get("api_equivalent_cost")
+        legacy_cost = fields.pop("api_equivalent_cost", None)
+        legacy_billing = fields.get("billing")
+        legacy_reported = (
+            isinstance(legacy_billing, dict)
+            and legacy_billing.get("actual_cost_known") is True
         )
-        fields["billing"] = BillingProvenance.from_dict(fields.get("billing"))
+        if "calculated_cost" not in fields and not legacy_reported:
+            fields["calculated_cost"] = legacy_cost
+        fields["calculated_cost"] = CalculatedCost.from_dict(
+            fields.get("calculated_cost")
+        )
+        fields.setdefault("provider_reported_cost", None)
+        if fields["provider_reported_cost"] is None and legacy_reported:
+            fields["provider_reported_cost"] = {
+                "amount_usd": legacy_cost["amount_usd"],
+                "currency": legacy_cost.get("currency", "USD"),
+                "source": legacy_cost.get("pricing_source", "legacy run result"),
+            }
+        fields["provider_reported_cost"] = ProviderReportedCost.from_dict(
+            fields.get("provider_reported_cost")
+        )
+        fields["billing"] = BillingProvenance.from_dict(legacy_billing)
         fields.setdefault("inference_provider", None)
         fields["artifacts"] = tuple(
             RunArtifact(**artifact) for artifact in fields.get("artifacts", ())

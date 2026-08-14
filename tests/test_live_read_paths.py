@@ -14,48 +14,46 @@ from agent_orchestration_process.worktrees import WorktreeManager
 
 SELECTED = {
     item.strip()
-    for item in os.environ.get("AOP_LIVE_READ_PATH_AGENTS", "").split(",")
+    for item in os.environ.get("AOP_LIVE_INPUT_AGENTS", "").split(",")
     if item.strip()
 }
 
 
 @pytest.mark.live
 @pytest.mark.parametrize("provider", AGENTS)
-def test_provider_reads_declared_path(
+def test_provider_reads_declared_input_snapshot_under_sealed_boundary(
     provider: str,
     tmp_path: Path,
 ) -> None:
     if "all" not in SELECTED and provider not in SELECTED:
-        pytest.skip("set AOP_LIVE_READ_PATH_AGENTS to select live providers")
+        pytest.skip("set AOP_LIVE_INPUT_AGENTS to select live providers")
 
     nonce = uuid.uuid4().hex
     source = tmp_path / "declared-source.txt"
-    content = f"AOP declared read-path nonce: {nonce}\n"
+    content = f"AOP declared input nonce: {nonce}\n"
     source.write_text(content)
     source_hash = hashlib.sha256(content.encode()).hexdigest()
     root = Path(__file__).resolve().parents[1]
     manager = WorktreeManager.discover(root)
-    task = f"live-read-{provider}-{nonce[:8]}"
+    task = f"live-input-{provider}-{nonce[:8]}"
     model = os.environ.get(f"AOP_LIVE_{provider.upper()}_MODEL")
-    inference_provider = os.environ.get(
-        f"AOP_LIVE_{provider.upper()}_PROVIDER"
-    )
+    inference_provider = os.environ.get(f"AOP_LIVE_{provider.upper()}_PROVIDER")
     effort = os.environ.get(f"AOP_LIVE_{provider.upper()}_EFFORT")
-    timeout = float(os.environ.get("AOP_LIVE_READ_PATH_TIMEOUT", "300"))
+    timeout = float(os.environ.get("AOP_LIVE_INPUT_TIMEOUT", "300"))
 
     try:
         result = AgentRunner(manager, adapter_for(provider)).run(
             task=task,
             prompt=(
-                "Read declared-source.txt through its preferred task-local path. "
+                "Read /inputs/declared-source.txt from the immutable input snapshot. "
                 f"Reply with exactly AOP_READ_OK:{nonce} and no other text."
             ),
             model=model,
             inference_provider=inference_provider,
             effort=effort,
-            sandbox="scratch-write",
+            profile="sealed",
             timeout_seconds=timeout,
-            read_paths=[source],
+            input_paths=[source],
         )
     finally:
         if any(item.task == task for item in manager.list()):
@@ -65,4 +63,4 @@ def test_provider_reads_declared_path(
     assert result.final_message is not None
     assert f"AOP_READ_OK:{nonce}" in result.final_message
     assert source.read_text() == content
-    assert result.read_paths[0].sha256 == source_hash
+    assert result.inputs[0].sha256 == source_hash

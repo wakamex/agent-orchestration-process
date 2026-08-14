@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -18,17 +19,47 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Protocol, Sequence
 
+import yaml
+from yaml.constructor import ConstructorError
+
 from .models import (
     BillingProvenance,
-    ReadPath,
-    ReadPathFile,
+    InputFile,
+    InputSnapshot,
     RunArtifact,
     RunRequest,
     RunResult,
 )
 from .locks import exclusive_lock, task_lock_path
+from .isolation import PROFILES, resolve_policy
 from .pricing import EstimatedCost, TokenUsage, estimate_api_cost
 from .worktrees import AOPError, Worktree, WorktreeManager
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[object, object]:
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
 
 
 def _now() -> str:
@@ -61,6 +92,17 @@ def _atomic_write(path: Path, content: str) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(content)
     os.replace(temporary, path)
+
+
+def _atomic_write_private(path: Path, content: str) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class RunStore:
@@ -291,7 +333,7 @@ class CodexAdapter:
             model=request.model,
             effort=request.effort,
             session_id=session_id,
-            command=command,
+            command=_recorded_command(command),
             started_at=started_at,
             finished_at=_now(),
             duration_seconds=round(duration, 6),
@@ -556,6 +598,7 @@ class ClaudeAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
+        _prepare_claude_environment(environment)
         command = _provider_command(
             self._command(request, worktree), request, worktree, environment
         )
@@ -615,7 +658,7 @@ class ClaudeAdapter:
             model=parsed["model"] or request.model,
             effort=request.effort,
             session_id=session_id,
-            command=command,
+            command=_recorded_command(command),
             started_at=started_at,
             finished_at=_now(),
             duration_seconds=capture.duration_seconds,
@@ -877,7 +920,7 @@ class CursorAdapter:
             model=request.model,
             effort=request.effort,
             session_id=session_id,
-            command=command,
+            command=_recorded_command(command),
             started_at=started_at,
             finished_at=_now(),
             duration_seconds=capture.duration_seconds,
@@ -1079,7 +1122,7 @@ class DevinAdapter:
             model=parsed["model"] or request.model,
             effort=request.effort,
             session_id=session_id,
-            command=command,
+            command=_recorded_command(command),
             started_at=started_at,
             finished_at=_now(),
             duration_seconds=capture.duration_seconds,
@@ -1300,7 +1343,7 @@ class OpenCodeAdapter:
             model=request.model,
             effort=request.effort,
             session_id=session_id,
-            command=command,
+            command=_recorded_command(command),
             started_at=started_at,
             finished_at=_now(),
             duration_seconds=capture.duration_seconds,
@@ -1600,7 +1643,7 @@ class AgyAdapter:
             model=model,
             effort=request.effort,
             session_id=session_id,
-            command=command,
+            command=_recorded_command(command),
             started_at=started_at,
             finished_at=_now(),
             duration_seconds=capture.duration_seconds,
@@ -1818,9 +1861,7 @@ class HermesAdapter:
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif capture.exit_code:
-            error = self._exit_error(
-                capture.stdout, capture.stderr, capture.exit_code
-            )
+            error = self._exit_error(capture.stdout, capture.stderr, capture.exit_code)
         elif session_id is None:
             error = "Hermes did not report a session ID"
         elif final_message is None:
@@ -1835,7 +1876,7 @@ class HermesAdapter:
             model=(after.model if after else None) or request.model,
             effort=request.effort,
             session_id=session_id,
-            command=command,
+            command=_recorded_command(command),
             started_at=started_at,
             finished_at=_now(),
             duration_seconds=capture.duration_seconds,
@@ -2117,86 +2158,273 @@ class HermesAdapter:
         return max(float(value), 0.0)
 
 
+class DeepSeekHarnessAdapter:
+    provider = "dsh"
+    modes = frozenset({"agent"})
+    DEFAULT_MODEL = "deepseek-v4-flash"
+    EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_DSH_BIN", "dsh")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        if effort is not None and effort not in self.EFFORTS:
+            raise AOPError(
+                "dsh effort must be one of: " + ", ".join(sorted(self.EFFORTS))
+            )
+        return model or self.DEFAULT_MODEL, effort
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        patch = _prepare_dsh_environment(request, environment)
+        command = _provider_command(
+            [
+                self.binary,
+                "--profile",
+                "headless",
+                "--patch",
+                os.fspath(patch),
+                request.prompt,
+            ],
+            request,
+            worktree,
+            environment,
+        )
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=None,
+            timeout_seconds=request.timeout_seconds,
+            is_response=self._is_response,
+        )
+        _atomic_write(run_dir / "events.jsonl", capture.stdout)
+        _atomic_write(run_dir / "stderr.log", capture.stderr)
+        parsed = self._parse(capture.stdout)
+        final_message = parsed["final_message"]
+        if final_message is not None:
+            _atomic_write(run_dir / "last-message.txt", final_message)
+        reported_session_id = parsed["session_id"]
+        session_id = reported_session_id
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif request.session_id and reported_session_id != request.session_id:
+            session_id = None
+            if reported_session_id is None:
+                error = (
+                    "dsh resume result did not report the requested session ID "
+                    f"{request.session_id}"
+                )
+            else:
+                error = (
+                    f"dsh resumed as session {reported_session_id} instead of the "
+                    f"requested session {request.session_id}"
+                )
+        elif parsed["error"]:
+            error = parsed["error"]
+        elif capture.exit_code:
+            error = (
+                capture.stderr.strip() or f"dsh exited with status {capture.exit_code}"
+            )
+        elif reported_session_id is None:
+            error = "dsh did not report a session ID"
+        elif not parsed["completed"]:
+            error = "dsh did not emit a terminal completed result"
+        elif final_message is None:
+            error = "dsh did not emit a final response"
+        else:
+            error = None
+        model = parsed["model"] or request.model
+        usage = parsed["usage"]
+        return RunResult(
+            run_id=request.run_id,
+            provider=self.provider,
+            mode=request.mode,
+            task=request.task,
+            model=model,
+            effort=request.effort,
+            session_id=session_id,
+            command=_recorded_command(
+                command,
+                secret_names={environment.get("AOP_DSH_CREDENTIAL_REF", "")},
+            ),
+            started_at=started_at,
+            finished_at=_now(),
+            duration_seconds=capture.duration_seconds,
+            time_to_first_event_seconds=capture.first_event_seconds,
+            time_to_first_response_seconds=capture.first_response_seconds,
+            exit_code=capture.exit_code,
+            timed_out=capture.timed_out,
+            error=error,
+            final_message=final_message,
+            usage=usage,
+            api_equivalent_cost=self._estimate_cost(request, model, usage),
+            billing=BillingProvenance(
+                route="metered-api",
+                credential_source=(
+                    environment["AOP_DSH_CREDENTIAL_REF"].lower().replace("_", "-")
+                    if "AOP_DSH_CREDENTIAL_REF" in environment
+                    else "provider-native"
+                ),
+                detected_by="DeepSeek Harness provider contract",
+            ),
+        )
+
+    @staticmethod
+    def _estimate_cost(
+        request: RunRequest, model: str | None, usage: TokenUsage
+    ) -> EstimatedCost | None:
+        provider = request.inference_provider or "deepseek-official"
+        catalog_provider = {
+            "deepseek-official": "deepseek",
+            "anthropic": "anthropic",
+            "google": "google",
+            "gemini": "google",
+            "openai": "openai",
+            "xai": "xai",
+        }.get(provider)
+        if catalog_provider is None:
+            return None
+        return estimate_api_cost(
+            model,
+            usage,
+            providers=(catalog_provider,),
+            additive_cached_input=catalog_provider == "deepseek",
+        )
+
+    @staticmethod
+    def _is_response(line: str) -> bool:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(event, dict) and event.get("type") == "aop.dsh.result"
+
+    @staticmethod
+    def _parse(output: str) -> dict[str, object]:
+        result: dict[str, object] | None = None
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "aop.dsh.result":
+                result = event
+        if result is None:
+            return {
+                "session_id": None,
+                "model": None,
+                "final_message": None,
+                "usage": TokenUsage(),
+                "completed": False,
+                "error": None,
+            }
+        usage = result.get("usage")
+        return {
+            "session_id": (
+                result.get("session_id")
+                if isinstance(result.get("session_id"), str)
+                else None
+            ),
+            "model": result.get("model")
+            if isinstance(result.get("model"), str)
+            else None,
+            "final_message": (
+                result.get("final_message")
+                if isinstance(result.get("final_message"), str)
+                else None
+            ),
+            "usage": TokenUsage.from_dict(usage if isinstance(usage, dict) else None),
+            "completed": result.get("completed") is True,
+            "error": result.get("error")
+            if isinstance(result.get("error"), str)
+            else None,
+        }
+
+
 def _provider_command(
     command: list[str],
     request: RunRequest,
     worktree: Worktree,
     environment: dict[str, str],
 ) -> list[str]:
-    if request.sandbox == "danger-full-access":
+    if request.profile == "host":
         return command
     root = Path(environment["AOP_ROOT"])
     cache = Path(environment["AOP_CACHE_DIR"])
     provider_state = Path(environment["AOP_PROVIDER_STATE_DIR"])
     bwrap = os.environ.get("AOP_BWRAP_BIN", "bwrap")
     scratch = Path(environment["AOP_SCRATCH_DIR"])
-    wrapped = [
-        bwrap,
-        "--die-with-parent",
-        "--dev-bind",
-        "/",
-        "/",
-    ]
-    hidden_paths = environment.get("AOP_HIDE_PATHS", "")
-    for raw_path in hidden_paths.split(os.pathsep):
-        if not raw_path:
-            continue
-        path = Path(raw_path)
-        if not path.is_absolute() or path.is_symlink() or not path.is_dir():
-            raise AOPError(f"AOP hidden path must be an existing absolute directory: {path}")
-        resolved = path.resolve(strict=True)
-        if resolved in {Path("/"), root, worktree.path, cache, provider_state, scratch}:
-            raise AOPError(f"AOP refuses to hide a required runtime path: {resolved}")
-        wrapped.extend(["--tmpfs", os.fspath(resolved)])
-    wrapped.extend(["--ro-bind", os.fspath(root), os.fspath(root)])
-    if request.sandbox == "workspace-write":
-        wrapped.extend(["--bind", os.fspath(worktree.path), os.fspath(worktree.path)])
+    output = Path(environment["AOP_OUTPUT_DIR"])
+    input_root = Path(environment["AOP_INPUT_DIR"])
+    wrapped = _isolated_root_command(bwrap)
+    if request.profile in {"edit", "review"}:
+        wrapped.extend(["--ro-bind", os.fspath(root), "/repository"])
+        if (root / ".aop").is_dir():
+            wrapped.extend(["--tmpfs", "/repository/.aop"])
+        git_directory = root / ".git"
+        _add_guest_parent_directories(wrapped, git_directory)
+        wrapped.extend(
+            ["--ro-bind", os.fspath(git_directory), os.fspath(git_directory)]
+        )
+    if request.profile == "edit":
+        wrapped.extend(["--bind", os.fspath(worktree.path), "/workspace"])
         git_marker = worktree.path / ".git"
         if git_marker.exists():
-            wrapped.extend(["--ro-bind", os.fspath(git_marker), os.fspath(git_marker)])
+            wrapped.extend(["--ro-bind", os.fspath(git_marker), "/workspace/.git"])
         common_git_directory = _git_common_directory(worktree.path)
-        wrapped.extend(
-            [
-                "--ro-bind",
-                os.fspath(common_git_directory),
-                os.fspath(common_git_directory),
-            ]
-        )
+        wrapped.extend(["--ro-bind", os.fspath(common_git_directory), "/git"])
+    elif request.profile == "review":
+        wrapped.extend(["--ro-bind", os.fspath(worktree.path), "/workspace"])
     else:
-        wrapped.extend(["--bind", os.fspath(scratch), os.fspath(scratch)])
-    wrapped.extend(["--bind", os.fspath(cache), os.fspath(cache)])
+        wrapped.extend(["--ro-bind", os.fspath(worktree.path), "/workspace"])
+    wrapped.extend(
+        [
+            "--bind",
+            os.fspath(scratch),
+            "/scratch",
+            "--bind",
+            os.fspath(cache),
+            "/cache",
+            "--bind",
+            os.fspath(output),
+            "/output",
+            "--ro-bind",
+            os.fspath(input_root),
+            "/inputs",
+        ]
+    )
     if request.provider in {
         "agy",
+        "claude",
         "codex",
         "cursor",
         "devin",
+        "dsh",
         "hermes",
         "opencode",
     }:
-        wrapped.extend(["--bind", os.fspath(provider_state), os.fspath(provider_state)])
-    if request.provider == "agy":
-        source_dir = _agy_source_dir(environment)
-        wrapped.extend(["--ro-bind", os.fspath(source_dir), os.fspath(source_dir)])
+        wrapped.extend(["--bind", os.fspath(provider_state), "/state"])
     if request.provider == "cursor":
         source_home = _cursor_source_home(environment)
         source_auth = _cursor_source_auth(environment)
         isolated_state = provider_state / "cursor"
-        _prepare_cursor_state(source_home, source_auth, isolated_state)
+        _prepare_cursor_state(
+            source_home, source_auth, isolated_state, sealed=_sealed(environment)
+        )
         cursor_cache = cache / "cursor"
         cursor_cache.mkdir(parents=True, exist_ok=True)
-        wrapped.extend(
-            [
-                "--bind",
-                os.fspath(isolated_state / "home"),
-                os.fspath(source_home),
-                "--setenv",
-                "XDG_CONFIG_HOME",
-                os.fspath(isolated_state / "config"),
-                "--setenv",
-                "XDG_CACHE_HOME",
-                os.fspath(cursor_cache),
-            ]
-        )
+        environment["HOME"] = os.fspath(isolated_state / "home")
+        environment["XDG_CONFIG_HOME"] = os.fspath(isolated_state / "config")
+        environment["XDG_CACHE_HOME"] = os.fspath(cursor_cache)
     if request.provider == "hermes":
         isolated_home = Path(environment["HERMES_HOME"])
         if isolated_home != provider_state / "hermes" / "home":
@@ -2204,53 +2432,308 @@ def _provider_command(
     if request.provider == "opencode":
         source_config = _opencode_source_config(environment)
         source_data = _opencode_source_data(environment)
-        home_config = Path(environment["HOME"]) / ".opencode"
         isolated_state = provider_state / "opencode"
-        _prepare_opencode_state(source_config, source_data, isolated_state)
+        _prepare_opencode_state(
+            source_config,
+            source_data,
+            isolated_state,
+            sealed=_sealed(environment),
+        )
         opencode_cache = cache / "opencode"
         opencode_cache.mkdir(parents=True, exist_ok=True)
-        wrapped.extend(
-            [
-                "--setenv",
-                "XDG_CONFIG_HOME",
-                os.fspath(isolated_state / "config"),
-                "--setenv",
-                "XDG_DATA_HOME",
-                os.fspath(isolated_state / "data"),
-                "--setenv",
-                "XDG_STATE_HOME",
-                os.fspath(isolated_state / "state"),
-                "--setenv",
-                "XDG_CACHE_HOME",
-                os.fspath(cache),
-                "--setenv",
-                "OPENCODE_DISABLE_AUTOUPDATE",
-                "1",
-            ]
-        )
+        environment["XDG_CONFIG_HOME"] = os.fspath(isolated_state / "config")
+        environment["XDG_DATA_HOME"] = os.fspath(isolated_state / "data")
+        environment["XDG_STATE_HOME"] = os.fspath(isolated_state / "state")
+        environment["XDG_CACHE_HOME"] = os.fspath(cache)
+        environment["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
         dependencies = source_config / "node_modules" if source_config else None
         private_dependencies = isolated_state / "config" / "opencode" / "node_modules"
         if dependencies is not None and dependencies.is_dir():
-            wrapped.extend(
-                [
-                    "--ro-bind",
-                    os.fspath(dependencies),
-                    os.fspath(private_dependencies),
-                ]
+            shutil.copytree(
+                dependencies,
+                private_dependencies,
+                symlinks=True,
+                dirs_exist_ok=True,
             )
-        if home_config.is_dir():
-            wrapped.extend(
-                ["--ro-bind", os.fspath(home_config), os.fspath(home_config)]
-            )
-    for read_path in request.read_paths:
-        wrapped.extend(
-            ["--ro-bind", read_path.source_path, read_path.source_path]
-        )
-        wrapped.extend(
-            ["--ro-bind", read_path.source_path, read_path.mounted_path]
-        )
-    wrapped.extend(["--chdir", os.fspath(worktree.path), "--", *command])
+            _make_tree_user_writable(private_dependencies)
+    mappings = (
+        (output, Path("/output")),
+        (input_root, Path("/inputs")),
+        (provider_state, Path("/state")),
+        (cache, Path("/cache")),
+        (scratch, Path("/scratch")),
+        (worktree.path, Path("/workspace")),
+        (root, Path("/repository")),
+    )
+    command = [_guest_path(argument, mappings) for argument in command]
+    command, runtime_mounts = _provider_runtime(command, provider=request.provider)
+    for source, destination in runtime_mounts:
+        _add_guest_parent_directories(wrapped, Path(destination))
+        wrapped.extend(["--ro-bind", source, destination])
+    for key, value in _guest_environment(environment, mappings).items():
+        wrapped.extend(["--setenv", key, value])
+    wrapped.extend(["--chdir", "/workspace", "--", *command])
     return wrapped
+
+
+def _isolated_root_command(bwrap: str) -> list[str]:
+    command = [
+        bwrap,
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--cap-drop",
+        "ALL",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+    ]
+    for path in ("/usr", "/bin", "/lib", "/lib64"):
+        source = Path(path)
+        if source.exists():
+            command.extend(["--ro-bind", path, path])
+    for path in (
+        "/etc/alternatives",
+        "/etc/ca-certificates",
+        "/etc/crypto-policies",
+        "/etc/hosts",
+        "/etc/localtime",
+        "/etc/nsswitch.conf",
+        "/etc/pki",
+        "/etc/resolv.conf",
+        "/etc/ssl",
+    ):
+        source = Path(path)
+        if source.exists():
+            command.extend(["--ro-bind", path, path])
+    return command
+
+
+def _add_guest_parent_directories(command: list[str], path: Path) -> None:
+    parents = list(path.parents)[:-1]
+    for parent in reversed(parents):
+        if parent != Path("/"):
+            command.extend(["--dir", os.fspath(parent)])
+
+
+def _provider_runtime(
+    command: list[str], *, provider: str | None = None
+) -> tuple[list[str], list[tuple[str, str]]]:
+    executable = shutil.which(command[0])
+    if executable is None:
+        return command, []
+    resolved = Path(executable).resolve()
+    if resolved.is_relative_to(Path("/usr")) or resolved.is_relative_to(Path("/bin")):
+        return command, []
+    brew = Path("/home/linuxbrew/.linuxbrew")
+    if resolved.is_relative_to(brew):
+        command[0] = os.fspath(resolved)
+        return command, [(os.fspath(brew), os.fspath(brew))]
+    if provider == "dsh":
+        node_modules = next(
+            (parent for parent in resolved.parents if parent.name == "node_modules"),
+            None,
+        )
+        if node_modules is not None:
+            command[0] = os.fspath(resolved)
+            return command, [(os.fspath(node_modules), os.fspath(node_modules))]
+    guest = Path("/runtime/provider")
+    provider_guest = guest / resolved.name
+    command[0] = os.fspath(provider_guest)
+    mounts = [(os.fspath(resolved), os.fspath(provider_guest))]
+    try:
+        first_line = resolved.open("rb").readline(4096).decode(errors="ignore").strip()
+    except OSError:
+        first_line = ""
+    if first_line.startswith("#!"):
+        interpreter_name = first_line[2:].split(maxsplit=1)[0]
+        interpreter = Path(interpreter_name)
+        if interpreter.is_absolute() and not interpreter.is_relative_to(Path("/usr")):
+            resolved_interpreter = interpreter.resolve()
+            runtime_root = resolved_interpreter.parent.parent
+            interpreter_guest = Path("/runtime/interpreter")
+            mounts.append((os.fspath(runtime_root), os.fspath(interpreter_guest)))
+            command = [
+                os.fspath(interpreter_guest / "bin" / resolved_interpreter.name),
+                os.fspath(provider_guest),
+                *command[1:],
+            ]
+    return command, mounts
+
+
+def _guest_path(value: str, mappings: tuple[tuple[Path, Path], ...]) -> str:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        return value
+    for host, guest in mappings:
+        try:
+            relative = candidate.relative_to(host)
+        except ValueError:
+            continue
+        return os.fspath(guest / relative)
+    return value
+
+
+def _guest_environment(
+    environment: dict[str, str], mappings: tuple[tuple[Path, Path], ...]
+) -> dict[str, str]:
+    selected = _filtered_environment(environment)
+    allowed_dsh_auth = environment.get("AOP_DSH_ALLOWED_AUTH_ENV")
+    if allowed_dsh_auth is not None:
+        allowed = set(allowed_dsh_auth.split(",")) if allowed_dsh_auth else set()
+        for name in _DSH_AUTH_ENV_NAMES - allowed:
+            selected.pop(name, None)
+    credential_ref = environment.get("AOP_DSH_CREDENTIAL_REF")
+    if credential_ref and credential_ref in environment:
+        selected[credential_ref] = environment[credential_ref]
+    for key in (
+        "AOP_CACHE_DIR",
+        "AOP_DSH_RESUME",
+        "AOP_DSH_SESSION_ID",
+        "AOP_PROVIDER_STATE_DIR",
+        "AOP_SCRATCH_DIR",
+        "AOP_INPUT_DIR",
+        "AOP_OUTPUT_DIR",
+        "CODEX_HOME",
+        "DSH_HOME",
+        "HERMES_HOME",
+        "AOP_INPUT_MANIFEST",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+    ):
+        if key in environment:
+            selected[key] = _guest_path(environment[key], mappings)
+    selected["HOME"] = _guest_path(
+        environment.get(
+            "HOME", os.fspath(Path(environment["AOP_PROVIDER_STATE_DIR"]) / "home")
+        ),
+        mappings,
+    )
+    selected["PWD"] = "/workspace"
+    selected["PATH"] = "/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin"
+    selected.pop("OLDPWD", None)
+    return selected
+
+
+_DSH_AMBIENT_AUTH_ENV = {
+    "amazon-bedrock": {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_DEFAULT_REGION",
+        "AWS_REGION",
+        "AWS_ROLE_ARN",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    },
+    "anthropic": {"ANTHROPIC_API_KEY"},
+    "deepseek": {"DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"},
+    "gemini": {"GEMINI_API_KEY", "GOOGLE_API_KEY"},
+    "google": {"GEMINI_API_KEY", "GOOGLE_API_KEY"},
+    "openai": {"OPENAI_API_KEY", "OPENAI_BASE_URL"},
+    "xai": {"XAI_API_KEY"},
+}
+
+_DSH_AUTH_ENV_NAMES = {
+    "ANTHROPIC_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_DEFAULT_REGION",
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "AWS_ROLE_ARN",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "XAI_API_KEY",
+}
+
+
+def _filtered_environment(environment: dict[str, str]) -> dict[str, str]:
+    names = {
+        "ANTHROPIC_API_KEY",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_DEFAULT_REGION",
+        "AWS_PROFILE",
+        "AWS_REGION",
+        "AWS_ROLE_ARN",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CURSOR_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_SEARCH_BASE_URL",
+        "DSH_TELEMETRY_DISABLED",
+        "DEVIN_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "NOUS_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENCODE_API_KEY",
+        "PATH",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TERM",
+        "TZ",
+        "NODE_USE_ENV_PROXY",
+        "XAI_API_KEY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+    return {key: value for key, value in environment.items() if key in names}
+
+
+def _recorded_command(
+    command: list[str], *, secret_names: set[str] | None = None
+) -> list[str]:
+    recorded = list(command)
+    exact_secret_names = {name.upper() for name in secret_names or set() if name}
+    for index in range(len(recorded) - 2):
+        if recorded[index] != "--setenv":
+            continue
+        name = recorded[index + 1].upper()
+        if name in exact_secret_names or any(
+            marker in name
+            for marker in (
+                "KEY",
+                "TOKEN",
+                "SECRET",
+                "PASSWORD",
+                "CREDENTIAL",
+                "PROXY",
+            )
+        ):
+            recorded[index + 2] = "<redacted>"
+    return recorded
+
+
+def _sealed(environment: dict[str, str]) -> bool:
+    return environment.get("AOP_PROFILE") == "sealed"
 
 
 def _git_common_directory(worktree: Path) -> Path:
@@ -2268,7 +2751,9 @@ def _git_common_directory(worktree: Path) -> Path:
         text=True,
     )
     if result.returncode:
-        detail = result.stderr.strip() or result.stdout.strip() or "git rev-parse failed"
+        detail = (
+            result.stderr.strip() or result.stdout.strip() or "git rev-parse failed"
+        )
         raise AOPError(f"Could not resolve candidate Git metadata: {detail}")
     path = Path(result.stdout.strip())
     if not path.is_absolute() or path.is_symlink() or not path.is_dir():
@@ -2287,6 +2772,10 @@ _AGY_NESTED_SEED_FILES = {
         "antigravity-oauth-token",
         "settings.json",
     },
+}
+_AGY_SEALED_SEED_FILES = {"google_accounts.json", "oauth_creds.json"}
+_AGY_SEALED_NESTED_SEED_FILES = {
+    "antigravity-cli": {"antigravity-oauth-token"},
 }
 
 _CODEX_SEED_DIRECTORIES = {"rules", "skills"}
@@ -2327,8 +2816,164 @@ _DEVIN_DATA_RUNTIME_NAMES = {
 def _prepare_codex_environment(environment: dict[str, str]) -> None:
     source = _codex_source_home(environment)
     destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "codex" / "home"
-    _prepare_codex_state(source, destination)
+    _prepare_codex_state(source, destination, sealed=_sealed(environment))
     environment["CODEX_HOME"] = os.fspath(destination)
+
+
+def _prepare_dsh_environment(request: RunRequest, environment: dict[str, str]) -> Path:
+    provider_root = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "dsh"
+    dsh_home = provider_root / "home"
+    dsh_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    dsh_home.chmod(0o700)
+    source_home = Path(
+        environment.get(
+            "AOP_DSH_SOURCE_HOME",
+            environment.get("DSH_HOME", Path.home() / ".dsh"),
+        )
+    ).expanduser()
+    provider = request.inference_provider or "deepseek-official"
+    settings = _read_yaml_mapping(source_home / "settings.yaml", "dsh settings")
+    provider_settings, credential_ref = _project_dsh_provider_settings(
+        settings, provider
+    )
+    if provider_settings:
+        _atomic_write_private(
+            dsh_home / "settings.yaml",
+            yaml.safe_dump(
+                provider_settings,
+                allow_unicode=True,
+                default_flow_style=False,
+                sort_keys=False,
+            ),
+        )
+
+    if credential_ref is not None:
+        credentials = _read_yaml_mapping(
+            source_home / ".credentials.yaml", "dsh managed credentials"
+        )
+        _project_dsh_credential(
+            credentials, credential_ref, dsh_home / ".credentials.yaml"
+        )
+        environment["AOP_DSH_CREDENTIAL_REF"] = credential_ref
+        environment["AOP_DSH_ALLOWED_AUTH_ENV"] = credential_ref
+    else:
+        environment.pop("AOP_DSH_CREDENTIAL_REF", None)
+        environment["AOP_DSH_ALLOWED_AUTH_ENV"] = ",".join(
+            sorted(_DSH_AMBIENT_AUTH_ENV.get(provider, set()))
+        )
+
+    scratch = Path(environment["AOP_SCRATCH_DIR"])
+    runner = dsh_home / "profiles" / "headless" / "aop-dsh-runner.mjs"
+    runner.parent.mkdir(parents=True, exist_ok=True)
+    runner_source = Path(__file__).with_name("dsh_runner.mjs")
+    _atomic_write(runner, runner_source.read_text())
+    runner.chmod(0o600)
+    runner_uri = (
+        runner.as_uri()
+        if request.profile == "host"
+        else "file:///state/dsh/home/profiles/headless/aop-dsh-runner.mjs"
+    )
+    effort = "off" if request.effort == "none" else request.effort
+    rows = [
+        "- id: agent-default-model",
+        "  config:",
+        f"    provider: {json.dumps(provider)}",
+        f"    model: {json.dumps(request.model)}",
+    ]
+    if effort is not None:
+        rows.append(f"    reasoningEffort: {json.dumps(effort)}")
+    rows.extend(
+        [
+            "- id: session-title-llm",
+            "  disabled: true",
+            "- id: headless-runner",
+            "  disabled: true",
+            "- insert:",
+            "    - id: aop-headless-runner",
+            f"      name: {json.dumps(runner_uri)}",
+            "      inject: [headlessStartup]",
+        ]
+    )
+    patch = scratch / f"aop-dsh-{request.run_id}.cordis.yml"
+    _atomic_write(patch, "\n".join(rows) + "\n")
+    patch.chmod(0o600)
+
+    environment["DSH_HOME"] = os.fspath(dsh_home)
+    environment["DSH_TELEMETRY_DISABLED"] = "1"
+    environment["AOP_DSH_SESSION_ID"] = (
+        request.session_id or f"session-{request.run_id}"
+    )
+    if request.session_id:
+        environment["AOP_DSH_RESUME"] = "1"
+    else:
+        environment.pop("AOP_DSH_RESUME", None)
+    return patch
+
+
+def _read_yaml_mapping(path: Path, label: str) -> dict[str, object]:
+    if not path.is_file():
+        return {}
+    try:
+        value = yaml.load(path.read_text(), Loader=_UniqueKeyLoader)
+    except OSError as error:
+        raise AOPError(f"could not read {label}") from error
+    except (UnicodeError, yaml.YAMLError) as error:
+        raise AOPError(f"{label} are invalid YAML") from error
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise AOPError(f"{label} must be a YAML mapping")
+    return value
+
+
+def _project_dsh_provider_settings(
+    settings: dict[str, object], provider: str
+) -> tuple[dict[str, object], str | None]:
+    if provider == "deepseek-official":
+        profile = settings.get("llm-deepseek", {})
+        if not isinstance(profile, dict):
+            raise AOPError("dsh llm-deepseek settings must be a mapping")
+        credential_ref = profile.get("apiKeyEnv", "DEEPSEEK_API_KEY")
+        projected = {"llm-deepseek": profile} if profile else {}
+    else:
+        pi_ai = settings.get("llm-pi-ai", {})
+        if not isinstance(pi_ai, dict):
+            raise AOPError("dsh llm-pi-ai settings must be a mapping")
+        providers = pi_ai.get("providers", {})
+        if not isinstance(providers, dict):
+            raise AOPError("dsh llm-pi-ai providers must be a mapping")
+        profile = providers.get(provider)
+        if not isinstance(profile, dict):
+            raise AOPError(
+                f'dsh provider "{provider}" is not configured in llm-pi-ai.providers'
+            )
+        credential_ref = profile.get("apiKeyEnv")
+        projected = {"llm-pi-ai": {"providers": {provider: profile}}}
+    if credential_ref is not None and (
+        not isinstance(credential_ref, str)
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", credential_ref) is None
+    ):
+        raise AOPError(f'dsh provider "{provider}" has an invalid apiKeyEnv')
+    return projected, credential_ref
+
+
+def _project_dsh_credential(
+    credentials: dict[str, object], credential_ref: str, destination: Path
+) -> None:
+    credential = credentials.get(credential_ref)
+    if credential is None:
+        return
+    if not isinstance(credential, str) or not credential:
+        raise AOPError(f"dsh managed {credential_ref} must be a nonempty string")
+    _atomic_write_private(
+        destination,
+        yaml.safe_dump(
+            {credential_ref: credential},
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+    )
 
 
 def _codex_source_home(environment: dict[str, str]) -> Path | None:
@@ -2343,7 +2988,9 @@ def _codex_source_home(environment: dict[str, str]) -> Path | None:
     return None
 
 
-def _prepare_codex_state(source: Path | None, destination: Path) -> None:
+def _prepare_codex_state(
+    source: Path | None, destination: Path, *, sealed: bool = False
+) -> None:
     if destination.is_dir():
         return
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
@@ -2352,6 +2999,8 @@ def _prepare_codex_state(source: Path | None, destination: Path) -> None:
         if source:
             for entry in source.iterdir():
                 target = temporary / entry.name
+                if sealed and entry.name != "auth.json":
+                    continue
                 if entry.name in _CODEX_SEED_DIRECTORIES and entry.is_dir():
                     ignore = (
                         shutil.ignore_patterns(".system")
@@ -2405,7 +3054,11 @@ def _cursor_source_auth(environment: dict[str, str]) -> Path | None:
 
 
 def _prepare_cursor_state(
-    source_home: Path, source_auth: Path | None, destination: Path
+    source_home: Path,
+    source_auth: Path | None,
+    destination: Path,
+    *,
+    sealed: bool = False,
 ) -> None:
     if destination.is_dir():
         return
@@ -2417,6 +3070,8 @@ def _prepare_cursor_state(
         for entry in source_home.iterdir():
             if entry.name in _CURSOR_RUNTIME_DIRECTORIES:
                 continue
+            if sealed and entry.name != "auth.json":
+                continue
             target = private_home / entry.name
             if entry.is_dir():
                 shutil.copytree(entry, target, symlinks=True)
@@ -2427,6 +3082,14 @@ def _prepare_cursor_state(
                 private_home.joinpath(name).mkdir()
         if source_auth is None:
             private_config.mkdir(parents=True)
+        elif sealed:
+            private_config.mkdir(parents=True)
+            for entry in source_auth.iterdir():
+                if entry.is_file() and any(
+                    marker in entry.name.lower()
+                    for marker in ("auth", "credential", "token")
+                ):
+                    shutil.copy2(entry, private_config / entry.name)
         else:
             shutil.copytree(source_auth, private_config, symlinks=True)
         _make_tree_user_writable(temporary)
@@ -2440,7 +3103,12 @@ def _prepare_devin_environment(environment: dict[str, str]) -> None:
     source_data = _devin_source_data(environment)
     source_config = _devin_source_config(environment)
     destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "devin"
-    _prepare_devin_state(source_data, source_config, destination)
+    _prepare_devin_state(
+        source_data,
+        source_config,
+        destination,
+        sealed=_sealed(environment),
+    )
     cache = Path(environment["AOP_CACHE_DIR"]) / "devin"
     cache.mkdir(parents=True, exist_ok=True)
     environment.update(
@@ -2479,8 +3147,45 @@ def _devin_source_config(environment: dict[str, str]) -> Path | None:
     return None
 
 
+def _prepare_claude_environment(environment: dict[str, str]) -> None:
+    source_home = Path(environment["HOME"])
+    destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "claude" / "home"
+    if not destination.exists():
+        destination.mkdir(parents=True, mode=0o700)
+        source_config = source_home / ".claude"
+        private_config = destination / ".claude"
+        if _sealed(environment):
+            private_config.mkdir()
+            credentials = source_config / ".credentials.json"
+            if credentials.is_file():
+                shutil.copy2(credentials, private_config / credentials.name)
+        elif source_config.is_dir():
+            shutil.copytree(
+                source_config,
+                private_config,
+                ignore=shutil.ignore_patterns(
+                    "debug",
+                    "history.jsonl",
+                    "projects",
+                    "session-env",
+                    "shell-snapshots",
+                    "statsig",
+                    "todos",
+                ),
+            )
+        source_settings = source_home / ".claude.json"
+        if source_settings.is_file() and not _sealed(environment):
+            shutil.copy2(source_settings, destination / source_settings.name)
+        _make_tree_user_writable(destination)
+    environment["HOME"] = os.fspath(destination)
+
+
 def _prepare_devin_state(
-    source_data: Path, source_config: Path | None, destination: Path
+    source_data: Path,
+    source_config: Path | None,
+    destination: Path,
+    *,
+    sealed: bool = False,
 ) -> None:
     if destination.is_dir():
         return
@@ -2494,6 +3199,14 @@ def _prepare_devin_state(
         for entry in source_data.iterdir():
             if entry.name in _DEVIN_DATA_RUNTIME_NAMES:
                 continue
+            if sealed and not (
+                entry.is_file()
+                and any(
+                    marker in entry.name.lower()
+                    for marker in ("auth", "credential", "token")
+                )
+            ):
+                continue
             target = private_data / entry.name
             if entry.is_dir():
                 shutil.copytree(entry, target, symlinks=True)
@@ -2501,6 +3214,19 @@ def _prepare_devin_state(
                 shutil.copy2(entry, target)
         if source_config is None:
             private_config.mkdir(parents=True)
+        elif sealed:
+            private_config.mkdir(parents=True)
+            source = source_config / "config.json"
+            if source.is_file():
+                try:
+                    value = json.loads(source.read_text())
+                except (OSError, json.JSONDecodeError) as error:
+                    raise AOPError(
+                        f"could not sanitize Devin configuration: {error}"
+                    ) from error
+                private_config.joinpath("config.json").write_text(
+                    f"{json.dumps(_without_instruction_sources(value), sort_keys=True)}\n"
+                )
         else:
             shutil.copytree(source_config, private_config, symlinks=True)
         _make_tree_user_writable(temporary)
@@ -2524,9 +3250,24 @@ def _make_tree_user_writable(root: Path) -> None:
             entry.chmod(entry.stat().st_mode | permissions)
 
 
+def _without_instruction_sources(value: object) -> object:
+    forbidden = ("instruction", "mcp", "plugin", "hook", "skill", "rule", "memory")
+    if isinstance(value, dict):
+        return {
+            key: _without_instruction_sources(nested)
+            for key, nested in value.items()
+            if not any(marker in key.lower() for marker in forbidden)
+        }
+    if isinstance(value, list):
+        return [_without_instruction_sources(item) for item in value]
+    return value
+
+
 def _opencode_source_config(environment: dict[str, str]) -> Path | None:
     configured = environment.get("AOP_OPENCODE_CONFIG_DIR")
-    base = Path(environment.get("XDG_CONFIG_HOME", Path(environment["HOME"]) / ".config"))
+    base = Path(
+        environment.get("XDG_CONFIG_HOME", Path(environment["HOME"]) / ".config")
+    )
     source = Path(configured).expanduser() if configured else base / "opencode"
     if source.is_dir():
         return source.resolve()
@@ -2538,9 +3279,7 @@ def _opencode_source_config(environment: dict[str, str]) -> Path | None:
 def _opencode_source_data(environment: dict[str, str]) -> Path | None:
     configured = environment.get("AOP_OPENCODE_DATA_DIR")
     base = Path(
-        environment.get(
-            "XDG_DATA_HOME", Path(environment["HOME"]) / ".local" / "share"
-        )
+        environment.get("XDG_DATA_HOME", Path(environment["HOME"]) / ".local" / "share")
     )
     source = Path(configured).expanduser() if configured else base / "opencode"
     if source.is_dir():
@@ -2551,7 +3290,11 @@ def _opencode_source_data(environment: dict[str, str]) -> Path | None:
 
 
 def _prepare_opencode_state(
-    source_config: Path | None, source_data: Path | None, destination: Path
+    source_config: Path | None,
+    source_data: Path | None,
+    destination: Path,
+    *,
+    sealed: bool = False,
 ) -> None:
     if destination.is_dir():
         return
@@ -2563,7 +3306,7 @@ def _prepare_opencode_state(
     private_data.mkdir(parents=True, mode=0o700)
     private_state.mkdir(parents=True, mode=0o700)
     try:
-        if source_config:
+        if source_config and not sealed:
             for entry in source_config.iterdir():
                 if entry.name in _OPENCODE_CONFIG_RUNTIME_NAMES:
                     continue
@@ -2600,7 +3343,7 @@ def _agy_source_dir(environment: dict[str, str]) -> Path:
         ) from error
 
 
-def _prepare_agy_dir(source: Path, destination: Path) -> None:
+def _prepare_agy_dir(source: Path, destination: Path, *, sealed: bool = False) -> None:
     if destination.is_dir():
         return
     if not source.is_dir():
@@ -2610,11 +3353,16 @@ def _prepare_agy_dir(source: Path, destination: Path) -> None:
     try:
         for entry in source.iterdir():
             target = temporary / entry.name
-            if entry.name in _AGY_SEED_DIRECTORIES and entry.is_dir():
+            if not sealed and entry.name in _AGY_SEED_DIRECTORIES and entry.is_dir():
                 shutil.copytree(entry, target)
-            elif entry.is_file():
+            elif entry.is_file() and (
+                not sealed or entry.name in _AGY_SEALED_SEED_FILES
+            ):
                 shutil.copy2(entry, target)
-        for directory, names in _AGY_NESTED_SEED_FILES.items():
+        nested_files = (
+            _AGY_SEALED_NESTED_SEED_FILES if sealed else _AGY_NESTED_SEED_FILES
+        )
+        for directory, names in nested_files.items():
             source_directory = source / directory
             for name in names:
                 entry = source_directory / name
@@ -2677,7 +3425,9 @@ def _hermes_source_home(environment: dict[str, str]) -> Path:
     return default
 
 
-def _prepare_hermes_home(source: Path, destination: Path) -> None:
+def _prepare_hermes_home(
+    source: Path, destination: Path, *, sealed: bool = False
+) -> None:
     if destination.is_dir():
         return
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
@@ -2685,9 +3435,13 @@ def _prepare_hermes_home(source: Path, destination: Path) -> None:
     try:
         for entry in source.iterdir():
             target = temporary / entry.name
-            if entry.name in _HERMES_SEED_DIRECTORIES and entry.is_dir():
+            if not sealed and entry.name in _HERMES_SEED_DIRECTORIES and entry.is_dir():
                 shutil.copytree(entry, target, symlinks=True)
-            elif entry.is_file() and entry.name not in _HERMES_RUNTIME_FILES:
+            elif (
+                entry.is_file()
+                and entry.name not in _HERMES_RUNTIME_FILES
+                and (not sealed or entry.name == "auth.json")
+            ):
                 shutil.copy2(entry, target)
         os.replace(temporary, destination)
     except OSError as error:
@@ -2857,7 +3611,7 @@ def _hermes_runtime_environment(
         )
     provider_state = Path(environment["AOP_PROVIDER_STATE_DIR"])
     task_home = provider_state / "hermes" / "home"
-    _prepare_hermes_home(source_home, task_home)
+    _prepare_hermes_home(source_home, task_home, sealed=_sealed(environment))
     state_dir = provider_state.parent.parent
     lock_path = state_dir / "locks" / "hermes-credentials.lock"
     runtime_environment = environment.copy()
@@ -2884,6 +3638,8 @@ def adapter_for(agent: str) -> AgentAdapter:
         return CursorAdapter()
     if agent == "devin":
         return DevinAdapter()
+    if agent == "dsh":
+        return DeepSeekHarnessAdapter()
     if agent == "opencode":
         return OpenCodeAdapter()
     if agent == "agy":
@@ -2916,15 +3672,15 @@ class AgentRunner:
         inference_provider: str | None = None,
         effort: str | None = None,
         mode: str = "agent",
-        sandbox: str = "workspace-write",
+        profile: str = "edit",
         timeout_seconds: float | None = None,
         artifacts: Sequence[str] = (),
-        read_paths: Sequence[str | os.PathLike[str]] = (),
+        input_paths: Sequence[str | os.PathLike[str]] = (),
     ) -> RunResult:
         self._validate_mode(mode)
         self._validate_inference_provider(inference_provider, model)
-        if read_paths and sandbox == "danger-full-access":
-            raise AOPError("--read requires workspace-write or scratch-write")
+        if profile not in PROFILES:
+            raise AOPError(f"unknown execution profile: {profile}")
         model, effort = self.adapter.normalize_options(model, effort)
         request = self._request(
             task=task,
@@ -2934,12 +3690,16 @@ class AgentRunner:
             inference_provider=inference_provider,
             effort=effort,
             mode=mode,
-            sandbox=sandbox,
+            profile=profile,
             timeout_seconds=timeout_seconds,
             artifacts=artifacts,
         )
-        worktree = self._get_or_create_worktree(task, base)
-        return self._execute(request, worktree, read_paths=read_paths)
+        worktree = (
+            self._create_sealed_workspace(request.run_id)
+            if profile == "sealed"
+            else self._get_or_create_worktree(task, base)
+        )
+        return self._execute(request, worktree, input_paths=input_paths)
 
     def resume(
         self,
@@ -2948,7 +3708,7 @@ class AgentRunner:
         prompt: str,
         timeout_seconds: float | None = None,
         artifacts: Sequence[str] = (),
-        read_paths: Sequence[str | os.PathLike[str]] | None = None,
+        input_paths: Sequence[str | os.PathLike[str]] | None = None,
         _task_lock_held: bool = False,
     ) -> RunResult:
         parent_request = self.store.load_request(run_id)
@@ -2965,15 +3725,52 @@ class AgentRunner:
         _task_lock_held = _task_lock_held or (
             os.environ.get("AOP_TASK_LOCK_HELD") == parent_request.task
         )
-        worktree = self.manager.get(parent_request.task)
-        inherited_read_paths = tuple(
-            item.source_path for item in parent_request.read_paths
+        if parent_request.profile == "sealed":
+            workspace_record = parent_request.effective_policy.get("workspace", {})
+            workspace_path = workspace_record.get("controller_path")
+            if not isinstance(workspace_path, str):
+                raise AOPError("sealed run is missing its controller workspace path")
+            path = Path(workspace_path).resolve()
+            sealed_root = (self.manager.state_dir / "sealed").resolve()
+            if not path.is_relative_to(sealed_root) or not path.is_dir():
+                raise AOPError("sealed run workspace is missing or outside AOP state")
+            worktree = Worktree(task=parent_request.run_id, path=path, head="")
+        else:
+            worktree = self.manager.get(parent_request.task)
+        if parent_request.profile == "sealed" and input_paths is None:
+            snapshot_root = parent_request.effective_policy.get("controller", {}).get(
+                "input_snapshot"
+            )
+            if not isinstance(snapshot_root, str):
+                raise AOPError("sealed run is missing its controller input snapshot")
+            resolved_snapshot = Path(snapshot_root).resolve()
+            snapshots_root = (self.manager.state_dir / "snapshots").resolve()
+            if (
+                not resolved_snapshot.is_relative_to(snapshots_root)
+                or not resolved_snapshot.is_dir()
+            ):
+                raise AOPError(
+                    "sealed run input snapshot is missing or outside AOP state"
+                )
+            inherited_inputs = tuple(
+                os.fspath(resolved_snapshot / Path(item.mounted_path).name)
+                for item in parent_request.inputs
+            )
+            for item, inherited in zip(
+                parent_request.inputs, inherited_inputs, strict=True
+            ):
+                kind, files = _inspect_read_path(Path(inherited))
+                if kind != item.kind or _read_path_digest(kind, files) != item.sha256:
+                    raise AOPError(
+                        f"sealed input snapshot changed since run {parent_request.run_id}"
+                    )
+            input_provenance = tuple(item.source_path for item in parent_request.inputs)
+        else:
+            inherited_inputs = tuple(item.source_path for item in parent_request.inputs)
+            input_provenance = None
+        selected_inputs = (
+            inherited_inputs if input_paths is None else tuple(input_paths)
         )
-        selected_read_paths = (
-            inherited_read_paths if read_paths is None else tuple(read_paths)
-        )
-        if selected_read_paths and parent_request.sandbox == "danger-full-access":
-            raise AOPError("--read requires workspace-write or scratch-write")
         request = self._request(
             task=parent_request.task,
             prompt=prompt,
@@ -2982,7 +3779,7 @@ class AgentRunner:
             inference_provider=parent_request.inference_provider,
             effort=parent_request.effort,
             mode=parent_request.mode,
-            sandbox=parent_request.sandbox,
+            profile=parent_request.profile,
             timeout_seconds=(
                 timeout_seconds
                 if timeout_seconds is not None
@@ -2995,7 +3792,8 @@ class AgentRunner:
         return self._execute(
             request,
             worktree,
-            read_paths=selected_read_paths,
+            input_paths=selected_inputs,
+            input_provenance=input_provenance,
             task_lock_held=_task_lock_held,
         )
 
@@ -3004,55 +3802,130 @@ class AgentRunner:
         request: RunRequest,
         worktree: Worktree,
         *,
-        read_paths: Sequence[str | os.PathLike[str]],
+        input_paths: Sequence[str | os.PathLike[str]],
+        input_provenance: Sequence[str] | None = None,
         task_lock_held: bool = False,
     ) -> RunResult:
         if task_lock_held:
-            return self._execute_unlocked(request, worktree, read_paths)
+            return self._execute_unlocked(
+                request, worktree, input_paths, input_provenance=input_provenance
+            )
         with exclusive_lock(
             task_lock_path(self.manager.state_dir, request.task),
             f"task {request.task}",
         ):
-            return self._execute_unlocked(request, worktree, read_paths)
+            return self._execute_unlocked(
+                request, worktree, input_paths, input_provenance=input_provenance
+            )
 
     def _execute_unlocked(
         self,
         request: RunRequest,
         worktree: Worktree,
-        read_paths: Sequence[str | os.PathLike[str]],
+        input_paths: Sequence[str | os.PathLike[str]],
+        *,
+        input_provenance: Sequence[str] | None = None,
     ) -> RunResult:
-        scratch_dir = worktree.path / "scratch"
-        scratch_dir.mkdir(exist_ok=True)
-        input_dir = scratch_dir / "inputs" / request.run_id
+        parent_controller: dict[str, object] = {}
+        if request.profile == "sealed" and request.parent_run_id:
+            parent = self.store.load_request(request.parent_run_id)
+            parent_controller = parent.effective_policy.get("controller", {})
+        state_key = request.run_id if request.profile == "sealed" else request.task
+        recorded_scratch = parent_controller.get("scratch")
+        scratch_dir = (
+            Path(recorded_scratch)
+            if isinstance(recorded_scratch, str)
+            else self.manager.state_dir / "scratch" / state_key
+        )
+        scratch_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        scratch_dir.parent.chmod(0o700)
+        scratch_dir.chmod(0o700)
+        input_dir = self.manager.state_dir / "snapshots" / request.run_id
         input_dir.mkdir(parents=True, exist_ok=False)
+        input_dir.parent.chmod(0o700)
+        input_dir.chmod(0o700)
         output_dir = scratch_dir / "outputs" / request.run_id
         output_dir.mkdir(parents=True, exist_ok=False)
-        provider_state = self.manager.state_dir / "provider-state" / request.task
+        if parent_controller:
+            recorded_state = parent_controller.get("provider_state")
+            if not isinstance(recorded_state, str):
+                raise AOPError("sealed run is missing its controller state path")
+            provider_state = Path(recorded_state)
+        else:
+            provider_state = self.manager.state_dir / "provider-state" / state_key
         provider_state.mkdir(parents=True, exist_ok=True, mode=0o700)
         provider_state.chmod(0o700)
-        declared_read_paths = _prepare_read_paths(read_paths, input_dir)
+        (provider_state / "home").mkdir(exist_ok=True, mode=0o700)
+        recorded_cache = parent_controller.get("cache")
+        if request.profile == "sealed":
+            cache_dir = (
+                Path(recorded_cache)
+                if isinstance(recorded_cache, str)
+                else self.manager.state_dir / "sealed-cache" / state_key
+            )
+            cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            cache_dir.parent.chmod(0o700)
+            cache_dir.chmod(0o700)
+        else:
+            cache_dir = self.manager.cache_dir
+            cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        declared_inputs = _prepare_inputs(
+            input_paths,
+            input_dir,
+            guest_paths=request.profile != "host",
+            provenance=input_provenance,
+        )
+        effective_policy = resolve_policy(
+            request.profile,
+            workspace_host_path=(
+                worktree.path if request.profile in {"edit", "review", "host"} else None
+            ),
+            input_names=tuple(Path(item.mounted_path).name for item in declared_inputs),
+        ).to_dict()
+        effective_policy["workspace"]["controller_path"] = os.fspath(worktree.path)
+        effective_policy["controller"] = {
+            "provider_state": os.fspath(provider_state),
+            "scratch": os.fspath(scratch_dir),
+            "cache": os.fspath(cache_dir),
+            "input_snapshot": os.fspath(input_dir),
+        }
+        effective_policy["provider_runtime"] = provider_runtime_record(self.adapter)
+        effective_policy["instruction_sources"] = _instruction_sources(
+            request, worktree, os.environ
+        )
+        effective_policy["environment"]["inherited_names"] = sorted(
+            (
+                os.environ.keys()
+                if request.profile == "host"
+                else _filtered_environment(os.environ).keys()
+            )
+        )
         request = replace(
             request,
             prompt=_run_prompt(
                 request.prompt,
-                declared_read_paths,
+                declared_inputs,
                 request.artifacts,
-                output_dir,
+                Path("/output") if request.profile != "host" else output_dir,
             ),
-            read_paths=declared_read_paths,
+            inputs=declared_inputs,
+            effective_policy=effective_policy,
         )
         environment = os.environ.copy()
         environment.update(
             {
                 "AOP_ROOT": os.fspath(self.manager.root),
-                "AOP_TASK": request.task,
+                "AOP_TASK": (
+                    request.run_id if request.profile == "sealed" else request.task
+                ),
                 "AOP_WORKTREE": os.fspath(worktree.path),
-                "AOP_CACHE_DIR": os.fspath(self.manager.cache_dir),
+                "AOP_CACHE_DIR": os.fspath(cache_dir),
                 "AOP_PROVIDER_STATE_DIR": os.fspath(provider_state),
                 "AOP_SCRATCH_DIR": os.fspath(scratch_dir),
                 "AOP_INPUT_DIR": os.fspath(input_dir),
                 "AOP_OUTPUT_DIR": os.fspath(output_dir),
                 "AOP_RUN_ID": request.run_id,
+                "AOP_PROFILE": request.profile,
             }
         )
         if request.provider == "hermes":
@@ -3061,21 +3934,32 @@ class AgentRunner:
                 environment.pop("HERMES_KANBAN_TASK", None)
         if request.provider == "agy":
             _prepare_agy_dir(
-                _agy_source_dir(environment), provider_state / "agy" / "gemini"
+                _agy_source_dir(environment),
+                provider_state / "agy" / "gemini",
+                sealed=request.profile == "sealed",
             )
         run_dir = self.store.create(request)
-        if request.read_paths:
-            input_manifest = run_dir / "input-manifest.json"
+        if request.inputs:
+            input_manifest = input_dir / "manifest.json"
+            guest_manifest = {
+                "schema_version": 1,
+                "inputs": [
+                    {key: value for key, value in item.items() if key != "source_path"}
+                    for item in request.to_dict()["inputs"]
+                ],
+            }
             self.store.write_json(
-                input_manifest,
-                {"schema_version": 1, "read_paths": request.to_dict()["read_paths"]},
+                run_dir / "input-manifest.json",
+                {"schema_version": 1, "inputs": request.to_dict()["inputs"]},
             )
+            self.store.write_json(input_manifest, guest_manifest)
             environment["AOP_INPUT_MANIFEST"] = os.fspath(input_manifest)
+        _make_snapshot_read_only(input_dir)
         result = self.adapter.execute(request, worktree, run_dir, environment)
         result = replace(
             result,
             inference_provider=request.inference_provider,
-            read_paths=request.read_paths,
+            inputs=request.inputs,
         )
         if result.succeeded and request.artifacts:
             result = _archive_artifacts(result, request.artifacts, output_dir, run_dir)
@@ -3092,7 +3976,7 @@ class AgentRunner:
         inference_provider: str | None,
         effort: str | None,
         mode: str,
-        sandbox: str,
+        profile: str,
         timeout_seconds: float | None,
         session_id: str | None = None,
         parent_run_id: str | None = None,
@@ -3108,12 +3992,13 @@ class AgentRunner:
             model=model,
             inference_provider=inference_provider,
             effort=effort,
-            sandbox=sandbox,
+            profile=profile,
+            effective_policy={},
             timeout_seconds=timeout_seconds,
             session_id=session_id,
             parent_run_id=parent_run_id,
             artifacts=normalize_artifacts(artifacts),
-            read_paths=(),
+            inputs=(),
             created_at=_now(),
         )
 
@@ -3128,18 +4013,137 @@ class AgentRunner:
     ) -> None:
         if inference_provider is None:
             return
-        if self.adapter.provider != "hermes":
+        if self.adapter.provider not in {"hermes", "dsh"}:
             raise AOPError(
                 f"{self.adapter.provider} does not support --provider overrides"
             )
         if model is None:
-            raise AOPError("Hermes --provider requires an explicit --model")
+            raise AOPError(
+                f"{self.adapter.provider} --provider requires an explicit --model"
+            )
 
     def _get_or_create_worktree(self, task: str, base: str) -> Worktree:
         for worktree in self.manager.list():
             if worktree.task == task:
                 return worktree
         return self.manager.create(task, base)
+
+    def _create_sealed_workspace(self, run_id: str) -> Worktree:
+        path = self.manager.state_dir / "sealed" / run_id / "workspace"
+        path.mkdir(parents=True, mode=0o700)
+        (self.manager.state_dir / "sealed").chmod(0o700)
+        path.parent.chmod(0o700)
+        return Worktree(task=run_id, path=path, head="")
+
+
+def provider_runtime_record(adapter: AgentAdapter) -> dict[str, object]:
+    binary = getattr(adapter, "binary", None)
+    if not isinstance(binary, str):
+        return {"executable": None, "sha256": None}
+    resolved_name = shutil.which(binary)
+    if resolved_name is None:
+        return {"executable": binary, "sha256": None}
+    executable = Path(resolved_name).resolve()
+    try:
+        with executable.open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    except OSError:
+        digest = None
+    return {
+        "executable": os.fspath(executable),
+        "guest_root": "/runtime/provider",
+        "sha256": digest,
+    }
+
+
+def _instruction_sources(
+    request: RunRequest,
+    worktree: Worktree,
+    environment: dict[str, str],
+) -> list[dict[str, object]]:
+    if request.profile == "sealed":
+        return []
+    candidates: list[Path] = []
+    if request.provider == "codex":
+        source = _codex_source_home(environment)
+        if source:
+            candidates.extend(
+                source / name for name in ("config.toml", "rules", "skills")
+            )
+    elif request.provider == "claude":
+        home = Path(environment["HOME"])
+        candidates.extend([home / ".claude.json", home / ".claude" / "settings.json"])
+    elif request.provider == "cursor":
+        home = _cursor_source_home(environment)
+        candidates.extend(
+            home / name for name in ("skills", "skills-cursor", "plugins", "policies")
+        )
+    elif request.provider == "devin":
+        config = _devin_source_config(environment)
+        if config:
+            candidates.append(config)
+    elif request.provider == "opencode":
+        config = _opencode_source_config(environment)
+        if config:
+            candidates.extend(
+                entry
+                for entry in config.iterdir()
+                if entry.name not in _OPENCODE_CONFIG_RUNTIME_NAMES
+            )
+    elif request.provider == "agy":
+        candidates.append(_agy_source_dir(environment) / "config")
+    elif request.provider == "hermes":
+        home = _hermes_source_home(environment)
+        candidates.extend(home / name for name in sorted(_HERMES_SEED_DIRECTORIES))
+    candidates.extend(worktree.path / name for name in ("AGENTS.md", "CLAUDE.md"))
+    records = []
+    for candidate in candidates:
+        record = _path_provenance(candidate)
+        if record is not None:
+            records.append(record)
+    return sorted(records, key=lambda record: str(record["source_path"]))
+
+
+def _path_provenance(path: Path) -> dict[str, object] | None:
+    try:
+        status = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(status.st_mode):
+        target = os.readlink(path).encode()
+        return {
+            "source_path": os.fspath(path),
+            "kind": "symlink",
+            "sha256": hashlib.sha256(target).hexdigest(),
+        }
+    if stat.S_ISREG(status.st_mode):
+        with path.open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        return {"source_path": os.fspath(path), "kind": "file", "sha256": digest}
+    if not stat.S_ISDIR(status.st_mode):
+        return None
+    digest = hashlib.sha256(b"aop-instruction-directory-v1\0")
+    files = 0
+    for directory, names, filenames in os.walk(path):
+        names[:] = sorted(
+            name for name in names if not (Path(directory) / name).is_symlink()
+        )
+        for name in sorted(filenames):
+            source = Path(directory) / name
+            if source.is_symlink() or not source.is_file():
+                continue
+            relative = source.relative_to(path).as_posix().encode()
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            with source.open("rb") as handle:
+                digest.update(hashlib.file_digest(handle, "sha256").digest())
+            files += 1
+    return {
+        "source_path": os.fspath(path),
+        "kind": "directory",
+        "files": files,
+        "sha256": digest.hexdigest(),
+    }
 
 
 def normalize_artifacts(artifacts: Sequence[str]) -> tuple[str, ...]:
@@ -3164,41 +4168,53 @@ def normalize_artifacts(artifacts: Sequence[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
-def _prepare_read_paths(
-    values: Sequence[str | os.PathLike[str]], input_dir: Path
-) -> tuple[ReadPath, ...]:
-    prepared: list[ReadPath] = []
+def _prepare_inputs(
+    values: Sequence[str | os.PathLike[str]],
+    input_dir: Path,
+    *,
+    guest_paths: bool = True,
+    provenance: Sequence[str] | None = None,
+) -> tuple[InputSnapshot, ...]:
+    if provenance is not None and len(provenance) != len(values):
+        raise AOPError("input provenance does not match the input snapshot set")
+    prepared: list[InputSnapshot] = []
     aliases: set[str] = set()
-    for value in values:
+    for index, value in enumerate(values):
         raw = os.fspath(value)
         if not raw or "\0" in raw:
-            raise AOPError("read path must be a non-empty filesystem path")
+            raise AOPError("input path must be a non-empty filesystem path")
         candidate = Path(raw).expanduser()
         try:
             initial_status = candidate.lstat()
             source = candidate.resolve(strict=True)
         except OSError as error:
-            raise AOPError(f"could not inspect read path {candidate}: {error}") from error
+            raise AOPError(
+                f"could not inspect input path {candidate}: {error}"
+            ) from error
         if stat.S_ISLNK(initial_status.st_mode):
-            raise AOPError(f"read path may not be a symlink: {candidate}")
+            raise AOPError(f"input path may not be a symlink: {candidate}")
         alias = source.name
         if not alias:
-            raise AOPError(f"read path must have a basename: {source}")
+            raise AOPError(f"input path must have a basename: {source}")
         if alias in aliases:
-            raise AOPError(f"read paths have the same basename: {alias}")
+            raise AOPError(f"input paths have the same basename: {alias}")
         aliases.add(alias)
 
-        kind, files = _inspect_read_path(source)
         mounted = input_dir / alias
-        if kind == "directory":
-            mounted.mkdir()
+        if source.is_dir():
+            _copy_input_directory(source, mounted)
         else:
-            mounted.touch()
+            shutil.copyfile(source, mounted)
+        kind, files = _inspect_read_path(mounted)
         size_bytes = sum(item.size_bytes for item in files)
         prepared.append(
-            ReadPath(
-                source_path=os.fspath(source),
-                mounted_path=os.fspath(mounted),
+            InputSnapshot(
+                source_path=(
+                    provenance[index] if provenance is not None else os.fspath(source)
+                ),
+                mounted_path=(
+                    f"/inputs/{alias}" if guest_paths else os.fspath(mounted)
+                ),
                 kind=kind,
                 size_bytes=size_bytes,
                 sha256=_read_path_digest(kind, files),
@@ -3208,7 +4224,35 @@ def _prepare_read_paths(
     return tuple(prepared)
 
 
-def _inspect_read_path(source: Path) -> tuple[str, tuple[ReadPathFile, ...]]:
+def _copy_input_directory(source: Path, destination: Path) -> None:
+    destination.mkdir()
+    for child in sorted(source.iterdir(), key=lambda item: item.name):
+        status = child.lstat()
+        target = destination / child.name
+        if stat.S_ISLNK(status.st_mode):
+            raise AOPError(f"read path contains a symlink: {child}")
+        if stat.S_ISDIR(status.st_mode):
+            _copy_input_directory(child, target)
+        elif stat.S_ISREG(status.st_mode):
+            shutil.copyfile(child, target)
+        else:
+            raise AOPError(f"read path contains a special file: {child}")
+
+
+def _make_snapshot_read_only(root: Path) -> None:
+    for directory, names, files in os.walk(root, topdown=False):
+        path = Path(directory)
+        for name in files:
+            entry = path / name
+            entry.chmod(stat.S_IRUSR)
+        for name in names:
+            entry = path / name
+            if entry.is_dir() and not entry.is_symlink():
+                entry.chmod(stat.S_IRUSR | stat.S_IXUSR)
+        path.chmod(stat.S_IRUSR | stat.S_IXUSR)
+
+
+def _inspect_read_path(source: Path) -> tuple[str, tuple[InputFile, ...]]:
     status = source.lstat()
     if stat.S_ISLNK(status.st_mode):
         raise AOPError(f"read path may not be a symlink: {source}")
@@ -3217,13 +4261,15 @@ def _inspect_read_path(source: Path) -> tuple[str, tuple[ReadPathFile, ...]]:
     if not stat.S_ISDIR(status.st_mode):
         raise AOPError(f"read path is not a regular file or directory: {source}")
 
-    files: list[ReadPathFile] = []
+    files: list[InputFile] = []
 
     def collect(directory: Path, relative: PurePosixPath) -> None:
         try:
             children = sorted(directory.iterdir(), key=lambda child: child.name)
         except OSError as error:
-            raise AOPError(f"could not read input directory {directory}: {error}") from error
+            raise AOPError(
+                f"could not read input directory {directory}: {error}"
+            ) from error
         for child in children:
             logical = relative / child.name
             child_status = child.lstat()
@@ -3240,21 +4286,21 @@ def _inspect_read_path(source: Path) -> tuple[str, tuple[ReadPathFile, ...]]:
     return "directory", tuple(files)
 
 
-def _read_path_file(source: Path, relative_path: str) -> ReadPathFile:
+def _read_path_file(source: Path, relative_path: str) -> InputFile:
     try:
         size_bytes = source.stat().st_size
         with source.open("rb") as handle:
             digest = hashlib.file_digest(handle, "sha256").hexdigest()
     except OSError as error:
         raise AOPError(f"could not hash read path file {source}: {error}") from error
-    return ReadPathFile(
+    return InputFile(
         relative_path=relative_path,
         size_bytes=size_bytes,
         sha256=digest,
     )
 
 
-def _read_path_digest(kind: str, files: tuple[ReadPathFile, ...]) -> str:
+def _read_path_digest(kind: str, files: tuple[InputFile, ...]) -> str:
     if kind == "file":
         return files[0].sha256
     digest = hashlib.sha256(b"aop-read-directory-v1\0")
@@ -3269,23 +4315,21 @@ def _read_path_digest(kind: str, files: tuple[ReadPathFile, ...]) -> str:
 
 def _run_prompt(
     prompt: str,
-    read_paths: tuple[ReadPath, ...],
+    inputs: tuple[InputSnapshot, ...],
     artifacts: tuple[str, ...],
     output_dir: Path,
 ) -> str:
-    if read_paths:
+    if inputs:
         paths = "\n".join(
-            f"- Preferred: {json.dumps(item.mounted_path)}\n"
-            f"  Original: {json.dumps(item.source_path)}\n"
+            f"- Path: {json.dumps(item.mounted_path)}\n"
             f"  SHA-256: {item.sha256} ({item.size_bytes} bytes, {item.kind})"
-            for item in read_paths
+            for item in inputs
         )
         prompt = (
             f"{prompt.rstrip()}\n\n"
-            "AOP declared read-only paths:\n"
+            "AOP snapshotted read-only inputs:\n"
             f"{paths}\n"
-            "Both locations are read-only. Prefer the task-local path when the provider "
-            "limits file access to the workspace."
+            "The paths above are immutable snapshots. Source host paths are not exposed."
         )
     return _artifact_prompt(prompt, artifacts, output_dir)
 

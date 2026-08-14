@@ -12,11 +12,36 @@ import pytest
 from agent_orchestration_process import __version__
 from agent_orchestration_process.cli import build_parser, main
 from agent_orchestration_process.locks import exclusive_lock, task_lock_path
-from agent_orchestration_process.runner import AgentRunner, CodexAdapter
+from agent_orchestration_process.runner import (
+    AgentRunner,
+    CodexAdapter,
+    _provider_runtime,
+)
 from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
+
+
+def test_dsh_runtime_preserves_a_user_npm_installation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prefix = tmp_path / "npm"
+    package = prefix / "lib" / "node_modules" / "@deepseek-ai" / "dsh"
+    binary = package / "lib" / "bin.js"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/usr/bin/env node\n")
+    binary.chmod(0o755)
+    executable = prefix / "bin" / "dsh"
+    executable.parent.mkdir(parents=True)
+    executable.symlink_to(binary)
+    monkeypatch.setenv("PATH", f"{executable.parent}:{os.environ['PATH']}")
+
+    command, mounts = _provider_runtime(["dsh", "--version"], provider="dsh")
+
+    node_modules = prefix / "lib" / "node_modules"
+    assert command == [os.fspath(binary), "--version"]
+    assert mounts == [(os.fspath(node_modules), os.fspath(node_modules))]
 
 
 def test_cli_reports_version_and_provider_neutral_resume_help(
@@ -60,28 +85,31 @@ def test_cli_reports_version_and_provider_neutral_resume_help(
         ]
     )
     assert provider_args.inference_provider == "xai-oauth"
-    assert parser.parse_args(
-        ["run", "worker", "--agent", "opencode", "--prompt", "fix"]
-    ).agent == "opencode"
+    assert (
+        parser.parse_args(
+            ["run", "worker", "--agent", "opencode", "--prompt", "fix"]
+        ).agent
+        == "opencode"
+    )
     read_args = parser.parse_args(
         [
             "run",
             "reader",
-            "--read",
+            "--input",
             "/sources/one",
-            "--read",
+            "--input",
             "/sources/two",
             "--prompt",
             "inspect",
         ]
     )
-    assert read_args.read_paths == ["/sources/one", "/sources/two"]
+    assert read_args.input_paths == ["/sources/one", "/sources/two"]
 
     with pytest.raises(SystemExit) as help_exit:
         parser.parse_args(["resume", "--help"])
     assert help_exit.value.code == 0
     resume_help = capsys.readouterr().out
-    assert "replace inherited read paths" in resume_help
+    assert "replace inherited input snapshots" in resume_help
 
 
 def test_run_persists_structured_codex_artifacts(
@@ -130,11 +158,11 @@ def test_run_persists_structured_codex_artifacts(
     assert request["model"] == "gpt-5.6-sol"
     assert request["inference_provider"] is None
     assert request["artifacts"] == []
-    assert request["read_paths"] == []
+    assert request["inputs"] == []
     assert persisted_result["succeeded"] is True
     assert persisted_result["artifacts"] == []
     assert persisted_result["inference_provider"] is None
-    assert persisted_result["read_paths"] == []
+    assert persisted_result["inputs"] == []
     assert not (run_dir / "input-manifest.json").exists()
     assert persisted_result["billing"] == {
         "route": "subscription",
@@ -149,12 +177,12 @@ def test_run_persists_structured_codex_artifacts(
     assert (run_dir / "stderr.log").read_text() == ""
 
 
-@pytest.mark.parametrize("sandbox", ["scratch-write", "workspace-write"])
-def test_declared_read_paths_are_hashed_mounted_twice_and_recorded(
+@pytest.mark.parametrize("profile", ["review", "edit"])
+def test_declared_inputs_are_snapshotted_hashed_and_recorded(
     repository: Path,
     fake_codex: Path,
     tmp_path: Path,
-    sandbox: str,
+    profile: str,
 ) -> None:
     sources = tmp_path / "sources"
     transcripts = sources / "transcripts"
@@ -172,16 +200,16 @@ def test_declared_read_paths_are_hashed_mounted_twice_and_recorded(
     result = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
         task="reader",
         prompt="CHECK_READ_PATHS",
-        sandbox=sandbox,
-        read_paths=[transcripts, ledger],
+        profile=profile,
+        input_paths=[transcripts, ledger],
     )
 
     assert result.succeeded
-    assert [Path(item.mounted_path).name for item in result.read_paths] == [
+    assert [Path(item.mounted_path).name for item in result.inputs] == [
         "transcripts",
         "ledger.json",
     ]
-    transcript_input, ledger_input = result.read_paths
+    transcript_input, ledger_input = result.inputs
     assert transcript_input.source_path == os.fspath(transcripts.resolve())
     assert transcript_input.kind == "directory"
     assert transcript_input.size_bytes == len(b"Day four\nDay five\n")
@@ -196,29 +224,27 @@ def test_declared_read_paths_are_hashed_mounted_twice_and_recorded(
     assert not (transcripts / "forbidden").exists()
     assert ledger.read_text() == '{"status":"verified"}\n'
 
-    for item in result.read_paths:
-        assert ["--ro-bind", item.source_path, item.source_path] in [
-            result.command[index : index + 3]
-            for index in range(len(result.command) - 2)
-        ]
-        assert ["--ro-bind", item.source_path, item.mounted_path] in [
-            result.command[index : index + 3]
-            for index in range(len(result.command) - 2)
-        ]
+    assert [
+        "--ro-bind",
+        os.fspath(manager.state_dir / "snapshots" / result.run_id),
+        "/inputs",
+    ] in [result.command[index : index + 3] for index in range(len(result.command) - 2)]
+    assert all(item.source_path not in result.command for item in result.inputs)
 
     run_dir = manager.state_dir / "runs" / result.run_id
     request = json.loads((run_dir / "request.json").read_text())
     persisted_result = json.loads((run_dir / "result.json").read_text())
     manifest = json.loads((run_dir / "input-manifest.json").read_text())
-    assert request["read_paths"] == persisted_result["read_paths"]
-    assert manifest == {"schema_version": 1, "read_paths": request["read_paths"]}
+    assert request["inputs"] == persisted_result["inputs"]
+    assert manifest == {"schema_version": 1, "inputs": request["inputs"]}
     assert transcript_input.mounted_path in request["prompt"]
-    assert transcript_input.source_path in request["prompt"]
-    assert list(Path(transcript_input.mounted_path).iterdir()) == []
-    assert Path(ledger_input.mounted_path).read_bytes() == b""
+    assert transcript_input.source_path not in request["prompt"]
+    snapshot_root = manager.state_dir / "snapshots" / result.run_id
+    assert (snapshot_root / "transcripts" / "day-4.md").read_text() == "Day four\n"
+    assert (snapshot_root / "ledger.json").read_bytes() == ledger.read_bytes()
 
 
-def test_resume_inherits_read_paths_and_refreshes_their_hashes(
+def test_resume_inherits_input_sources_and_refreshes_snapshots(
     repository: Path,
     fake_codex: Path,
     tmp_path: Path,
@@ -229,20 +255,20 @@ def test_resume_inherits_read_paths_and_refreshes_their_hashes(
         WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
     )
 
-    first = runner.run(task="reader-resume", prompt="first", read_paths=[source])
+    first = runner.run(task="reader-resume", prompt="first", input_paths=[source])
     source.write_text("second\n")
     resumed = runner.resume(run_id=first.run_id, prompt="second")
 
     assert first.succeeded
     assert resumed.succeeded
     assert resumed.session_id == first.session_id
-    assert resumed.read_paths[0].source_path == first.read_paths[0].source_path
-    assert resumed.read_paths[0].sha256 == hashlib.sha256(b"second\n").hexdigest()
-    assert resumed.read_paths[0].sha256 != first.read_paths[0].sha256
-    assert resumed.read_paths[0].mounted_path != first.read_paths[0].mounted_path
+    assert resumed.inputs[0].source_path == first.inputs[0].source_path
+    assert resumed.inputs[0].sha256 == hashlib.sha256(b"second\n").hexdigest()
+    assert resumed.inputs[0].sha256 != first.inputs[0].sha256
+    assert resumed.inputs[0].mounted_path == first.inputs[0].mounted_path
 
 
-def test_declared_read_paths_reject_unsafe_or_ambiguous_sources(
+def test_declared_inputs_reject_unsafe_or_ambiguous_sources(
     repository: Path,
     fake_codex: Path,
     tmp_path: Path,
@@ -263,38 +289,36 @@ def test_declared_read_paths_reject_unsafe_or_ambiguous_sources(
     )
 
     with pytest.raises(AOPError, match="same basename"):
-        runner.run(task="duplicate-read", prompt="unused", read_paths=[first, second])
+        runner.run(task="duplicate-read", prompt="unused", input_paths=[first, second])
     with pytest.raises(AOPError, match="may not be a symlink"):
-        runner.run(task="linked-read", prompt="unused", read_paths=[linked])
+        runner.run(task="linked-read", prompt="unused", input_paths=[linked])
     with pytest.raises(AOPError, match="contains a symlink"):
-        runner.run(task="nested-linked-read", prompt="unused", read_paths=[directory])
-    with pytest.raises(AOPError, match="requires workspace-write or scratch-write"):
-        runner.run(
-            task="danger-read",
-            prompt="unused",
-            sandbox="danger-full-access",
-            read_paths=[first],
-        )
+        runner.run(task="nested-linked-read", prompt="unused", input_paths=[directory])
+    host_result = runner.run(
+        task="host-input",
+        prompt="unused",
+        profile="host",
+        input_paths=[first],
+    )
+    assert host_result.inputs
 
 
-@pytest.mark.parametrize(
-    "sandbox", ["scratch-write", "workspace-write", "danger-full-access"]
-)
+@pytest.mark.parametrize("profile", ["review", "edit", "host"])
 def test_codex_uses_private_runtime_state_with_read_only_global_profile(
     repository: Path,
     fake_codex: Path,
-    sandbox: str,
+    profile: str,
 ) -> None:
     source_home = Path(os.environ["AOP_CODEX_SOURCE_HOME"])
     for path in source_home.rglob("*"):
         path.chmod(0o555 if path.is_dir() else 0o444)
     source_home.chmod(0o555)
-    task = f"managed-codex-{sandbox}"
+    task = f"managed-codex-{profile}"
     manager = WorktreeManager.discover(repository)
 
     try:
         runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
-        first = runner.run(task=task, prompt="first", sandbox=sandbox)
+        first = runner.run(task=task, prompt="first", profile=profile)
         resumed = runner.resume(run_id=first.run_id, prompt="second")
     finally:
         source_home.chmod(0o755)
@@ -344,7 +368,7 @@ def test_codex_records_metered_api_authentication_without_credentials(
     assert "must-not-be-persisted" not in persisted.read_text()
 
 
-def test_sandbox_can_hide_external_control_directories(
+def test_safe_profile_does_not_mount_unrelated_control_directories(
     repository: Path,
     fake_codex: Path,
     tmp_path: Path,
@@ -352,14 +376,15 @@ def test_sandbox_can_hide_external_control_directories(
 ) -> None:
     control = tmp_path / "control"
     control.mkdir()
-    monkeypatch.setenv("AOP_HIDE_PATHS", os.fspath(control))
     manager = WorktreeManager.discover(repository)
     result = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
         task="hidden-control", prompt="make the change", timeout_seconds=5
     )
 
-    index = result.command.index("--tmpfs")
-    assert result.command[index + 1] == os.fspath(control)
+    assert os.fspath(control) not in result.command
+    assert ["--dev-bind", "/", "/"] not in [
+        result.command[index : index + 3] for index in range(len(result.command) - 2)
+    ]
     assert result.succeeded
 
 
@@ -387,9 +412,11 @@ def test_workspace_sandbox_mounts_shared_git_metadata_read_only(
         ).stdout.strip()
     )
 
-    index = result.command.index(os.fspath(common))
-    assert result.command[index - 1] == "--ro-bind"
-    assert result.command[index + 1] == os.fspath(common)
+    triplets = [
+        result.command[index : index + 3] for index in range(len(result.command) - 2)
+    ]
+    assert ["--ro-bind", os.fspath(common), os.fspath(common)] in triplets
+    assert ["--ro-bind", os.fspath(common), "/git"] in triplets
     assert result.succeeded
 
 
@@ -402,7 +429,7 @@ def test_declared_artifact_is_validated_and_archived(
     result = runner.run(
         task="extract",
         prompt="WRITE_ARTIFACT",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["paper.md"],
     )
 
@@ -419,8 +446,7 @@ def test_declared_artifact_is_validated_and_archived(
     assert (run_dir / artifact.archive_path).read_bytes() == content
     assert "narrating before writing" in (run_dir / "events.jsonl").read_text()
     request = json.loads((run_dir / "request.json").read_text())
-    output_dir = manager.get("extract").path / "scratch" / "outputs" / result.run_id
-    assert os.fspath(output_dir) in request["prompt"]
+    assert "/output" in request["prompt"]
     assert request["artifacts"] == ["paper.md"]
 
 
@@ -433,7 +459,7 @@ def test_declared_artifact_directory_is_recursively_archived(
     result = runner.run(
         task="linked-extract",
         prompt="WRITE_ARTIFACT_TREE",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["paper.md", "assets"],
     )
 
@@ -466,7 +492,7 @@ def test_declared_empty_artifact_directory_is_valid(
     result = runner.run(
         task="empty-assets",
         prompt="WRITE_EMPTY_ARTIFACT_DIRECTORY",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["assets"],
     )
 
@@ -495,7 +521,7 @@ def test_unsafe_file_in_declared_artifact_directory_fails_the_run(
     result = runner.run(
         task=f"unsafe-tree-{diagnostic.split()[0]}",
         prompt=prompt,
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["assets"],
     )
 
@@ -518,7 +544,7 @@ def test_overlapping_artifact_declarations_fail_before_launch(
         runner.run(
             task="overlapping-artifacts",
             prompt="WRITE_ARTIFACT_TREE",
-            sandbox="scratch-write",
+            profile="review",
             artifacts=["assets", "assets/figure-1.png"],
         )
 
@@ -544,7 +570,7 @@ def test_invalid_declared_artifact_fails(
     result = runner.run(
         task=f"invalid-{diagnostic.split()[0]}",
         prompt=prompt,
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["paper.md"],
     )
 
@@ -565,14 +591,14 @@ def test_previous_run_artifact_cannot_satisfy_a_new_run(
     first = runner.run(
         task="repeat-extract",
         prompt="WRITE_ARTIFACT",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["paper.md"],
     )
 
     second = runner.run(
         task="repeat-extract",
         prompt="MISSING_ARTIFACT",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["paper.md"],
     )
 
@@ -636,7 +662,7 @@ def test_resume_uses_a_fresh_explicit_artifact_contract(
     first = runner.run(
         task="artifact-resume",
         prompt="WRITE_ARTIFACT",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["paper.md"],
     )
 
@@ -817,8 +843,8 @@ def test_cli_accepts_artifact_declarations(
         [
             "run",
             "cli-artifact",
-            "--sandbox",
-            "scratch-write",
+            "--profile",
+            "review",
             "--artifact",
             "paper.md",
             "--prompt",

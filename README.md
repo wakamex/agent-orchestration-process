@@ -12,10 +12,34 @@ AOP is a methodology and a set of interfaces, not a universal orchestration libr
 frame is portable; the evaluator, candidate format, mutation mechanism, and domain guards belong to
 each project.
 
+## Guiding principles
+
+- Describe complete semantic boundaries. Write access, visibility, identity, instructions,
+  environment, credentials, and network access are separate facts and must be enforced and recorded
+  explicitly.
+- Delegate harness-native behavior. Authentication, model execution, tools, session persistence,
+  and provider protocols stay with the harness unless its automation interface is missing a required
+  capability.
+- Project the least authority needed. A task receives only the selected provider credential and
+  required runtime state, never an entire multi-provider credential store merely because copying it
+  is easier.
+- Do not make users maintain parallel authentication. AOP reuses harness-managed credentials and
+  preserves native environment overrides instead of inventing an AOP-specific secret store.
+- Keep controller policy outside model control. Isolation, deadlines, evidence, cleanup, and
+  integration remain AOP responsibilities even when provider permission prompts are bypassed.
+- Prefer small native extension points over wrappers and forks. When a harness lacks a bounded
+  automation feature, use its documented plugin or protocol surface and keep the added layer narrow.
+- Fail closed and record what ran. Ambiguous identity, stale pricing, invalid credentials, incomplete
+  terminal output, and unenforced policy are failures, while effective policy and provenance remain
+  inspectable after the run.
+- Optimize for the long-term product, not compatibility with accidental local setup. A clean break is
+  acceptable before users exist when it removes ambiguity or foreseeable rewrites.
+
 ## Reference implementation
 
-This repository includes a dependency-free Python CLI for running Codex, Claude Code, Cursor Agent,
-Devin CLI, OpenCode, Antigravity (`agy`), and Hermes concurrently in isolated Git worktrees. Each
+This repository includes a small Python CLI for running Codex, Claude Code, Cursor Agent,
+Devin CLI, OpenCode, Antigravity (`agy`), Hermes, and DeepSeek Harness (`dsh`) concurrently in
+isolated Git worktrees. Each
 adapter records a normalized result and resumes the exact provider session associated with an
 earlier run.
 
@@ -45,7 +69,7 @@ to schedule and govern bounded work.
 
 Requirements:
 
-- Linux with Git and `bwrap` for the default safe sandbox modes
+- Linux with `bwrap`; Git is required for `edit` and `review` profiles but not `sealed`
 - Python 3.11 or newer, managed through uv
 - At least one installed and authenticated supported agent CLI
 
@@ -94,6 +118,8 @@ aop run task-c --agent agy --model gemini-3.5-flash --effort low \
   --prompt "Add adversarial parser tests"
 aop run task-d --agent hermes --model deepseek/deepseek-v4-flash-0731 --effort high \
   --prompt "Investigate and fix the failing benchmark"
+aop run task-deepseek --agent dsh --model deepseek-v4-pro --effort max \
+  --prompt "Fix the parser and verify the result"
 ```
 
 `aop run` prints the agent's final message to stdout and its AOP run ID, provider session ID, and
@@ -114,50 +140,79 @@ aop cleanup <run-id>
 ```
 
 Cleanup force-removes that task's disposable worktree, scratch directory, and overlays, but retains
-the immutable request, result, logs, and archived artifacts under `.aop/runs/`. Repeating cleanup is
-safe. An active task cannot be cleaned while it holds its execution lock.
+the immutable request, input snapshots, result, logs, and archived artifacts under AOP state.
+Repeating cleanup is safe. An active task cannot be cleaned while it holds its execution lock.
 
-### Sandboxing
+### Execution profiles
 
-AOP uses `bwrap` to enforce repository access in its two safe modes. Provider permission prompts
-are bypassed inside that boundary.
+AOP profiles describe the complete execution boundary rather than only where writes are allowed.
+The three isolated profiles build an empty mount namespace and add the workspace, declared inputs,
+provider runtime, private state, cache, scratch, output, and required operating-system runtime paths
+explicitly. They do not inherit the host root filesystem.
 
-| Mode | Writable paths |
-| --- | --- |
-| `workspace-write` | The isolated task worktree and shared cache |
-| `scratch-write` | Fresh task scratch space and the shared cache |
-| `danger-full-access` | Native host access without `bwrap` |
+| Profile | Primary repository | Task workspace | Other host paths | Instructions | Writable guest paths |
+| --- | --- | --- | --- | --- | --- |
+| `edit` | Read-only at `/repository` | Read-write at `/workspace` | Runtime allowlist only | Project and user | `/workspace`, `/output`, `/scratch`, `/state`, `/cache`, `/tmp` |
+| `review` | Read-only at `/repository` | Read-only at `/workspace` | Runtime allowlist only | Project and user | `/output`, `/scratch`, `/state`, `/cache`, `/tmp` |
+| `sealed` | Not mounted | Empty read-only `/workspace` | Runtime allowlist only | No inherited local instructions | `/output`, `/scratch`, `/state`, `/cache`, `/tmp` |
+| `host` | Native | Native | Native | Native | Native |
 
-The main repository and Git metadata remain read-only in both safe modes. Configured authentication
-and user instructions remain available. AOP also gives adapters task-private runtime state when
-their native global state would prevent isolation or reliable resume.
+The compiled policy labels each writable path as run-private, session-private, task-private,
+process-private, shared, or native. Under `sealed`, `/cache`, `/scratch`, and `/state` are private to
+the sealed session and reused only by its exact resumes; `/output` is private to one run.
+
+All profiles currently retain native network connectivity because supported provider CLIs require
+it. Sealed is filesystem-isolated, not completely information-isolated: local network services and
+provider-side account state can remain context channels. The effective policy records this
+explicitly. `host` skips `bwrap` and environment filtering.
+
+`sealed` does not require a Git repository. It uses opaque agent-visible identity, a filtered
+environment, canonical guest paths, minimal private provider configuration, and no project or user
+rules, skills, plugins, hooks, MCP configuration, or memories. Controller paths and human task
+labels remain in AOP's records but are not passed into the provider boundary.
+
+Inspect a declared profile or preview the intended policy without compiling or dispatching it:
+
+```sh
+aop profile explain sealed
+aop profile explain sealed --agent codex --json
+aop run study-arm --profile sealed --prompt "Answer using only declared inputs" --dry-run
+```
+
+Every dispatched run persists its compiled semantic boundary in `request.json`, including
+repository and workspace access, guest paths, input mode, writable-path scope, environment and
+credential exposure, inherited and generated instruction policy, namespaces, network limitations,
+provider executable hash, and controller-owned state locations.
+
+Credential values are redacted from recorded command arguments and results, but the selected
+provider process and an agent with its shell tools can read credentials exposed through its
+environment or private `/state`. Sealed limits which credentials enter the process; it does not make
+credentials unreadable to that process.
 
 See [Harness isolation and runtime state](https://github.com/wakamex/agent-orchestration-process/blob/main/docs/harnesses.md)
 for provider-specific behavior, credential handling, state paths, and environment overrides.
 
-Declare external files or directories that an agent may read without modifying:
+Declare files or directories as immutable input snapshots:
 
 ```sh
 aop run analysis \
   --agent agy \
-  --sandbox scratch-write \
-  --read /data/source-material \
-  --read /data/ledger.json \
+  --profile sealed \
+  --input /data/source-material \
+  --input /data/ledger.json \
   --artifact report.md \
   --prompt "Analyze the declared sources and write the report"
 ```
 
-Each `--read` source remains available at its resolved absolute path and is also mounted beneath a
-fresh per-run `AOP_INPUT_DIR` using its basename. Both locations are read-only inside the provider
-sandbox, and AOP adds their mapping to the prompt. AOP rejects missing paths, symlinks, special
-files, and duplicate basenames. It hashes every regular file before launch and records the mapping,
-sizes, and SHA-256 values in `request.json`, `result.json`, and `input-manifest.json`. The files
-themselves are not copied or snapshotted, so another host process can still change them during a
-run. Read paths require `workspace-write` or `scratch-write`; AOP rejects them with
-`danger-full-access`, where it could not enforce the read-only contract.
+Before launch, AOP rejects missing paths, symlinks, special files, and duplicate basenames, copies
+the accepted bytes into retained controller-owned storage, hashes the copies, marks them read-only,
+and mounts only those snapshots
+read-only beneath `/inputs`. Original host paths are recorded for controller audit but are absent
+from the child environment, command, and prompt. `input-manifest.json` records sizes and SHA-256
+values. A source can change after snapshotting without changing the bytes used by that run.
 
-`aop resume` inherits the parent run's read paths unless new `--read` options replace them. Every
-invocation creates fresh aliases and hashes the current source contents.
+`aop resume` snapshots the parent run's input sources again unless new `--input` options replace
+them. Stable guest paths such as `/inputs/ledger.json` do not reveal controller directory names.
 
 For a file-producing task, declare each expected path relative to the run's output directory:
 
@@ -165,7 +220,7 @@ For a file-producing task, declare each expected path relative to the run's outp
 aop run extraction \
   --agent agy \
   --model gemini-3.5-flash \
-  --sandbox scratch-write \
+  --profile review \
   --artifact paper.md \
   --artifact assets \
   --prompt "Extract the source document as Markdown"
@@ -223,7 +278,7 @@ Hermes can run a bounded conversational turn with the experimental participant m
 aop run player \
   --agent hermes \
   --mode participant \
-  --sandbox scratch-write \
+  --profile review \
   --prompt "Submit one move"
 ```
 
@@ -241,7 +296,7 @@ variables so ambient Hermes process state cannot change the declared invocation 
 tools.
 
 This unknown-toolset behavior is undocumented and may emit a warning outside quiet mode. It is not
-a durable security contract and could change in a future Hermes release, so the `bwrap` sandbox
+a durable security contract and could change in a future Hermes release, so the outer profile
 remains the filesystem boundary. AOP should replace the workaround with the proposed official
 `--no-tools` flag once
 [NousResearch/hermes-agent#78262](https://github.com/NousResearch/hermes-agent/pull/78262) is merged
@@ -269,6 +324,29 @@ such as `deepseek-v4-flash` is automatically qualified with `opencode/`; pass a 
 permission mode inside the outer `bwrap` boundary. Authenticate OpenCode normally before the first
 AOP run, for example with `opencode providers login`.
 
+DeepSeek Harness defaults to the `deepseek-official` route and `deepseek-v4-flash`, with its native
+reasoning default. It also supports `deepseek-v4-pro`. Install the official package so `dsh` is on
+`PATH`, for example with `npm install --global @deepseek-ai/dsh`, then authenticate through dsh's
+Web Models page or its native environment support. AOP does not invoke or depend on a user shell
+wrapper.
+
+Pass an exact dsh provider route and model to use another provider, for example
+`--provider anthropic --model claude-sonnet-4-5`. The route must already be configured in
+`llm-pi-ai.providers` by dsh. AOP reads that selected profile's exact `apiKeyEnv`, projects only that
+profile and managed credential into the run, and preserves an environment override with the same
+name. If the profile omits `apiKeyEnv`, AOP leaves authentication to that provider family's native
+ambient environment discovery. It does not infer a credential name from the provider label or
+expose another provider's key inside an isolated run.
+
+The upstream headless profile is intentionally fresh-session-only and prints only final text. AOP
+adds a small runner through dsh's normal `--patch` interface. That runner uses dsh's public Agent
+Registry to assign a known session ID, exactly resume it, and emit normalized terminal output and
+per-turn token usage. The model, tools, persistence, prompt assembly, and agent loop remain native
+dsh behavior. AOP applies provider, model, and effort in the same final patch layer and disables
+optional dsh telemetry for unattended runs. It also disables the optional LLM title generator
+because an auxiliary UI-title request is unrelated to the bounded task and is not represented in
+the agent turn's usage totals; dsh's deterministic fallback title remains available.
+
 Inspect the models exposed by the installed agent CLIs and their current comparison prices:
 
 ```sh
@@ -281,6 +359,9 @@ aop models --refresh
 Codex, Cursor, Devin, Agy, and OpenCode results are queried from their non-interactive model
 interfaces. Devin prices come from its authenticated account inventory, including zero-dollar
 models and provider-reported per-million-token rates.
+DeepSeek Harness does not currently expose model discovery on its headless command, so AOP reports
+the two models bundled by the installed release as `installed-default` and joins their current
+catalog prices when available.
 Hermes follows its configured provider: Nous results come from the live Nous inference endpoint,
 while providers without a live listing use their matching catalog entries. Claude has no
 non-interactive model listing, so its rows come from the Anthropic catalog and are marked `catalog`
@@ -294,8 +375,9 @@ the resolved model has catalog pricing, the result also contains an estimated st
 API-equivalent USD cost.
 This is a comparison metric for subscription runs, not an amount billed to the account. Reasoning
 tokens are reported separately but are already included in output tokens and are not charged twice.
-Agy cache-read tokens are reported separately from uncached input and are priced as an additive
-category using the resolved Google model rate.
+Agy cache-read tokens are reported separately from uncached input and priced as an additive
+category. DeepSeek Harness uses additive cache pricing for its direct DeepSeek route and the
+selected provider's catalog convention for other known routes.
 
 Each normalized run result also records sanitized `billing` provenance separately from that
 comparison cost. `route` is one of `subscription`, `provider-credits`, `metered-api`, `local`, or
@@ -306,7 +388,7 @@ account identifiers, or provider configuration into the result. When an adapter 
 the active billing route reliably, it records `unknown` instead of guessing. The terse run summary
 prints the route as `billing=...`.
 
-Before dispatching any AOP command, the CLI verifies that its global models.dev catalog cache is
+Before dispatching a provider run, the CLI verifies that its global models.dev catalog cache is
 less than 24 hours old. A stale or missing cache is refreshed under a process lock and replaced
 atomically. If refresh fails, AOP fails closed instead of reporting or using expired prices. Set
 `AOP_MODEL_CATALOG_CACHE` to relocate the cache; its default is
@@ -343,7 +425,8 @@ model = "sonnet"
 effort = "high"
 timeout = 1800
 artifacts = ["parser-report.md"]
-read_paths = ["fixtures"]
+profile = "review"
+inputs = ["fixtures"]
 
 [[tasks]]
 id = "tests"
@@ -358,11 +441,11 @@ effort = "high"
 aop batch tasks.toml --jobs 4
 ```
 
-Prompt-file and `read_paths` entries are resolved relative to the manifest. Each task may set
-`agent`, `base`, `model`, `provider`, `effort`, `sandbox`, `timeout`, an `artifacts` array, and a
-`read_paths` array; `provider` is currently Hermes-only and requires `model`. Unspecified values use
-the same defaults as `aop run`. The scheduler keeps at most `--jobs` tasks active, prints only
-concise lifecycle status, and stores full agent output in the normal per-run directories. On
+Prompt-file and `inputs` entries are resolved relative to the manifest. Each task may set
+`agent`, `base`, `model`, `provider`, `effort`, `profile`, `timeout`, an `artifacts` array, and an
+`inputs` array; `provider` is supported by Hermes and DeepSeek Harness and requires `model`.
+Unspecified values use the same defaults as `aop run`. The scheduler keeps at most `--jobs` tasks
+active, prints only concise lifecycle status, and stores full agent output in the normal per-run directories. On
 interruption it launches no additional tasks and waits for already-active tasks to finish.
 
 Every batch writes `.aop/batches/<batch-id>.json` with task-order-preserving run IDs, session IDs,
@@ -386,13 +469,13 @@ the resulting commit, and successful AOP run IDs associated with the task.
 `integrate` rebases exactly the task commits onto current main. AOP owns the privileged, mechanical
 Git operations: starting and continuing the rebase, recording any final validation edits, and
 fast-forwarding main. When a commit conflicts, AOP resumes the task's latest authoring session in its
-original sandbox. The author resolves file content and runs relevant tests inside its isolated
+original execution profile. The author resolves file content and runs relevant tests inside its isolated
 worktree; AOP then stages the resolution and continues. This repeats for every conflicting commit.
-After the rebase, the author gets one final sandboxed validation turn before AOP fast-forwards main.
+After the rebase, the author gets one final isolated validation turn before AOP fast-forwards main.
 
 AOP serializes the operation with task and integration locks and verifies the recorded base,
 linear history, clean starting state, unchanged main branch, and fast-forward ancestry. Author
-continuations retain the sandbox selected by the original run—normally `workspace-write`—and are
+continuations retain the profile selected by the original run, normally `edit`, and are
 explicitly denied responsibility for Git metadata or main. Use `--timeout` to override the
 authoring run's timeout. A successful integration updates the task's recorded base and writes an
 audit record linking original commits, rebased commits, conflict-resolution runs, and the final
@@ -404,7 +487,7 @@ aop integrate task-a --remove-worktree
 ```
 
 AOP never stashes changes, force-updates a branch, or decides conflict content. Conflict judgment
-belongs to the sandboxed authoring agent, and a task is never deleted after a failed integration.
+belongs to the isolated authoring agent, and a task is never deleted after a failed integration.
 
 Run any other command in a task worktree with the lower-level escape hatch. Large ignored build or
 data directories can be exposed as private copy-on-write overlays: reads reuse the main worktree's
@@ -430,7 +513,8 @@ Runtime state lives under the ignored `.aop/` directory:
 ```text
 .aop/
 ├── batches/            structured batch summaries
-├── cache/              shared cache root for future build and runner adapters
+├── cache/              shared cache root for non-sealed tasks
+├── sealed-cache/       session-private caches for sealed runs and exact resumes
 ├── checkpoints/        task checkpoint records
 ├── integrations/       successful integration audit records
 ├── locks/              per-task execution/checkpoint locks
@@ -461,6 +545,7 @@ not expose.
 | OpenCode | Private state applies only in safe modes |
 | Agy | No participant mode; exact resume fails if the conversation ID changes |
 | Hermes | Experimental participant mode; OAuth rotation serializes Hermes turns |
+| DeepSeek Harness (`dsh`) | Developer-preview CLI; model inventory reflects its two bundled defaults; no participant mode |
 
 Cursor, Agy, and Devin do not report an API-equivalent cost. AOP also does not configure
 language-specific build caches. See
@@ -508,21 +593,23 @@ The runner exposes one interface for every supported agent and hides model-speci
 It is responsible for:
 
 - model aliases and invocation;
-- sandbox and permission policy;
+- execution profile and permission policy;
 - timeouts and process cleanup;
 - session creation, capture, and resumption;
 - normalized stdout, stderr, and exit status.
 
-AOP supplies this environment contract to child processes:
+AOP's controller uses the following variables. Isolated child environments receive only canonical
+guest-path variants needed by the selected provider. `sealed` omits repository, task, worktree, and
+run identity variables entirely.
 
 ```text
 AOP_ROOT        main Git worktree
 AOP_TASK        stable task identifier
 AOP_WORKTREE    isolated task worktree
-AOP_CACHE_DIR   shared cache root
+AOP_CACHE_DIR   shared cache root, or a session-private root under sealed
 AOP_PROVIDER_STATE_DIR  task-local provider runtime state
-AOP_INPUT_DIR   fresh directory containing task-local read-only aliases
-AOP_INPUT_MANIFEST  durable JSON manifest, set only when read paths are declared
+AOP_INPUT_DIR   fresh directory containing immutable input snapshots
+AOP_INPUT_MANIFEST  source-path-free JSON manifest, set only when inputs are declared
 AOP_RUN_ID      current structured run identifier (model runs only)
 ```
 
@@ -530,12 +617,6 @@ By default AOP stores its state under the primary Git worktree. Set `AOP_STATE_R
 path of another registered worktree before invoking AOP when that linked worktree, rather than the
 primary checkout, must own `.aop/`, candidate worktrees, run records, and provider state. AOP rejects
 a configured path that Git does not report as a worktree.
-
-Set `AOP_HIDE_PATHS` to an `os.pathsep`-separated list of existing absolute directories that must be
-masked with empty temporary filesystems inside sandboxed provider processes. This is intended for
-same-user control sockets and similarly scoped host interfaces that a worker must not reach. AOP
-rejects symlinks, missing paths, and required runtime directories. It has no effect in explicit
-`danger-full-access` mode.
 
 Model session identifiers, parent runs, timeouts, and terminal status live in each run's JSON
 artifacts instead of mutable environment variables.

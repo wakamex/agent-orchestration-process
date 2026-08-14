@@ -13,6 +13,28 @@ import pytest
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
 
+SEALED_PROVIDER_PROBE = r"""
+if prompt.startswith("SEALED_PROVIDER_PROBE"):
+    forbidden_environment = {"AOP_ROOT", "AOP_TASK", "AOP_WORKTREE", "AOP_RUN_ID", "OLDPWD"}
+    leaked = forbidden_environment.intersection(os.environ)
+    if leaked:
+        raise RuntimeError(f"sealed environment leaked: {sorted(leaked)}")
+    workspace = pathlib.Path("/workspace")
+    if pathlib.Path.cwd() != workspace or any(workspace.iterdir()):
+        raise RuntimeError("sealed workspace is not empty and neutral")
+    for hidden in (pathlib.Path("/repository"), pathlib.Path("/code"), pathlib.Path("/home")):
+        if hidden.exists():
+            raise RuntimeError(f"sealed run exposed host path: {hidden}")
+    try:
+        workspace.joinpath("forbidden-write").write_text("forbidden")
+    except OSError:
+        pass
+    else:
+        raise RuntimeError("sealed neutral workspace is writable")
+    if pathlib.Path("/cache/shared-cache-canary").exists():
+        raise RuntimeError("sealed run exposed the shared cache")
+"""
+
 
 @pytest.fixture(autouse=True)
 def fresh_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -68,6 +90,18 @@ def fresh_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
             }
         },
         "anthropic": {"models": {}},
+        "deepseek": {
+            "models": {
+                "deepseek-v4-flash": {
+                    "name": "DeepSeek-V4-Flash",
+                    "cost": {"input": 0.3, "cache_read": 0.03, "output": 1.2},
+                },
+                "deepseek-v4-pro": {
+                    "name": "DeepSeek-V4-Pro",
+                    "cost": {"input": 0.6, "cache_read": 0.06, "output": 2.4},
+                },
+            }
+        },
         "google": {
             "models": {
                 "gemini-3.5-flash": {
@@ -163,20 +197,19 @@ if args == ["login", "status"]:
         print("Logged in using ChatGPT")
     raise SystemExit(0)
 prompt = sys.stdin.read()
+{SEALED_PROVIDER_PROBE}
 output_path = pathlib.Path(args[args.index("--output-last-message") + 1])
-source_home = pathlib.Path(os.environ["AOP_CODEX_SOURCE_HOME"])
 codex_home = pathlib.Path(os.environ["CODEX_HOME"])
 if prompt.startswith("CHECK_READ_PATHS"):
     manifest = json.loads(pathlib.Path(os.environ["AOP_INPUT_MANIFEST"]).read_text())
     input_dir = pathlib.Path(os.environ["AOP_INPUT_DIR"])
-    if not input_dir.is_dir() or len(manifest["read_paths"]) != 2:
+    if not input_dir.is_dir() or len(manifest["inputs"]) != 2:
         raise RuntimeError("declared read paths were not exposed")
-    for item in manifest["read_paths"]:
-        source = pathlib.Path(item["source_path"])
+    for item in manifest["inputs"]:
         mounted = pathlib.Path(item["mounted_path"])
-        if mounted.parent != input_dir or not source.exists() or not mounted.exists():
+        if mounted.parent != input_dir or not mounted.exists():
             raise RuntimeError(f"invalid read path mapping: {{item}}")
-        for protected in (source, mounted):
+        for protected in (mounted,):
             target = protected / "forbidden" if protected.is_dir() else protected
             try:
                 if protected.is_dir():
@@ -188,10 +221,59 @@ if prompt.startswith("CHECK_READ_PATHS"):
                 pass
             else:
                 raise RuntimeError(f"declared read path was writable: {{protected}}")
-if codex_home.resolve() == source_home.resolve():
-    print("Codex did not receive private runtime state", file=sys.stderr)
-    raise SystemExit(1)
-for required in ["auth.json", "config.toml", "models_cache.json"]:
+if prompt.startswith("CHECK_SEALED"):
+    forbidden_environment = {{
+        "AOP_ROOT", "AOP_TASK", "AOP_WORKTREE", "AOP_RUN_ID", "OLDPWD"
+    }}
+    leaked = forbidden_environment.intersection(os.environ)
+    if leaked:
+        raise RuntimeError(f"sealed environment leaked: {{sorted(leaked)}}")
+    if pathlib.Path.cwd() != pathlib.Path("/workspace") or any(pathlib.Path.cwd().iterdir()):
+        raise RuntimeError("sealed workspace is not empty and neutral")
+    for hidden in [
+        pathlib.Path("/repository"),
+        pathlib.Path("/code/aop"),
+        pathlib.Path("/home/mihai"),
+        pathlib.Path({os.fspath(source_home)!r}),
+    ]:
+        if hidden.exists():
+            raise RuntimeError(f"sealed run exposed host path: {{hidden}}")
+if prompt.startswith("CHECK_SEALED_WRITE_MARKERS"):
+    for root in ("/cache", "/state", "/scratch", "/output"):
+        pathlib.Path(root, "cross-task-canary").write_text(prompt)
+if prompt.startswith("CHECK_SEALED_NO_MARKERS"):
+    for root in ("/cache", "/state", "/scratch", "/output", "/workspace"):
+        if pathlib.Path(root, "cross-task-canary").exists():
+            raise RuntimeError(f"sealed run read another task's state: {{root}}")
+if prompt.startswith("CHECK_SEALED_RESUME_MARKER"):
+    if not pathlib.Path("/cache/cross-task-canary").is_file():
+        raise RuntimeError("sealed exact resume did not reuse its session cache")
+if prompt.startswith("CHECK_PROFILE_ACCESS"):
+    _, expected, unrelated_path = prompt.split()
+    if pathlib.Path(unrelated_path).exists():
+        raise RuntimeError("profile exposed an unrelated host path")
+    repository = pathlib.Path("/repository")
+    if not repository.joinpath("README.md").is_file():
+        raise RuntimeError("profile did not expose the primary repository read-only")
+    if repository.joinpath(".aop").exists() and any(repository.joinpath(".aop").iterdir()):
+        raise RuntimeError("profile exposed AOP controller state")
+    try:
+        repository.joinpath("README.md").open("a").write("forbidden")
+    except OSError:
+        pass
+    else:
+        raise RuntimeError("profile allowed primary repository mutation")
+    workspace_probe = pathlib.Path("workspace-probe.txt")
+    try:
+        workspace_probe.write_text("probe")
+    except OSError:
+        if expected == "edit":
+            raise RuntimeError("edit profile did not allow workspace writes")
+    else:
+        if expected == "review":
+            raise RuntimeError("review profile allowed workspace writes")
+        workspace_probe.unlink()
+for required in ["auth.json"]:
     if not codex_home.joinpath(required).is_file():
         print(f"missing seeded Codex file: {{required}}", file=sys.stderr)
         raise SystemExit(1)
@@ -331,13 +413,14 @@ if args == ["auth", "status", "--json"]:
     }}))
     raise SystemExit(0)
 prompt = sys.stdin.read()
+{SEALED_PROVIDER_PROBE}
 if prompt == "CHECK_SANDBOX":
     pathlib.Path("agent-write.txt").write_text("allowed")
     (pathlib.Path(os.environ["AOP_CACHE_DIR"]) / "provider-cache.txt").write_text(
         "shared"
     )
     for protected in [
-        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path("/repository") / "main-write.txt",
         pathlib.Path(".git"),
     ]:
         try:
@@ -352,7 +435,7 @@ if prompt == "CHECK_SCRATCH":
     )
     for protected in [
         pathlib.Path("agent-write.txt"),
-        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path("/repository") / "main-write.txt",
         pathlib.Path(".git"),
     ]:
         try:
@@ -423,7 +506,8 @@ import sys
 
 args = sys.argv[1:]
 prompt = args[args.index("--") + 1]
-cursor_home = pathlib.Path(os.environ["AOP_CURSOR_HOME"])
+{SEALED_PROVIDER_PROBE}
+cursor_home = pathlib.Path(os.environ["HOME"])
 cursor_config = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "cursor"
 auth_path = cursor_config / "auth.json"
 if not auth_path.is_file():
@@ -449,7 +533,7 @@ if prompt.startswith("WRITE_ARTIFACT"):
 if prompt == "CHECK_CURSOR_SANDBOX":
     pathlib.Path("agent-write.txt").write_text("allowed")
     for protected in [
-        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path("/repository") / "main-write.txt",
         pathlib.Path(".git"),
     ]:
         try:
@@ -501,7 +585,9 @@ def fake_devin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (source_data / "cli" / "installed.bin").write_bytes(b"not copied")
     source_config = tmp_path / "devin-config"
     source_config.mkdir()
-    (source_config / "config.json").write_text('{"devin": {"org_id": "test"}}\n')
+    (source_config / "config.json").write_text(
+        '{"devin": {"org_id": "test"}, "mcp": {"secret": "instruction"}}\n'
+    )
     monkeypatch.setenv("AOP_DEVIN_DATA_DIR", os.fspath(source_data))
     monkeypatch.setenv("AOP_DEVIN_CONFIG_DIR", os.fspath(source_config))
     executable.write_text(
@@ -545,6 +631,7 @@ for directory in [data_dir / "cli", state_dir, cache_dir]:
 state_path = data_dir / "cli" / "fake-session.json"
 export_path = pathlib.Path(args[args.index("--export") + 1])
 prompt = args[args.index("-p") + 1]
+{SEALED_PROVIDER_PROBE}
 if "--resume" in args:
     requested_session = args[args.index("--resume") + 1]
     state = json.loads(state_path.read_text())
@@ -571,7 +658,7 @@ if prompt.startswith("WRITE_ARTIFACT"):
 if prompt == "CHECK_DEVIN_SANDBOX":
     pathlib.Path("agent-write.txt").write_text("allowed")
     for protected in [
-        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path("/repository") / "main-write.txt",
         pathlib.Path(".git"),
     ]:
         try:
@@ -635,6 +722,7 @@ args = sys.argv[1:]
 if args[0] != "run" or "--format" not in args or "--auto" not in args:
     raise RuntimeError(f"unexpected invocation: {{args}}")
 prompt = args[args.index("--") + 1]
+{SEALED_PROVIDER_PROBE}
 config_dir = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
 data_dir = pathlib.Path(os.environ["XDG_DATA_HOME"]) / "opencode"
 state_dir = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "opencode"
@@ -642,8 +730,6 @@ cache_dir = pathlib.Path(os.environ["XDG_CACHE_HOME"]) / "opencode"
 auth_path = data_dir / "auth.json"
 if not auth_path.is_file():
     raise RuntimeError("missing private OpenCode authentication")
-if not config_dir.joinpath("AGENTS.md").is_file():
-    raise RuntimeError("missing private OpenCode configuration")
 if not config_dir.joinpath(
     "node_modules", "@opencode-ai", "plugin", "package.json"
 ).is_file():
@@ -675,7 +761,7 @@ if prompt.startswith("WRITE_ARTIFACT"):
 if prompt == "CHECK_OPENCODE_SANDBOX":
     pathlib.Path("agent-write.txt").write_text("allowed")
     try:
-        pathlib.Path(os.environ["AOP_ROOT"]).joinpath("main-write.txt").write_text(
+        pathlib.Path("/repository").joinpath("main-write.txt").write_text(
             "forbidden"
         )
     except OSError:
@@ -762,12 +848,20 @@ def fake_agy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     source_dir = tmp_path / "agy-source"
     source_dir.mkdir()
     (source_dir / "oauth_creds.json").write_text('{"token": "test"}\n')
+    (source_dir / "google_accounts.json").write_text('{"active": "test"}\n')
     (source_dir / "config").mkdir()
     (source_dir / "config" / "config.json").write_text("{}\n")
     (source_dir / "antigravity-cli").mkdir()
     (source_dir / "antigravity-cli" / "antigravity-oauth-token").write_text(
         "test-token\n"
     )
+    (source_dir / "antigravity-cli" / "settings.json").write_text('{"study": true}\n')
+    (source_dir / "antigravity").mkdir()
+    (source_dir / "antigravity" / "browserAllowlist.txt").write_text("localhost\n")
+    (source_dir / "antigravity" / "mcp_config.json").write_text(
+        '{"mcpServers": {"study": {}}}\n'
+    )
+    (source_dir / "antigravity" / "user_settings.pb").write_text("study\n")
     (source_dir / "antigravity-cli" / "conversations").mkdir()
     (source_dir / "antigravity-cli" / "conversations" / "stale.json").write_text(
         "stale\n"
@@ -806,6 +900,7 @@ model = (
     else "gemini-3.5-flash"
 )
 prompt = args[args.index("-p") + 1]
+{SEALED_PROVIDER_PROBE}
 if prompt.startswith("AGY_DIFFERENT_SESSION"):
     session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 if prompt.startswith("WRITE_ARTIFACT"):
@@ -867,10 +962,13 @@ print(json.dumps({{"event": "result", "result": result}}), flush=True)
 @pytest.fixture
 def fake_hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     executable = tmp_path / "hermes"
-    state_path = tmp_path / "hermes-session.json"
     hermes_home = tmp_path / "hermes-home"
     hermes_home.mkdir()
     (hermes_home / "auth.json").write_text("{}\n")
+    (hermes_home / "skills" / "study-skill").mkdir(parents=True)
+    (hermes_home / "skills" / "study-skill" / "SKILL.md").write_text(
+        "concealed study instruction\n"
+    )
     monkeypatch.setenv("HERMES_HOME", os.fspath(hermes_home))
     executable.write_text(
         f"""#!{sys.executable}
@@ -881,11 +979,7 @@ import sys
 import time
 
 args = sys.argv[1:]
-state_path = (
-    pathlib.Path(os.environ["HERMES_HOME"]) / "fake-state.json"
-    if os.environ.get("AOP_FAKE_HERMES_STATE_IN_HOME")
-    else pathlib.Path({os.fspath(state_path)!r})
-)
+state_path = pathlib.Path(os.environ["HERMES_HOME"]) / "fake-state.json"
 
 if args[:2] == ["sessions", "export"]:
     requested = args[args.index("--session-id") + 1]
@@ -903,6 +997,7 @@ if args[0] != "chat" or "-Q" not in args:
     raise RuntimeError(f"unexpected Hermes invocation: {{args}}")
 
 prompt = args[args.index("-q") + 1]
+{SEALED_PROVIDER_PROBE}
 if prompt.startswith("CHECK_PARTICIPANT"):
     required = {{"-Q", "--safe-mode", "--toolsets", "--max-turns"}}
     if not required.issubset(args):
@@ -920,7 +1015,7 @@ if prompt == "ROTATE_AUTH":
     auth = json.loads(auth_path.read_text())
     entry = auth["credential_pool"]["xai-oauth"][0]
     generation = int(entry["access_token"].removeprefix("generation-"))
-    time.sleep(float(os.environ.get("AOP_FAKE_HERMES_ROTATE_DELAY", "0")))
+    time.sleep(0.2)
     generation += 1
     entry["access_token"] = f"generation-{{generation}}"
     entry["refresh_token"] = f"refresh-{{generation}}"
@@ -962,7 +1057,7 @@ if prompt.startswith("CHECK_HERMES_SANDBOX"):
         "# Hermes artifact\\n"
     )
     for protected in [
-        pathlib.Path(os.environ["AOP_ROOT"]) / "main-write.txt",
+        pathlib.Path("/repository") / "main-write.txt",
         pathlib.Path(".git"),
     ]:
         try:
@@ -992,6 +1087,127 @@ print(f"narrated reasoning for {{prompt}}\\nanswer:{{prompt}}", flush=True)
 print(f"session_id: {{session_id}}", file=sys.stderr, flush=True)
 if prompt == "FAIL":
     raise SystemExit(3)
+"""
+    )
+    executable.chmod(0o755)
+    return executable
+
+
+@pytest.fixture
+def fake_dsh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    source_home = tmp_path / "dsh-home"
+    source_home.mkdir()
+    source_home.joinpath(".credentials.yaml").write_text(
+        'DEEPSEEK_API_KEY: "managed test: value"\n'
+        "CUSTOM_ANTHROPIC_AUTH: managed-anthropic-value\n"
+        "OPENAI_API_KEY: unrelated-secret\n"
+    )
+    source_home.joinpath("settings.yaml").write_text(
+        "study: must-not-copy\n"
+        "llm-pi-ai:\n"
+        "  providers:\n"
+        "    anthropic:\n"
+        "      apiKeyEnv: CUSTOM_ANTHROPIC_AUTH\n"
+        "    openai:\n"
+        "      apiKeyEnv: OPENAI_API_KEY\n"
+        "    amazon-bedrock: {}\n"
+    )
+    monkeypatch.setenv("AOP_DSH_SOURCE_HOME", os.fspath(source_home))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    executable = tmp_path / "dsh"
+    executable.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+if args[:2] != ["--profile", "headless"] or "--patch" not in args:
+    print("invalid dsh invocation", file=sys.stderr)
+    raise SystemExit(2)
+patch = pathlib.Path(args[args.index("--patch") + 1])
+contents = patch.read_text()
+if "aop-dsh-runner.mjs" not in contents:
+    print("AOP dsh runner was not installed", file=sys.stderr)
+    raise SystemExit(2)
+if os.environ.get("DSH_TELEMETRY_DISABLED") != "1":
+    print("dsh telemetry was not disabled", file=sys.stderr)
+    raise SystemExit(2)
+home = pathlib.Path(os.environ["DSH_HOME"])
+if (
+    "provider: \\\"amazon-bedrock\\\"" not in contents
+    and not home.joinpath(".credentials.yaml").is_file()
+    and not os.environ.get("DEEPSEEK_API_KEY")
+):
+    print("dsh credentials were not seeded", file=sys.stderr)
+    raise SystemExit(2)
+if home.joinpath("settings.yaml").exists() and "study:" in home.joinpath("settings.yaml").read_text():
+    print("dsh user settings leaked into private state", file=sys.stderr)
+    raise SystemExit(2)
+session_id = os.environ["AOP_DSH_SESSION_ID"]
+sessions = home / "fake-sessions"
+sessions.mkdir(exist_ok=True)
+session = sessions / session_id
+if os.environ.get("AOP_DSH_RESUME") == "1" and not session.is_file():
+    print("dsh resume state is missing", file=sys.stderr)
+    raise SystemExit(1)
+prompt = args[-1]
+{SEALED_PROVIDER_PROBE}
+if prompt == "CHECK_ENV_OVERRIDE" and os.environ.get("DEEPSEEK_API_KEY") != "environment-override":
+    print("dsh environment credential did not take precedence", file=sys.stderr)
+    raise SystemExit(2)
+if prompt == "CHECK_PROVIDER":
+    settings = home.joinpath("settings.yaml").read_text()
+    credentials = home.joinpath(".credentials.yaml").read_text()
+    if "provider: \\\"anthropic\\\"" not in contents or "model: \\\"claude-sonnet-4-5\\\"" not in contents:
+        print("dsh provider selection was not patched", file=sys.stderr)
+        raise SystemExit(2)
+    if "CUSTOM_ANTHROPIC_AUTH" not in settings or "openai:" in settings:
+        print("dsh provider settings were not projected", file=sys.stderr)
+        raise SystemExit(2)
+    if "CUSTOM_ANTHROPIC_AUTH" not in credentials or "DEEPSEEK_API_KEY" in credentials:
+        print("dsh provider credential was not projected", file=sys.stderr)
+        raise SystemExit(2)
+    if os.environ.get("CUSTOM_ANTHROPIC_AUTH") != "environment-custom-value":
+        print("dsh custom environment credential was not preserved", file=sys.stderr)
+        raise SystemExit(2)
+if prompt == "CHECK_NATIVE_PROVIDER" and home.joinpath(".credentials.yaml").exists():
+    print("dsh provider-native auth received a managed credential", file=sys.stderr)
+    raise SystemExit(2)
+session.write_text(prompt)
+if "anthropic.claude-sonnet-4-5-v1:0" in contents:
+    model = "anthropic.claude-sonnet-4-5-v1:0"
+elif "claude-sonnet-4-5" in contents:
+    model = "claude-sonnet-4-5"
+else:
+    model = "deepseek-v4-pro" if "deepseek-v4-pro" in contents else "deepseek-v4-flash"
+print(json.dumps({{"type": "aop.dsh.started", "session_id": session_id}}), flush=True)
+if prompt == "FAIL":
+    print(json.dumps({{
+        "type": "aop.dsh.result",
+        "session_id": session_id,
+        "model": model,
+        "final_message": None,
+        "usage": {{}},
+        "completed": False,
+        "error": "synthetic dsh failure",
+    }}), flush=True)
+    raise SystemExit(1)
+print(json.dumps({{
+    "type": "aop.dsh.result",
+    "session_id": session_id,
+    "model": model,
+    "final_message": f"answer:{{prompt}}",
+    "usage": {{
+        "input_tokens": 90,
+        "cached_input_tokens": 30,
+        "output_tokens": 20,
+        "reasoning_output_tokens": 7,
+    }},
+    "completed": True,
+    "error": None,
+}}), flush=True)
 """
     )
     executable.chmod(0o755)

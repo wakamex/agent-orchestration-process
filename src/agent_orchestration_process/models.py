@@ -9,27 +9,25 @@ from .pricing import EstimatedCost, TokenUsage
 
 
 @dataclass(frozen=True)
-class ReadPathFile:
+class InputFile:
     relative_path: str
     size_bytes: int
     sha256: str
 
 
 @dataclass(frozen=True)
-class ReadPath:
+class InputSnapshot:
     source_path: str
     mounted_path: str
     kind: str
     size_bytes: int
     sha256: str
-    files: tuple[ReadPathFile, ...]
+    files: tuple[InputFile, ...]
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> ReadPath:
+    def from_dict(cls, value: dict[str, Any]) -> InputSnapshot:
         fields = dict(value)
-        fields["files"] = tuple(
-            ReadPathFile(**item) for item in fields.get("files", ())
-        )
+        fields["files"] = tuple(InputFile(**item) for item in fields.get("files", ()))
         return cls(**fields)
 
 
@@ -44,12 +42,13 @@ class RunRequest:
     model: str | None
     inference_provider: str | None
     effort: str | None
-    sandbox: str
+    profile: str
+    effective_policy: dict[str, Any]
     timeout_seconds: float | None
     session_id: str | None
     parent_run_id: str | None
     artifacts: tuple[str, ...]
-    read_paths: tuple[ReadPath, ...]
+    inputs: tuple[InputSnapshot, ...]
     created_at: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -60,9 +59,10 @@ class RunRequest:
         fields = dict(value)
         fields.setdefault("mode", "agent")
         fields.setdefault("inference_provider", None)
+        fields.setdefault("effective_policy", {})
         fields["artifacts"] = tuple(fields.get("artifacts", ()))
-        fields["read_paths"] = tuple(
-            ReadPath.from_dict(item) for item in fields.get("read_paths", ())
+        fields["inputs"] = tuple(
+            InputSnapshot.from_dict(item) for item in fields.get("inputs", ())
         )
         return cls(**fields)
 
@@ -111,7 +111,7 @@ class RunResult:
     billing: BillingProvenance = BillingProvenance()
     inference_provider: str | None = None
     artifacts: tuple[RunArtifact, ...] = ()
-    read_paths: tuple[ReadPath, ...] = ()
+    inputs: tuple[InputSnapshot, ...] = ()
     provider_duration_seconds: float | None = None
 
     @property
@@ -148,7 +148,7 @@ class RunResult:
         fields["artifacts"] = tuple(
             RunArtifact(**artifact) for artifact in fields.get("artifacts", ())
         )
-        fields["read_paths"] = tuple(
-            ReadPath.from_dict(item) for item in fields.get("read_paths", ())
+        fields["inputs"] = tuple(
+            InputSnapshot.from_dict(item) for item in fields.get("inputs", ())
         )
         return cls(**fields)

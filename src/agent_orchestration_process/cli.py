@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, TextIO
 
 from . import __version__
 from .batch import BatchResult, BatchRunner
 from .integration import CheckpointManager, IntegrationManager
+from .isolation import PROFILES, explain_profile, resolve_policy
+from .locks import exclusive_lock, task_lock_path
 from .model_catalog import ModelCatalog, ensure_catalog_fresh
 from .model_listing import AGENTS, AvailableModel, list_models
-from .models import RunResult
-from .runner import AgentRunner, RunStore, adapter_for
+from .models import RunRequest, RunResult
+from .runner import AgentRunner, RunStore, adapter_for, provider_runtime_record
 from .worktrees import AOPError, WorktreeManager
 
 
@@ -75,8 +79,21 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("manifest", type=Path)
     batch.add_argument("--jobs", type=_positive_integer, default=4)
 
-    run = commands.add_parser("run", help="run an agent in an isolated task worktree")
-    run.add_argument("task")
+    profile_command = commands.add_parser(
+        "profile", help="inspect execution profile guarantees"
+    )
+    profile_commands = profile_command.add_subparsers(
+        dest="profile_command", required=True
+    )
+    explain = profile_commands.add_parser(
+        "explain", help="print the declared boundary for a profile"
+    )
+    explain.add_argument("profile", choices=PROFILES)
+    explain.add_argument("--agent", choices=AGENTS, default="codex")
+    explain.add_argument("--json", action="store_true", help="print JSON")
+
+    run = commands.add_parser("run", help="run an agent under an execution profile")
+    run.add_argument("task", nargs="?", help="task label; optional for sealed runs")
     run.add_argument(
         "--agent",
         choices=AGENTS,
@@ -87,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--provider",
         dest="inference_provider",
-        help="override the inference provider; currently Hermes-only",
+        help="override the inference provider for Hermes or DeepSeek Harness",
     )
     run.add_argument(
         "--mode",
@@ -101,16 +118,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="override agent reasoning effort",
     )
     run.add_argument(
-        "--sandbox",
-        choices=["workspace-write", "scratch-write", "danger-full-access"],
-        default="workspace-write",
+        "--profile",
+        choices=PROFILES,
+        default="edit",
+        help="edit workspace, review it read-only, run sealed inputs-only, or use the native host",
+    )
+    run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview the intended boundary without compiling or dispatching it",
     )
     run.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
     run.add_argument(
         "--json", action="store_true", help="print the normalized result as JSON"
     )
     _add_artifact_arguments(run)
-    _add_read_arguments(run, default=[], resume=False)
+    _add_input_arguments(run, default=[], resume=False)
     _add_prompt_arguments(run)
 
     resume = commands.add_parser("resume", help="resume an agent session from a run")
@@ -120,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="print the normalized result as JSON"
     )
     _add_artifact_arguments(resume)
-    _add_read_arguments(resume, default=None, resume=True)
+    _add_input_arguments(resume, default=None, resume=True)
     _add_prompt_arguments(resume)
 
     worktree = commands.add_parser("worktree", help="manage task worktrees")
@@ -162,14 +185,33 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         raw_arguments = list(sys.argv[1:] if argv is None else argv)
-        force_refresh = "models" in raw_arguments and "--refresh" in raw_arguments
-        catalog = ensure_catalog_fresh(force=force_refresh)
         args = build_parser().parse_args(raw_arguments)
 
         if args.command == "models":
+            catalog = ensure_catalog_fresh(force=args.refresh)
             return _report_models(args.agent or AGENTS, catalog, json_output=args.json)
 
-        manager = WorktreeManager.discover(Path.cwd())
+        if args.command == "profile":
+            policy = explain_profile(args.profile)
+            policy["provider"] = args.agent
+            policy["provider_runtime"] = provider_runtime_record(
+                adapter_for(args.agent)
+            )
+            _report_policy(policy, json_output=args.json)
+            return 0
+
+        if args.command in {"run", "resume", "batch", "integrate"}:
+            ensure_catalog_fresh()
+
+        if args.command == "run" and args.profile == "sealed":
+            manager = WorktreeManager.standalone(Path.cwd())
+        else:
+            try:
+                manager = WorktreeManager.discover(Path.cwd())
+            except AOPError:
+                if args.command not in {"resume", "cleanup"}:
+                    raise
+                manager = WorktreeManager.standalone(Path.cwd())
 
         if args.command == "init":
             manager.initialize()
@@ -178,7 +220,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "cleanup":
             request = RunStore(manager.state_dir / "runs").load_request(args.run_id)
-            if any(item.task == request.task for item in manager.list()):
+            if request.profile == "sealed":
+                _cleanup_sealed(manager, request)
+            elif any(item.task == request.task for item in manager.list()):
                 manager.remove(request.task, force=True)
             print(request.task)
             return 0
@@ -229,18 +273,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _report_batch(result, manager)
 
         if args.command == "run":
+            task = args.task or str(uuid.uuid4())
+            if args.task is None and args.profile != "sealed":
+                raise AOPError("TASK is required unless --profile sealed is selected")
+            preview = resolve_policy(
+                args.profile,
+                input_names=tuple(Path(path).name for path in args.input_paths),
+            ).to_dict()
+            preview["provider"] = args.agent
+            preview["provider_runtime"] = provider_runtime_record(
+                adapter_for(args.agent)
+            )
+            if args.dry_run:
+                _report_policy(preview, json_output=args.json)
+                return 0
+            if not args.json:
+                _report_policy(
+                    preview,
+                    json_output=False,
+                    prefix="aop: ",
+                    stream=sys.stderr,
+                )
             result = AgentRunner(manager, adapter_for(args.agent)).run(
-                task=args.task,
+                task=task,
                 prompt=_read_prompt(args),
                 base=args.base,
                 model=args.model,
                 inference_provider=args.inference_provider,
                 effort=args.effort,
                 mode=args.mode,
-                sandbox=args.sandbox,
+                profile=args.profile,
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
-                read_paths=args.read_paths,
+                input_paths=args.input_paths,
             )
             return _report_run(result, manager, json_output=args.json)
 
@@ -250,7 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prompt=_read_prompt(args),
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
-                read_paths=args.read_paths,
+                input_paths=args.input_paths,
             )
             return _report_run(result, manager, json_output=args.json)
 
@@ -297,22 +362,22 @@ def _add_artifact_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_read_arguments(
+def _add_input_arguments(
     parser: argparse.ArgumentParser,
     *,
     default: list[str] | None,
     resume: bool,
 ) -> None:
     help_text = (
-        "replace inherited read paths with PATH; repeat for additional paths"
+        "replace inherited input snapshots with PATH; repeat for additional inputs"
         if resume
-        else "expose PATH read-only; repeat for additional paths"
+        else "snapshot PATH read-only at /inputs/BASENAME; repeat for additional inputs"
     )
     parser.add_argument(
-        "--read",
+        "--input",
         action="append",
         default=default,
-        dest="read_paths",
+        dest="input_paths",
         metavar="PATH",
         help=help_text,
     )
@@ -327,6 +392,116 @@ def _read_prompt(args: argparse.Namespace) -> str:
         raise AOPError(
             f"could not read prompt file {args.prompt_file}: {error}"
         ) from error
+
+
+def _report_policy(
+    policy: dict[str, object],
+    *,
+    json_output: bool,
+    prefix: str = "",
+    stream: TextIO = sys.stdout,
+) -> None:
+    if json_output:
+        print(json.dumps(policy, indent=2, sort_keys=True))
+        return
+    workspace = policy["workspace"]
+    repository = policy["repository"]
+    host = policy["host"]
+    inputs = policy["inputs"]
+    instructions = policy["instructions"]
+    network = policy["network"]
+    environment = policy["environment"]
+    assert isinstance(workspace, dict)
+    assert isinstance(repository, dict)
+    assert isinstance(host, dict)
+    assert isinstance(inputs, dict)
+    assert isinstance(instructions, dict)
+    assert isinstance(network, dict)
+    assert isinstance(environment, dict)
+    print(f"{prefix}profile: {policy['profile']}", file=stream)
+    print(
+        f"{prefix}repository: {repository['access']} at "
+        f"{repository.get('guest_path') or 'not mounted'}",
+        file=stream,
+    )
+    print(
+        f"{prefix}workspace: task access {workspace['access']}; "
+        f"{workspace['content']} at {workspace.get('guest_path') or 'not mounted'}; "
+        f"writable: {str(workspace['writable']).lower()}",
+        file=stream,
+    )
+    print(f"{prefix}host: {host['access']}", file=stream)
+    print(
+        f"{prefix}inputs: {inputs['mode']} ({len(inputs.get('names', []))} declared)",
+        file=stream,
+    )
+    print(
+        f"{prefix}inherited local instructions: {instructions['inherited_local']}; "
+        f"provider built-in prompt: {instructions['provider_builtin']}; "
+        f"AOP generated instructions: {instructions['aop_generated']}",
+        file=stream,
+    )
+    print(
+        f"{prefix}environment: {environment['mode']}; "
+        f"credentials: {environment['credential_exposure']} with recorded values "
+        f"{environment['recorded_values']}; network: {network['mode']}; "
+        f"network isolation: {network['isolation']}",
+        file=stream,
+    )
+    print(
+        f"{prefix}identity: {policy['identity']}; namespaces: "
+        f"{', '.join(policy['namespaces']) or 'native'}; "
+        f"capabilities: {policy['capabilities']}",
+        file=stream,
+    )
+    print(
+        f"{prefix}writable: "
+        + ", ".join(
+            f"{path} ({policy['writable_path_scopes'][path]})"
+            for path in policy["writable_paths"]
+        ),
+        file=stream,
+    )
+    runtime = policy.get("provider_runtime")
+    if isinstance(runtime, dict):
+        print(
+            f"{prefix}provider executable: {runtime.get('executable') or 'unresolved'} "
+            f"sha256={runtime.get('sha256') or 'unavailable'}",
+            file=stream,
+        )
+
+
+def _cleanup_sealed(manager: WorktreeManager, request: RunRequest) -> None:
+    task = request.task
+    policy = request.effective_policy
+    with exclusive_lock(task_lock_path(manager.state_dir, task), f"task {task}"):
+        workspace = policy.get("workspace", {})
+        controller = policy.get("controller", {})
+        controller_path = workspace.get("controller_path")
+        if isinstance(controller_path, str):
+            sealed_run_dir = Path(controller_path).parent
+            sealed_root = (manager.state_dir / "sealed").resolve()
+            resolved = sealed_run_dir.resolve()
+            if resolved.is_relative_to(sealed_root) and resolved.exists():
+                shutil.rmtree(resolved)
+        provider_state = controller.get("provider_state")
+        if isinstance(provider_state, str):
+            state_path = Path(provider_state).resolve()
+            state_root = (manager.state_dir / "provider-state").resolve()
+            if state_path.is_relative_to(state_root) and state_path.exists():
+                shutil.rmtree(state_path)
+        scratch = controller.get("scratch")
+        if isinstance(scratch, str):
+            scratch_path = Path(scratch).resolve()
+            scratch_root = (manager.state_dir / "scratch").resolve()
+            if scratch_path.is_relative_to(scratch_root) and scratch_path.exists():
+                shutil.rmtree(scratch_path)
+        cache = controller.get("cache")
+        if isinstance(cache, str):
+            cache_path = Path(cache).resolve()
+            cache_root = (manager.state_dir / "sealed-cache").resolve()
+            if cache_path.is_relative_to(cache_root) and cache_path.exists():
+                shutil.rmtree(cache_path)
 
 
 def _positive_timeout(value: str) -> float:

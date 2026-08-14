@@ -14,13 +14,14 @@ from pathlib import Path
 from typing import Callable
 
 from .model_listing import AGENTS
+from .isolation import PROFILES
+from .isolation import resolve_policy
 from .runner import AgentRunner, adapter_for, normalize_artifacts
 from .worktrees import AOPError, TASK_ID, WorktreeManager
 
 
 EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 MODES = {"agent", "participant"}
-SANDBOXES = {"workspace-write", "scratch-write", "danger-full-access"}
 TASK_FIELDS = {
     "id",
     "agent",
@@ -31,10 +32,10 @@ TASK_FIELDS = {
     "provider",
     "mode",
     "effort",
-    "sandbox",
+    "profile",
     "timeout",
     "artifacts",
-    "read_paths",
+    "inputs",
 }
 
 
@@ -53,10 +54,10 @@ class BatchTask:
     inference_provider: str | None = None
     effort: str | None = None
     mode: str = "agent"
-    sandbox: str = "workspace-write"
+    profile: str = "edit"
     timeout_seconds: float | None = None
     artifacts: tuple[str, ...] = ()
-    read_paths: tuple[str, ...] = ()
+    input_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,17 @@ class BatchRunner:
         report = progress or (lambda _message: None)
         manifest = manifest_path.resolve()
         tasks = load_manifest(manifest)
+        for execution_profile, agent in sorted(
+            {(task.profile, task.agent) for task in tasks}
+        ):
+            policy = resolve_policy(execution_profile)
+            report(
+                f"policy {execution_profile}/{agent}: "
+                f"workspace={policy.workspace['access']} "
+                f"repository={policy.repository['access']} "
+                f"host={policy.host['access']} "
+                f"network={policy.network}"
+            )
         batch_id = str(uuid.uuid4())
         started_at = _now()
         started = time.monotonic()
@@ -209,10 +221,10 @@ class BatchRunner:
                 inference_provider=task.inference_provider,
                 effort=task.effort,
                 mode=task.mode,
-                sandbox=task.sandbox,
+                profile=task.profile,
                 timeout_seconds=task.timeout_seconds,
                 artifacts=task.artifacts,
-                read_paths=task.read_paths,
+                input_paths=task.input_paths,
             )
         except Exception as error:
             return BatchTaskResult(
@@ -345,11 +357,9 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
     effort = _optional_string(value, "effort", label)
     if effort is not None and effort not in EFFORTS:
         raise AOPError(f"{label}.effort must be one of: {', '.join(sorted(EFFORTS))}")
-    sandbox = _optional_string(value, "sandbox", label) or "workspace-write"
-    if sandbox not in SANDBOXES:
-        raise AOPError(
-            f"{label}.sandbox must be one of: {', '.join(sorted(SANDBOXES))}"
-        )
+    execution_profile = _optional_string(value, "profile", label) or "edit"
+    if execution_profile not in PROFILES:
+        raise AOPError(f"{label}.profile must be one of: {', '.join(PROFILES)}")
 
     timeout = value.get("timeout")
     if timeout is not None:
@@ -367,17 +377,17 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
     ):
         raise AOPError(f"{label}.artifacts must be an array of non-empty strings")
 
-    raw_read_paths = value.get("read_paths", [])
-    if not isinstance(raw_read_paths, list) or not all(
-        isinstance(path, str) and path for path in raw_read_paths
+    raw_input_paths = value.get("inputs", [])
+    if not isinstance(raw_input_paths, list) or not all(
+        isinstance(path, str) and path for path in raw_input_paths
     ):
-        raise AOPError(f"{label}.read_paths must be an array of non-empty strings")
-    resolved_read_paths: list[str] = []
-    for item in raw_read_paths:
+        raise AOPError(f"{label}.inputs must be an array of non-empty strings")
+    resolved_input_paths: list[str] = []
+    for item in raw_input_paths:
         path = Path(item).expanduser()
         if not path.is_absolute():
             path = manifest_dir / path
-        resolved_read_paths.append(os.fspath(path.resolve()))
+        resolved_input_paths.append(os.fspath(path.resolve()))
 
     return BatchTask(
         id=task_id,
@@ -389,10 +399,10 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
         inference_provider=inference_provider,
         effort=effort,
         mode=mode,
-        sandbox=sandbox,
+        profile=execution_profile,
         timeout_seconds=timeout,
         artifacts=normalize_artifacts(artifacts),
-        read_paths=tuple(resolved_read_paths),
+        input_paths=tuple(resolved_input_paths),
     )
 
 

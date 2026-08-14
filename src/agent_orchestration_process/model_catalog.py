@@ -148,7 +148,9 @@ def _validate_providers(value: object) -> None:
     if not isinstance(value, dict) or not value:
         raise ValueError("model catalog is not a nonempty object")
     for provider in value.values():
-        if not isinstance(provider, dict) or not isinstance(provider.get("models"), dict):
+        if not isinstance(provider, dict) or not isinstance(
+            provider.get("models"), dict
+        ):
             raise ValueError("model catalog contains an invalid provider")
 
 

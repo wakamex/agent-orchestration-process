@@ -58,7 +58,7 @@ def test_checkpoint_and_integrate_linear_task(
             repository / ".aop" / "runs" / result.author_run.run_id / "request.json"
         ).read_text()
     )
-    assert validation_request["sandbox"] == "workspace-write"
+    assert validation_request["profile"] == "edit"
     assert result.resolution_run_ids == []
     assert manager.metadata("feature").base_commit == result.integrated_head
 
@@ -78,7 +78,7 @@ def test_participant_runs_are_not_treated_as_authoring_provenance(
         task="mixed-purpose",
         prompt="participant",
         mode="participant",
-        sandbox="scratch-write",
+        profile="review",
         timeout_seconds=5,
     )
 
@@ -167,7 +167,7 @@ def test_authoring_agent_resolves_rebase_conflict(
             repository / ".aop" / "runs" / result.resolution_run_ids[0] / "request.json"
         ).read_text()
     )
-    assert resolution_request["sandbox"] == "workspace-write"
+    assert resolution_request["profile"] == "edit"
 
 
 def test_checkpoint_refuses_an_active_task(repository: Path) -> None:

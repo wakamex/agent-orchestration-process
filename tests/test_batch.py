@@ -25,10 +25,10 @@ prompt_file = "prompt.md"
 model = "test-model"
 mode = "agent"
 effort = "xhigh"
-sandbox = "workspace-write"
+profile = "edit"
 timeout = 30
 artifacts = ["paper.md"]
-read_paths = ["sources", "ledger.md"]
+inputs = ["sources", "ledger.md"]
 
 [[tasks]]
 id = "tests"
@@ -45,10 +45,10 @@ prompt = "Add tests"
     assert tasks[0].model == "test-model"
     assert tasks[0].mode == "agent"
     assert tasks[0].effort == "xhigh"
-    assert tasks[0].sandbox == "workspace-write"
+    assert tasks[0].profile == "edit"
     assert tasks[0].timeout_seconds == 30
     assert tasks[0].artifacts == ("paper.md",)
-    assert tasks[0].read_paths == (
+    assert tasks[0].input_paths == (
         os.fspath(tmp_path / "sources"),
         os.fspath(tmp_path / "ledger.md"),
     )
@@ -120,7 +120,7 @@ def test_batch_archives_declared_artifacts(
 [[tasks]]
 id = "extract"
 prompt = "WRITE_ARTIFACT"
-sandbox = "scratch-write"
+profile = "review"
 artifacts = ["paper.md"]
 """
     )
@@ -136,14 +136,11 @@ artifacts = ["paper.md"]
     )
     assert run_result["artifacts"][0]["logical_path"] == "paper.md"
     assert (
-        manager.state_dir
-        / "runs"
-        / run_id
-        / run_result["artifacts"][0]["archive_path"]
+        manager.state_dir / "runs" / run_id / run_result["artifacts"][0]["archive_path"]
     ).read_text() == "# Extracted\n"
 
 
-def test_batch_mounts_declared_read_paths(
+def test_batch_snapshots_declared_inputs(
     repository: Path,
     fake_codex: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -161,8 +158,8 @@ def test_batch_mounts_declared_read_paths(
 [[tasks]]
 id = "reader"
 prompt = "CHECK_READ_PATHS"
-sandbox = "scratch-write"
-read_paths = ["{transcripts}", "{ledger}"]
+profile = "review"
+inputs = ["{transcripts}", "{ledger}"]
 '''
     )
     manager = WorktreeManager.discover(repository)
@@ -175,7 +172,7 @@ read_paths = ["{transcripts}", "{ledger}"]
     request = json.loads(
         (manager.state_dir / "runs" / run_id / "request.json").read_text()
     )
-    assert [Path(item["source_path"]).name for item in request["read_paths"]] == [
+    assert [Path(item["source_path"]).name for item in request["inputs"]] == [
         "transcripts",
         "ledger.md",
     ]
@@ -224,6 +221,7 @@ def test_batch_can_mix_all_non_codex_providers(
     fake_opencode: Path,
     fake_agy: Path,
     fake_hermes: Path,
+    fake_dsh: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AOP_CLAUDE_BIN", os.fspath(fake_claude))
@@ -232,6 +230,7 @@ def test_batch_can_mix_all_non_codex_providers(
     monkeypatch.setenv("AOP_OPENCODE_BIN", os.fspath(fake_opencode))
     monkeypatch.setenv("AOP_AGY_BIN", os.fspath(fake_agy))
     monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
+    monkeypatch.setenv("AOP_DSH_BIN", os.fspath(fake_dsh))
     manifest = repository / "providers.toml"
     manifest.write_text(
         """
@@ -273,6 +272,13 @@ model = "deepseek/deepseek-v4-flash-0731"
 provider = "nous"
 effort = "high"
 prompt = "three"
+
+[[tasks]]
+id = "dsh-task"
+agent = "dsh"
+model = "deepseek-v4-pro"
+effort = "max"
+prompt = "four"
 """
     )
 
@@ -286,6 +292,7 @@ prompt = "three"
         "agy",
         "opencode",
         "hermes",
+        "dsh",
     ]
     assert result.tasks[0].model == "claude-test-model"
     assert result.tasks[1].model == "composer-2.5"
@@ -294,6 +301,7 @@ prompt = "three"
     assert result.tasks[4].model == "opencode/deepseek-v4-flash"
     assert result.tasks[5].model == "deepseek/deepseek-v4-flash-0731"
     assert result.tasks[5].inference_provider == "nous"
+    assert result.tasks[6].model == "deepseek-v4-pro"
 
 
 def test_batch_runs_hermes_participant_mode_and_records_provenance(
@@ -310,7 +318,7 @@ id = "player"
 agent = "hermes"
 mode = "participant"
 prompt = "CHECK_PARTICIPANT batch"
-sandbox = "scratch-write"
+profile = "review"
 """
     )
     manager = WorktreeManager.discover(repository)

@@ -15,11 +15,213 @@ from agent_orchestration_process.runner import (
     CodexAdapter,
     CursorAdapter,
     DevinAdapter,
+    DeepSeekHarnessAdapter,
     HermesAdapter,
     _HermesSession,
     OpenCodeAdapter,
 )
 from agent_orchestration_process.worktrees import AOPError, WorktreeManager
+
+
+def test_dsh_run_and_exact_resume_use_the_native_patch_interface(
+    repository: Path, fake_dsh: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, DeepSeekHarnessAdapter(os.fspath(fake_dsh)))
+
+    first = runner.run(
+        task="dsh-task",
+        prompt="first",
+        model="deepseek-v4-pro",
+        effort="max",
+        timeout_seconds=5,
+    )
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    assert first.succeeded
+    assert first.provider == "dsh"
+    assert first.model == "deepseek-v4-pro"
+    assert first.effort == "max"
+    assert first.final_message == "answer:first"
+    assert first.usage.input_tokens == 90
+    assert first.usage.cached_input_tokens == 30
+    assert first.usage.output_tokens == 20
+    assert first.usage.reasoning_output_tokens == 7
+    assert first.api_equivalent_cost is not None
+    assert first.api_equivalent_cost.amount_usd == 0.0001038
+    assert first.billing.route == "metered-api"
+    assert first.billing.credential_source == "deepseek-api-key"
+    assert first.command[0] == "bwrap"
+    assert ["--profile", "headless"] == first.command[
+        first.command.index("--profile") : first.command.index("--profile") + 2
+    ]
+    patch = Path(
+        first.command[first.command.index("--patch") + 1].replace(
+            "/scratch", os.fspath(manager.state_dir / "scratch" / "dsh-task"), 1
+        )
+    )
+    patch_text = patch.read_text()
+    assert 'model: "deepseek-v4-pro"' in patch_text
+    assert 'reasoningEffort: "max"' in patch_text
+    assert "- id: session-title-llm\n  disabled: true" in patch_text
+    assert "- id: headless-runner\n  disabled: true" in patch_text
+    assert "    - id: aop-headless-runner" in patch_text
+    assert "file:///state/dsh/home/profiles/headless/aop-dsh-runner.mjs" in patch_text
+    runner_source = private_home = (
+        manager.state_dir / "provider-state" / "dsh-task" / "dsh" / "home"
+    )
+    assert (
+        "installModelSelection"
+        in runner_source.joinpath(
+            "profiles", "headless", "aop-dsh-runner.mjs"
+        ).read_text()
+    )
+    assert resumed.succeeded
+    assert resumed.session_id == first.session_id
+    assert resumed.final_message == "answer:second"
+
+    private_home = manager.state_dir / "provider-state" / "dsh-task" / "dsh" / "home"
+    assert private_home.joinpath(".credentials.yaml").is_file()
+    assert not private_home.joinpath("settings.yaml").exists()
+    assert (
+        private_home.joinpath("fake-sessions", first.session_id).read_text() == "second"
+    )
+
+
+def test_dsh_maps_none_effort_and_normalizes_failures(
+    repository: Path, fake_dsh: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository),
+        DeepSeekHarnessAdapter(os.fspath(fake_dsh)),
+    )
+    failed = runner.run(task="dsh-failure", prompt="FAIL", effort="none")
+
+    assert not failed.succeeded
+    assert failed.error == "synthetic dsh failure"
+    scratch = repository / ".aop" / "scratch" / "dsh-failure"
+    patch = next(scratch.glob("aop-dsh-*.cordis.yml"))
+    assert 'reasoningEffort: "off"' in patch.read_text()
+
+    with pytest.raises(AOPError, match="dsh effort must be one of"):
+        runner.run(task="dsh-bad-effort", prompt="test", effort="ultra")
+
+
+def test_dsh_projects_the_selected_provider_and_its_exact_credential_ref(
+    repository: Path,
+    fake_dsh: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CUSTOM_ANTHROPIC_AUTH", "environment-custom-value")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-enter-anthropic-run")
+    manager = WorktreeManager.discover(repository)
+    result = AgentRunner(manager, DeepSeekHarnessAdapter(os.fspath(fake_dsh))).run(
+        task="dsh-anthropic",
+        prompt="CHECK_PROVIDER",
+        inference_provider="anthropic",
+        model="claude-sonnet-4-5",
+        effort="low",
+    )
+
+    assert result.succeeded
+    assert result.inference_provider == "anthropic"
+    assert result.model == "claude-sonnet-4-5"
+    assert result.billing.credential_source == "custom-anthropic-auth"
+    private_home = (
+        manager.state_dir / "provider-state" / "dsh-anthropic" / "dsh" / "home"
+    )
+    settings = private_home.joinpath("settings.yaml").read_text()
+    credentials = private_home.joinpath(".credentials.yaml").read_text()
+    assert "anthropic:" in settings
+    assert "CUSTOM_ANTHROPIC_AUTH" in settings
+    assert "openai:" not in settings
+    assert "study:" not in settings
+    assert "CUSTOM_ANTHROPIC_AUTH" in credentials
+    assert "DEEPSEEK_API_KEY" not in credentials
+    assert "OPENAI_API_KEY" not in credentials
+    assert "environment-custom-value" not in json.dumps(result.to_dict())
+    assert "OPENAI_API_KEY" not in result.command
+    ref_index = result.command.index("CUSTOM_ANTHROPIC_AUTH")
+    assert result.command[ref_index - 1 : ref_index + 2] == [
+        "--setenv",
+        "CUSTOM_ANTHROPIC_AUTH",
+        "<redacted>",
+    ]
+
+
+def test_dsh_preserves_provider_native_auth_when_api_key_env_is_omitted(
+    repository: Path,
+    fake_dsh: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "native-access-id")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "native-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-enter-bedrock-run")
+    manager = WorktreeManager.discover(repository)
+    result = AgentRunner(manager, DeepSeekHarnessAdapter(os.fspath(fake_dsh))).run(
+        task="dsh-bedrock",
+        prompt="CHECK_NATIVE_PROVIDER",
+        inference_provider="amazon-bedrock",
+        model="anthropic.claude-sonnet-4-5-v1:0",
+    )
+
+    assert result.succeeded
+    assert result.billing.credential_source == "provider-native"
+    assert "AWS_ACCESS_KEY_ID" in result.command
+    assert "AWS_SECRET_ACCESS_KEY" in result.command
+    assert "OPENAI_API_KEY" not in result.command
+    assert "native-access-id" not in json.dumps(result.to_dict())
+    assert "native-secret" not in json.dumps(result.to_dict())
+    private_home = manager.state_dir / "provider-state" / "dsh-bedrock" / "dsh" / "home"
+    assert private_home.joinpath("settings.yaml").is_file()
+    assert not private_home.joinpath(".credentials.yaml").exists()
+
+
+def test_sealed_dsh_projects_only_its_managed_credential(
+    tmp_path: Path, fake_dsh: Path
+) -> None:
+    manager = WorktreeManager.standalone(tmp_path / "controller")
+    result = AgentRunner(manager, DeepSeekHarnessAdapter(os.fspath(fake_dsh))).run(
+        task="sealed-dsh", prompt="test", profile="sealed"
+    )
+
+    assert result.succeeded
+    private_credentials = (
+        manager.state_dir
+        / "provider-state"
+        / result.run_id
+        / "dsh"
+        / "home"
+        / ".credentials.yaml"
+    )
+    content = private_credentials.read_text()
+    assert "DEEPSEEK_API_KEY:" in content
+    assert "managed test: value" in content
+    assert "OPENAI_API_KEY" not in content
+    assert "unrelated-secret" not in content
+    assert private_credentials.stat().st_mode & 0o777 == 0o600
+    assert "managed test: value" not in json.dumps(result.to_dict())
+
+
+def test_sealed_dsh_preserves_and_redacts_native_environment_override(
+    tmp_path: Path,
+    fake_dsh: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "environment-override")
+    result = AgentRunner(
+        WorktreeManager.standalone(tmp_path / "controller"),
+        DeepSeekHarnessAdapter(os.fspath(fake_dsh)),
+    ).run(task="sealed-dsh-env", prompt="CHECK_ENV_OVERRIDE", profile="sealed")
+
+    assert result.succeeded
+    assert "environment-override" not in json.dumps(result.to_dict())
+    key_index = result.command.index("DEEPSEEK_API_KEY")
+    assert result.command[key_index - 1 : key_index + 2] == [
+        "--setenv",
+        "DEEPSEEK_API_KEY",
+        "<redacted>",
+    ]
 
 
 def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> None:
@@ -175,7 +377,7 @@ def test_cursor_workspace_sandbox_and_artifact(
     artifact = runner.run(
         task="cursor-artifact",
         prompt="WRITE_ARTIFACT",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["report.md"],
     )
 
@@ -193,11 +395,11 @@ def test_cursor_workspace_sandbox_and_artifact(
     ).read_text() == "# Cursor artifact\n"
 
 
-@pytest.mark.parametrize("sandbox", ["scratch-write", "workspace-write"])
+@pytest.mark.parametrize("profile", ["review", "edit"])
 def test_cursor_uses_private_runtime_state_with_read_only_global_home(
     repository: Path,
     fake_cursor: Path,
-    sandbox: str,
+    profile: str,
 ) -> None:
     source_home = Path(os.environ["AOP_CURSOR_HOME"])
     source_config = Path(os.environ["AOP_CURSOR_CONFIG_DIR"])
@@ -205,7 +407,7 @@ def test_cursor_uses_private_runtime_state_with_read_only_global_home(
     source_home.chmod(0o555)
     source_config.chmod(0o555)
     source_auth.chmod(0o444)
-    task = f"managed-cursor-{sandbox}"
+    task = f"managed-cursor-{profile}"
     manager = WorktreeManager.discover(repository)
 
     try:
@@ -213,7 +415,7 @@ def test_cursor_uses_private_runtime_state_with_read_only_global_home(
         first = runner.run(
             task=task,
             prompt="first",
-            sandbox=sandbox,
+            profile=profile,
             timeout_seconds=5,
         )
         resumed = runner.resume(run_id=first.run_id, prompt="second")
@@ -239,8 +441,9 @@ def test_cursor_uses_private_runtime_state_with_read_only_global_home(
     assert not (source_home / "projects").exists()
     assert not (source_home / "chats").exists()
     assert source_auth.read_text() == '{"token": "test"}\n'
-    assert os.fspath(private_state / "home") in first.command
-    assert ["--setenv", "XDG_CONFIG_HOME", os.fspath(private_state / "config")] == (
+    assert "/state/cursor/home" in first.command
+    assert os.fspath(source_home) not in first.command
+    assert ["--setenv", "XDG_CONFIG_HOME", "/state/cursor/config"] == (
         first.command[
             first.command.index("XDG_CONFIG_HOME") - 1 : first.command.index(
                 "XDG_CONFIG_HOME"
@@ -335,7 +538,7 @@ def test_devin_workspace_sandbox_and_artifact(
     artifact = runner.run(
         task="devin-artifact",
         prompt="WRITE_ARTIFACT",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["report.md"],
     )
 
@@ -353,13 +556,11 @@ def test_devin_workspace_sandbox_and_artifact(
     ).read_text() == "# Devin artifact\n"
 
 
-@pytest.mark.parametrize(
-    "sandbox", ["scratch-write", "workspace-write", "danger-full-access"]
-)
+@pytest.mark.parametrize("profile", ["review", "edit", "host"])
 def test_devin_uses_private_runtime_state_with_read_only_global_profile(
     repository: Path,
     fake_devin: Path,
-    sandbox: str,
+    profile: str,
 ) -> None:
     source_data = Path(os.environ["AOP_DEVIN_DATA_DIR"])
     source_config = Path(os.environ["AOP_DEVIN_CONFIG_DIR"])
@@ -367,12 +568,12 @@ def test_devin_uses_private_runtime_state_with_read_only_global_profile(
     source_data.chmod(0o555)
     source_config.chmod(0o555)
     source_credentials.chmod(0o444)
-    task = f"managed-devin-{sandbox}"
+    task = f"managed-devin-{profile}"
     manager = WorktreeManager.discover(repository)
 
     try:
         runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
-        first = runner.run(task=task, prompt="first", sandbox=sandbox)
+        first = runner.run(task=task, prompt="first", profile=profile)
         resumed = runner.resume(run_id=first.run_id, prompt="second")
     finally:
         source_data.chmod(0o755)
@@ -509,7 +710,7 @@ def test_opencode_workspace_sandbox_and_artifact(
     artifact = runner.run(
         task="opencode-artifact",
         prompt="WRITE_ARTIFACT",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["report.md"],
     )
 
@@ -527,11 +728,11 @@ def test_opencode_workspace_sandbox_and_artifact(
     ).read_text() == "# OpenCode artifact\n"
 
 
-@pytest.mark.parametrize("sandbox", ["scratch-write", "workspace-write"])
+@pytest.mark.parametrize("profile", ["review", "edit"])
 def test_opencode_uses_private_runtime_state_with_read_only_global_profile(
     repository: Path,
     fake_opencode: Path,
-    sandbox: str,
+    profile: str,
 ) -> None:
     source_config = Path(os.environ["AOP_OPENCODE_CONFIG_DIR"])
     source_data = Path(os.environ["AOP_OPENCODE_DATA_DIR"])
@@ -540,12 +741,12 @@ def test_opencode_uses_private_runtime_state_with_read_only_global_profile(
     for path in (source_config, source_data, source_dependencies):
         path.chmod(0o555)
     source_auth.chmod(0o444)
-    task = f"managed-opencode-{sandbox}"
+    task = f"managed-opencode-{profile}"
     manager = WorktreeManager.discover(repository)
 
     try:
         runner = AgentRunner(manager, OpenCodeAdapter(os.fspath(fake_opencode)))
-        first = runner.run(task=task, prompt="first", sandbox=sandbox)
+        first = runner.run(task=task, prompt="first", profile=profile)
         resumed = runner.resume(run_id=first.run_id, prompt="second")
     finally:
         for path in (source_config, source_data, source_dependencies):
@@ -564,7 +765,7 @@ def test_opencode_uses_private_runtime_state_with_read_only_global_profile(
     assert (private_state / "config" / "opencode" / "package.json").is_file()
     assert not (source_data / "opencode.db").exists()
     assert source_auth.read_text() == '{"opencode": {"key": "test"}}\n'
-    assert ["--setenv", "XDG_DATA_HOME", os.fspath(private_state / "data")] == (
+    assert ["--setenv", "XDG_DATA_HOME", "/state/opencode/data"] == (
         first.command[
             first.command.index("XDG_DATA_HOME") - 1 : first.command.index(
                 "XDG_DATA_HOME"
@@ -572,7 +773,7 @@ def test_opencode_uses_private_runtime_state_with_read_only_global_profile(
             + 2
         ]
     )
-    assert ["--setenv", "XDG_CACHE_HOME", os.fspath(manager.cache_dir)] == (
+    assert ["--setenv", "XDG_CACHE_HOME", "/cache"] == (
         first.command[
             first.command.index("XDG_CACHE_HOME") - 1 : first.command.index(
                 "XDG_CACHE_HOME"
@@ -580,15 +781,16 @@ def test_opencode_uses_private_runtime_state_with_read_only_global_profile(
             + 2
         ]
     )
-    assert [
-        "--ro-bind",
-        os.fspath(source_dependencies),
-        os.fspath(private_state / "config" / "opencode" / "node_modules"),
-    ] == first.command[
-        first.command.index(os.fspath(source_dependencies))
-        - 1 : first.command.index(os.fspath(source_dependencies))
-        + 2
-    ]
+    assert (
+        private_state
+        / "config"
+        / "opencode"
+        / "node_modules"
+        / "@opencode-ai"
+        / "plugin"
+        / "package.json"
+    ).is_file()
+    assert os.fspath(source_dependencies) not in first.command
 
     manager.remove(task)
     assert not private_state.exists()
@@ -666,22 +868,20 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     assert "--effort" not in resumed.command
 
 
-@pytest.mark.parametrize(
-    "sandbox", ["scratch-write", "workspace-write", "danger-full-access"]
-)
+@pytest.mark.parametrize("profile", ["review", "edit", "host"])
 def test_agy_uses_private_persistent_runtime_state_in_every_sandbox(
     repository: Path,
     fake_agy: Path,
-    sandbox: str,
+    profile: str,
 ) -> None:
     manager = WorktreeManager.discover(repository)
     runner = AgentRunner(manager, AgyAdapter(os.fspath(fake_agy)))
     source_dir = Path(os.environ["AOP_AGY_SOURCE_DIR"])
 
     first = runner.run(
-        task=f"private-agy-{sandbox}",
+        task=f"private-agy-{profile}",
         prompt="first",
-        sandbox=sandbox,
+        profile=profile,
         timeout_seconds=5,
     )
     resumed = runner.resume(run_id=first.run_id, prompt="second")
@@ -689,7 +889,7 @@ def test_agy_uses_private_persistent_runtime_state_in_every_sandbox(
     private_dir = (
         manager.state_dir
         / "provider-state"
-        / f"private-agy-{sandbox}"
+        / f"private-agy-{profile}"
         / "agy"
         / "gemini"
     )
@@ -706,26 +906,22 @@ def test_agy_uses_private_persistent_runtime_state_in_every_sandbox(
     assert not (source_dir / "antigravity-cli" / "fake-conversation.json").exists()
     first_dir_index = first.command.index("--gemini_dir")
     resumed_dir_index = resumed.command.index("--gemini_dir")
-    assert first.command[first_dir_index + 1] == os.fspath(private_dir)
-    assert resumed.command[resumed_dir_index + 1] == os.fspath(private_dir)
-    if sandbox == "danger-full-access":
+    expected_runtime_dir = (
+        os.fspath(private_dir) if profile == "host" else "/state/agy/gemini"
+    )
+    assert first.command[first_dir_index + 1] == expected_runtime_dir
+    assert resumed.command[resumed_dir_index + 1] == expected_runtime_dir
+    if profile == "host":
         assert first.command[0] == os.fspath(fake_agy)
     else:
         assert first.command[0] == "bwrap"
-        assert ["--ro-bind", os.fspath(source_dir), os.fspath(source_dir)] == (
-            first.command[
-                first.command.index(os.fspath(source_dir)) - 1 : first.command.index(
-                    os.fspath(source_dir)
-                )
-                + 2
-            ]
-        )
+        assert os.fspath(source_dir) not in first.command
         assert ["--bind", os.fspath(private_dir.parent.parent)] == first.command[
             first.command.index(os.fspath(private_dir.parent.parent))
             - 1 : first.command.index(os.fspath(private_dir.parent.parent)) + 1
         ]
 
-    manager.remove(f"private-agy-{sandbox}")
+    manager.remove(f"private-agy-{profile}")
     assert not private_dir.exists()
     assert (manager.state_dir / "runs" / first.run_id / "result.json").is_file()
     assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
@@ -862,7 +1058,7 @@ def test_agy_can_produce_a_declared_artifact(repository: Path, fake_agy: Path) -
     result = runner.run(
         task="agy-artifact",
         prompt="WRITE_ARTIFACT",
-        sandbox="scratch-write",
+        profile="review",
         artifacts=["paper.md"],
     )
 
@@ -889,7 +1085,7 @@ def test_claude_workspace_uses_bwrap_to_protect_main_and_git_metadata(
     assert (worktree.path / ".git").read_text().startswith("gitdir:")
 
 
-def test_scratch_write_only_mounts_the_task_scratch_directory(
+def test_review_profile_writes_only_to_controller_scratch(
     repository: Path, fake_claude: Path
 ) -> None:
     manager = WorktreeManager.discover(repository)
@@ -898,13 +1094,15 @@ def test_scratch_write_only_mounts_the_task_scratch_directory(
     result = runner.run(
         task="proposal",
         prompt="CHECK_SCRATCH",
-        sandbox="scratch-write",
+        profile="review",
         timeout_seconds=5,
     )
     worktree = manager.get("proposal")
 
     assert result.succeeded
-    assert (worktree.path / "scratch" / "analysis.txt").read_text() == "allowed"
+    assert (
+        manager.state_dir / "scratch" / "proposal" / "analysis.txt"
+    ).read_text() == "allowed"
     assert not (worktree.path / "agent-write.txt").exists()
     assert not (repository / "main-write.txt").exists()
 
@@ -997,8 +1195,7 @@ def test_hermes_provider_override_is_recorded_and_reused_on_resume(
     assert resumed.inference_provider == "xai-oauth"
     for result in (first, resumed):
         assert ["--provider", "xai-oauth"] == result.command[
-            result.command.index("--provider") : result.command.index("--provider")
-            + 2
+            result.command.index("--provider") : result.command.index("--provider") + 2
         ]
         assert ["--model", "grok-build-0.1"] == result.command[
             result.command.index("--model") : result.command.index("--model") + 2
@@ -1051,7 +1248,7 @@ def test_hermes_participant_mode_is_tool_free_bounded_and_stable_across_resume(
         task="hermes-participant",
         prompt="CHECK_PARTICIPANT first",
         mode="participant",
-        sandbox="scratch-write",
+        profile="review",
         timeout_seconds=5,
     )
     resumed = AgentRunner(manager).resume(
@@ -1095,6 +1292,7 @@ def test_hermes_participant_mode_is_tool_free_bounded_and_stable_across_resume(
         (CursorAdapter, "cursor"),
         (OpenCodeAdapter, "opencode"),
         (AgyAdapter, "agy"),
+        (DeepSeekHarnessAdapter, "dsh"),
     ],
 )
 def test_unsupported_adapters_reject_participant_mode_before_creating_a_worktree(
@@ -1104,12 +1302,14 @@ def test_unsupported_adapters_reject_participant_mode_before_creating_a_worktree
     fake_cursor: Path,
     fake_opencode: Path,
     fake_agy: Path,
+    fake_dsh: Path,
     adapter: (
         type[CodexAdapter]
         | type[ClaudeAdapter]
         | type[CursorAdapter]
         | type[OpenCodeAdapter]
         | type[AgyAdapter]
+        | type[DeepSeekHarnessAdapter]
     ),
     provider: str,
 ) -> None:
@@ -1119,6 +1319,7 @@ def test_unsupported_adapters_reject_participant_mode_before_creating_a_worktree
         "cursor": fake_cursor,
         "opencode": fake_opencode,
         "agy": fake_agy,
+        "dsh": fake_dsh,
     }
     binary = binaries[provider]
     manager = WorktreeManager.discover(repository)
@@ -1143,7 +1344,7 @@ def test_hermes_supports_workspace_sandbox_and_artifacts(
         task="hermes-artifact",
         prompt="CHECK_HERMES_SANDBOX",
         model="deepseek/deepseek-v4-flash-0731",
-        sandbox="workspace-write",
+        profile="edit",
         artifacts=["report.md"],
     )
 
@@ -1285,17 +1486,15 @@ def test_hermes_unknown_session_cost_with_no_usage_remains_unknown() -> None:
     assert HermesAdapter._cost_delta(None, session, "grok-4.5", TokenUsage()) is None
 
 
-@pytest.mark.parametrize(
-    "sandbox", ["scratch-write", "workspace-write", "danger-full-access"]
-)
+@pytest.mark.parametrize("profile", ["review", "edit", "host"])
 def test_hermes_run_and_resume_with_read_only_runtime_home(
     repository: Path,
     fake_hermes: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    sandbox: str,
+    profile: str,
 ) -> None:
-    hermes_home = tmp_path / f"managed-hermes-{sandbox}"
+    hermes_home = tmp_path / f"managed-hermes-{profile}"
     hermes_home.mkdir()
     (hermes_home / "auth.json").write_text("{}\n")
     state_path = hermes_home / "fake-state.json"
@@ -1307,9 +1506,9 @@ def test_hermes_run_and_resume_with_read_only_runtime_home(
 
     try:
         first = AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes))).run(
-            task=f"managed-{sandbox}",
+            task=f"managed-{profile}",
             prompt="first",
-            sandbox=sandbox,
+            profile=profile,
         )
         resumed = AgentRunner(manager).resume(
             run_id=first.run_id,
@@ -1324,7 +1523,7 @@ def test_hermes_run_and_resume_with_read_only_runtime_home(
     assert resumed.final_message == "answer:second"
     assert not state_path.exists()
     isolated_home = (
-        manager.state_dir / "provider-state" / f"managed-{sandbox}" / "hermes" / "home"
+        manager.state_dir / "provider-state" / f"managed-{profile}" / "hermes" / "home"
     )
     assert (isolated_home / "fake-state.json").is_file()
     assert (isolated_home / "auth.json").read_text() == "{}\n"
@@ -1332,7 +1531,7 @@ def test_hermes_run_and_resume_with_read_only_runtime_home(
         manager.state_dir / "shared-provider-state" / "hermes" / "auth.json"
     ).read_text() == "{}\n"
     assert not (
-        manager.get(f"managed-{sandbox}").path / "scratch" / "provider-state"
+        manager.state_dir / "scratch" / f"managed-{profile}" / "provider-state"
     ).exists()
     assert "--overlay" not in first.command
     assert os.fspath(hermes_home) not in first.command
@@ -1395,7 +1594,7 @@ def test_hermes_migrates_freshest_rotated_credentials_and_serializes_tasks(
         return AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes))).run(
             task=task,
             prompt="ROTATE_AUTH",
-            sandbox="scratch-write",
+            profile="review",
         )
 
     with ThreadPoolExecutor(max_workers=2) as pool:

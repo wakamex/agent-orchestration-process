@@ -19,7 +19,7 @@ from .model_catalog import ModelCatalog
 from .worktrees import AOPError
 
 
-AGENTS = ("codex", "claude", "cursor", "devin", "opencode", "agy", "hermes")
+AGENTS = ("codex", "claude", "cursor", "devin", "opencode", "agy", "hermes", "dsh")
 NOUS_MODELS_URL = "https://inference-api.nousresearch.com/v1/models"
 
 
@@ -62,6 +62,24 @@ def list_models(agent: str, catalog: ModelCatalog) -> list[AvailableModel]:
         binary = _binary("hermes", "AOP_HERMES_BIN", "hermes")
         provider = _run([binary, "config", "get", "model.provider"]).strip()
         return _hermes_models(catalog, provider)
+    if agent == "dsh":
+        _binary("dsh", "AOP_DSH_BIN", "dsh")
+        return [
+            _record(
+                "dsh",
+                model,
+                _name(catalog.model("deepseek", model), name),
+                "installed-default",
+                "api-equivalent",
+                catalog,
+                "deepseek",
+                model,
+            )
+            for model, name in (
+                ("deepseek-v4-flash", "DeepSeek-V4-Flash"),
+                ("deepseek-v4-pro", "DeepSeek-V4-Pro"),
+            )
+        ]
     raise AOPError(f"unsupported agent: {agent}")
 
 
@@ -308,9 +326,7 @@ def _catalog_models(
     ]
 
 
-def _hermes_models(
-    catalog: ModelCatalog, provider: str
-) -> list[AvailableModel]:
+def _hermes_models(catalog: ModelCatalog, provider: str) -> list[AvailableModel]:
     catalog_provider = {
         "gemini": "google",
         "openai-codex": "openai",
@@ -380,7 +396,9 @@ def _record(
     provider: str | None,
     priced_model: str | None,
 ) -> AvailableModel:
-    metadata = catalog.model(provider, priced_model) if provider and priced_model else None
+    metadata = (
+        catalog.model(provider, priced_model) if provider and priced_model else None
+    )
     cost = metadata.get("cost") if isinstance(metadata, dict) else None
     cost = cost if isinstance(cost, dict) else {}
     return AvailableModel(

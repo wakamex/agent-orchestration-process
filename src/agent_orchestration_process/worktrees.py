@@ -90,7 +90,18 @@ class WorktreeManager:
             raise AOPError("could not locate the main Git worktree")
         return cls(Path(first.removeprefix("worktree ")))
 
+    @classmethod
+    def standalone(cls, root: Path | None = None) -> WorktreeManager:
+        """Create a state manager for execution profiles that do not require Git."""
+        manager = cls((root or Path.cwd()).resolve())
+        manager._initialize_directories()
+        return manager
+
     def initialize(self) -> None:
+        self._initialize_directories()
+        self._ensure_ignored()
+
+    def _initialize_directories(self) -> None:
         for directory in (
             self.state_dir,
             self.worktrees_dir,
@@ -99,7 +110,6 @@ class WorktreeManager:
         ):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             directory.chmod(0o700)
-        self._ensure_ignored()
 
     def create(self, task: str, base: str = "HEAD") -> Worktree:
         self._validate_task(task)
@@ -182,6 +192,7 @@ class WorktreeManager:
                 shutil.rmtree(
                     self.state_dir / "provider-state" / task, ignore_errors=True
                 )
+                shutil.rmtree(self.state_dir / "scratch" / task, ignore_errors=True)
 
     def metadata(self, task: str) -> TaskMetadata:
         self._validate_task(task)
@@ -243,9 +254,7 @@ class WorktreeManager:
                 ).returncode
 
     @contextmanager
-    def _overlays(
-        self, worktree: Worktree, paths: Sequence[str]
-    ) -> Iterator[None]:
+    def _overlays(self, worktree: Worktree, paths: Sequence[str]) -> Iterator[None]:
         mounted: list[tuple[Path, bool]] = []
         try:
             for value in paths:
@@ -299,7 +308,9 @@ class WorktreeManager:
     def _validate_overlay(value: str) -> Path:
         path = Path(value)
         if not value or path.is_absolute() or ".." in path.parts or path == Path("."):
-            raise AOPError("overlay paths must be non-empty repository-relative directories")
+            raise AOPError(
+                "overlay paths must be non-empty repository-relative directories"
+            )
         return path
 
     def _ensure_ignored(self) -> None:

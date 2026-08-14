@@ -63,7 +63,7 @@ def test_stale_catalog_fails_closed_when_refresh_fails(
         ensure_catalog_fresh()
 
 
-def test_every_cli_invocation_runs_the_freshness_preflight(
+def test_non_dispatch_cli_commands_skip_the_catalog_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = []
@@ -77,7 +77,10 @@ def test_every_cli_invocation_runs_the_freshness_preflight(
         cli.main(["--version"])
 
     assert exit_info.value.code == 0
-    assert calls == [{"force": False}]
+    assert calls == []
+
+    assert cli.main(["profile", "explain", "sealed", "--json"]) == 0
+    assert calls == []
 
 
 def test_native_model_parsers_and_pricing(
@@ -92,9 +95,7 @@ def test_native_model_parsers_and_pricing(
         lambda binary: {
             "id": 2,
             "result": {
-                "data": [
-                    {"model": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol"}
-                ]
+                "data": [{"model": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol"}]
             },
         },
     )
@@ -140,6 +141,7 @@ def test_native_model_parsers_and_pricing(
     agy = model_listing.list_models("agy", catalog)[0]
     devin = model_listing.list_models("devin", catalog)
     opencode = model_listing.list_models("opencode", catalog)[0]
+    dsh = model_listing.list_models("dsh", catalog)
 
     assert codex.input_per_million_usd == 5
     assert codex.price_scope == "api-equivalent"
@@ -152,6 +154,12 @@ def test_native_model_parsers_and_pricing(
     assert devin[1].output_per_million_usd == 12.5
     assert devin[1].pricing_source == "Devin CLI account model inventory"
     assert opencode.availability == "account"
+    assert [item.model for item in dsh] == [
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+    ]
+    assert dsh[0].availability == "installed-default"
+    assert dsh[0].input_per_million_usd == 0.3
 
 
 def test_models_json_reports_catalog_provenance(
@@ -213,9 +221,7 @@ def test_hermes_catalog_follows_the_configured_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
-    monkeypatch.setattr(
-        model_listing, "_run", lambda command, **options: "xai-oauth\n"
-    )
+    monkeypatch.setattr(model_listing, "_run", lambda command, **options: "xai-oauth\n")
 
     model = model_listing.list_models("hermes", ensure_catalog_fresh())[0]
 

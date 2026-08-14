@@ -141,8 +141,7 @@ def _catalog_price(
         candidates.extend(
             candidate
             for candidate in models
-            if isinstance(candidate, str)
-            and requested.startswith(f"{candidate}-20")
+            if isinstance(candidate, str) and requested.startswith(f"{candidate}-20")
         )
         for candidate in sorted(set(candidates), key=len, reverse=True):
             metadata = models.get(candidate)

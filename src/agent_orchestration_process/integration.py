@@ -1,4 +1,4 @@
-"""Explicit checkpoints and sandboxed author-assisted task integration."""
+"""Explicit checkpoints and isolated author-assisted task integration."""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ class CheckpointManager:
 
 
 class IntegrationManager:
-    """Rebase mechanically while the sandboxed author resolves content."""
+    """Rebase mechanically while the isolated author resolves content."""
 
     def __init__(
         self,
@@ -332,7 +332,7 @@ isolated task worktree and run relevant tests where possible:
 Task worktree: {worktree}
 Main worktree (read-only context): {root}
 
-You are running with your original sandbox. Edit the conflicted files until they contain the final
+You are running with your original execution profile. Edit the conflicted files until they contain the final
 intended result and contain no conflict markers. Do not run git add, git commit, git rebase, git
 merge, or modify the main worktree; AOP owns those privileged Git operations. Do not finish until
 the file conflicts are resolved.
@@ -354,7 +354,7 @@ AOP rebased your task onto {branch} at {main_head}. The rebased task head is {re
 Inspect the result in {worktree}, run the relevant tests, and fix any content problems you find.
 The main worktree at {root} is read-only context.
 
-You are running with your original sandbox. You may edit task files, but do not run git add, git
+You are running with your original execution profile. You may edit task files, but do not run git add, git
 commit, git rebase, git merge, or modify main; AOP will capture your final edits and perform the
 fast-forward. Finish only when the rebased task is ready to integrate.
 """

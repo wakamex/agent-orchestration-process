@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -2535,6 +2536,10 @@ def _provider_runtime(
     if resolved.is_relative_to(brew):
         command[0] = os.fspath(resolved)
         return command, [(os.fspath(brew), os.fspath(brew))]
+    if provider == "hermes":
+        hermes_runtime = _hermes_wrapper_runtime(resolved, command[1:])
+        if hermes_runtime is not None:
+            return hermes_runtime
     if provider == "dsh":
         node_modules = next(
             (parent for parent in resolved.parents if parent.name == "node_modules"),
@@ -2565,6 +2570,67 @@ def _provider_runtime(
                 *command[1:],
             ]
     return command, mounts
+
+
+def _hermes_wrapper_runtime(
+    wrapper: Path, arguments: list[str]
+) -> tuple[list[str], list[tuple[str, str]]] | None:
+    try:
+        contents = wrapper.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    match = re.search(
+        r'^exec\s+"([^"\n]+/venv/bin/python)"\s+"([^"\n]+/hermes)"\s+"\$@"\s*$',
+        contents,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        return None
+    python = Path(match.group(1))
+    entrypoint = Path(match.group(2))
+    agent_root = entrypoint.parent.resolve()
+    venv = python.parent.parent
+    if not python.exists() or not entrypoint.is_file() or not venv.is_dir():
+        raise AOPError("Hermes launcher references an incomplete private runtime")
+    resolved_python = python.resolve()
+    python_runtime = resolved_python.parent.parent
+    if not python_runtime.is_dir():
+        raise AOPError("Hermes launcher Python runtime is unavailable")
+
+    finders = sorted(venv.glob("lib/python*/site-packages/__editable__*_finder.py"))
+    if len(finders) != 1:
+        raise AOPError("Hermes private runtime has no unique editable package map")
+    try:
+        tree = ast.parse(finders[0].read_text())
+    except (OSError, SyntaxError) as error:
+        raise AOPError(f"could not inspect Hermes private runtime: {error}") from error
+    mapping: dict[str, str] | None = None
+    for node in tree.body:
+        if not isinstance(node, ast.AnnAssign):
+            continue
+        if not isinstance(node.target, ast.Name) or node.target.id != "MAPPING":
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, TypeError, SyntaxError) as error:
+            raise AOPError("Hermes editable package map is not literal") from error
+        if isinstance(value, dict) and all(
+            isinstance(key, str) and isinstance(path, str)
+            for key, path in value.items()
+        ):
+            mapping = value
+        break
+    if mapping is None:
+        raise AOPError("Hermes private runtime has no valid editable package map")
+
+    sources = {entrypoint, venv, python_runtime}
+    for raw_path in mapping.values():
+        source = Path(raw_path).resolve()
+        if not source.is_relative_to(agent_root) or not source.exists():
+            raise AOPError("Hermes editable package map escapes its installation")
+        sources.add(source)
+    mounts = [(os.fspath(source), os.fspath(source)) for source in sorted(sources)]
+    return [os.fspath(python), os.fspath(entrypoint), *arguments], mounts
 
 
 def _guest_path(value: str, mappings: tuple[tuple[Path, Path], ...]) -> str:

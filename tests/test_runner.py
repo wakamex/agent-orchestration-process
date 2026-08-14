@@ -44,6 +44,57 @@ def test_dsh_runtime_preserves_a_user_npm_installation(
     assert mounts == [(os.fspath(node_modules), os.fspath(node_modules))]
 
 
+def test_hermes_runtime_projects_only_editable_python_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_root = tmp_path / "hermes-agent"
+    venv = agent_root / "venv"
+    site_packages = venv / "lib" / "python3.11" / "site-packages"
+    source_package = agent_root / "hermes_cli"
+    interpreter_root = tmp_path / "python-runtime"
+    interpreter = interpreter_root / "bin" / "python3.11"
+    wrapper = tmp_path / "bin" / "hermes"
+    for directory in (
+        site_packages,
+        source_package,
+        interpreter.parent,
+        wrapper.parent,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    interpreter.write_text("runtime\n")
+    python = venv / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(interpreter)
+    entrypoint = agent_root / "hermes"
+    entrypoint.write_text("launcher\n")
+    finder = site_packages / "__editable___hermes_agent_finder.py"
+    finder.write_text(
+        "from __future__ import annotations\n"
+        f"MAPPING: dict[str, str] = {{'hermes_cli': {os.fspath(source_package)!r}}}\n"
+    )
+    wrapper.write_text(f'#!/usr/bin/env bash\nexec "{python}" "{entrypoint}" "$@"\n')
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{wrapper.parent}:{os.environ['PATH']}")
+
+    command, mounts = _provider_runtime(
+        ["hermes", "chat", "-q", "test"], provider="hermes"
+    )
+
+    assert command == [
+        os.fspath(python),
+        os.fspath(entrypoint),
+        "chat",
+        "-q",
+        "test",
+    ]
+    assert mounts == [
+        (os.fspath(entrypoint), os.fspath(entrypoint)),
+        (os.fspath(source_package), os.fspath(source_package)),
+        (os.fspath(venv), os.fspath(venv)),
+        (os.fspath(interpreter_root), os.fspath(interpreter_root)),
+    ]
+
+
 def test_cli_reports_version_and_provider_neutral_resume_help(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

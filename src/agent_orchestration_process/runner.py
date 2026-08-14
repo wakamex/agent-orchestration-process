@@ -2625,7 +2625,10 @@ def _hermes_wrapper_runtime(
 
     sources = {entrypoint, venv, python_runtime}
     for raw_path in mapping.values():
-        source = Path(raw_path).resolve()
+        candidate = Path(raw_path)
+        if not candidate.exists():
+            candidate = candidate.with_suffix(".py")
+        source = candidate.resolve()
         if not source.is_relative_to(agent_root) or not source.exists():
             raise AOPError("Hermes editable package map escapes its installation")
         sources.add(source)

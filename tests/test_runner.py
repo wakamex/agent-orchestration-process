@@ -51,6 +51,7 @@ def test_hermes_runtime_projects_only_editable_python_runtime(
     venv = agent_root / "venv"
     site_packages = venv / "lib" / "python3.11" / "site-packages"
     source_package = agent_root / "hermes_cli"
+    source_module = agent_root / "batch_runner.py"
     interpreter_root = tmp_path / "python-runtime"
     interpreter = interpreter_root / "bin" / "python3.11"
     wrapper = tmp_path / "bin" / "hermes"
@@ -67,10 +68,14 @@ def test_hermes_runtime_projects_only_editable_python_runtime(
     python.symlink_to(interpreter)
     entrypoint = agent_root / "hermes"
     entrypoint.write_text("launcher\n")
+    source_module.write_text("module\n")
     finder = site_packages / "__editable___hermes_agent_finder.py"
     finder.write_text(
         "from __future__ import annotations\n"
-        f"MAPPING: dict[str, str] = {{'hermes_cli': {os.fspath(source_package)!r}}}\n"
+        "MAPPING: dict[str, str] = {"
+        f"'hermes_cli': {os.fspath(source_package)!r}, "
+        f"'batch_runner': {os.fspath(source_module.with_suffix(''))!r}"
+        "}\n"
     )
     wrapper.write_text(f'#!/usr/bin/env bash\nexec "{python}" "{entrypoint}" "$@"\n')
     wrapper.chmod(0o755)
@@ -88,6 +93,7 @@ def test_hermes_runtime_projects_only_editable_python_runtime(
         "test",
     ]
     assert mounts == [
+        (os.fspath(source_module), os.fspath(source_module)),
         (os.fspath(entrypoint), os.fspath(entrypoint)),
         (os.fspath(source_package), os.fspath(source_package)),
         (os.fspath(venv), os.fspath(venv)),

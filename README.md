@@ -3,9 +3,17 @@
 AOP gives automation one CLI for controlling different agent harnesses without requiring callers to
 learn each harness's command flags, session format, output schema, runtime state, or resume behavior:
 
-- Run Codex, Claude Code, Cursor Agent, Devin CLI, OpenCode, Antigravity (`agy`), Grok Build,
-  Hermes, and DeepSeek Harness (`dsh`) through the same `run` and `resume` commands. See
-  [Provider adapters](docs/harnesses.md) for current model support and limitations.
+- Run [Codex](https://github.com/openai/codex),
+  [Claude Code](https://code.claude.com/docs/en/overview),
+  [Cursor Agent](https://docs.cursor.com/en/cli/overview),
+  [Devin CLI](https://docs.devin.ai/cli/index),
+  [OpenCode](https://github.com/anomalyco/opencode),
+  [Antigravity (`agy`)](https://github.com/google-antigravity/antigravity-cli),
+  [Grok Build](https://github.com/xai-org/grok-build),
+  [Hermes](https://github.com/NousResearch/hermes-agent), and
+  [DeepSeek Harness (`dsh`)](https://github.com/deepseek-ai/deepseek-harness) through the same
+  `run` and `resume` commands. See [Provider adapters](docs/harnesses.md) for current model support
+  and limitations.
 - Reuse each harness's existing authentication, model execution, tools, and conversations instead
   of maintaining a separate AOP credential store.
 - Apply the same isolated worktrees, inputs-only sealed runs, configured deadlines, process cleanup,

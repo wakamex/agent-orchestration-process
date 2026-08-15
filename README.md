@@ -33,6 +33,12 @@ Install AOP from [PyPI](https://pypi.org/project/agent-orchestration-process/):
 uv tool install agent-orchestration-process
 ```
 
+Run a sealed task from any directory without exposing local files or requiring a Git repository:
+
+```sh
+aop run --agent codex --profile sealed --prompt "Explain the difference between TCP and UDP"
+```
+
 Run a task in an existing Git repository:
 
 ```sh

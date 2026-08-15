@@ -1,54 +1,64 @@
 # CLI guide
 
-The AOP CLI creates isolated tasks, runs bounded provider turns, retains their evidence, and keeps
-checkpointing and integration explicit. Provider authentication remains owned by each installed
-agent CLI.
+The AOP CLI creates isolated tasks, runs bounded harness turns, retains their results, and keeps
+checkpointing and integration explicit. Each installed harness continues to own its authentication.
 
-## Initialize a repository
+## Initialize a repository and run a task
+
+From an existing Git repository:
 
 ```sh
-cd /path/to/project
 aop init
-aop worktree create task-a
-```
-
-`aop init` adds `/.aop/` to `.gitignore`. Commit that change before integrating tasks so the main
-worktree is clean. Task worktrees are detached at their selected base commit, so one worker cannot
-move another worker's branch.
-
-List and inspect task worktrees with:
-
-```sh
-aop worktree list
-aop worktree path task-a
-```
-
-## Run and resume
-
-```sh
 aop run task-a --agent claude --model sonnet --effort high \
   --prompt "Implement the parser and its tests"
 ```
 
-`aop run` prints the final message to stdout. The AOP run ID, provider session ID, and run artifact
-directory go to stderr. Resume the exact provider session with the AOP run ID:
+`aop init` adds `/.aop/` to `.gitignore`. Commit that change before integrating tasks so the main
+worktree is clean.
+
+`aop run` creates the task worktree automatically at `HEAD`. Use `--base REF` to start a new task at
+another commit. The final message goes to stdout, while the AOP run ID, harness session ID, and
+retained run directory go to stderr.
+
+Resume the exact harness session with the AOP run ID:
 
 ```sh
 aop resume <run-id> --prompt "Address the review findings"
 ```
 
-Add `--json` to `run` or `resume` for a stable machine interface. Stdout then contains only the
-normalized result object, including its run ID, provider session ID, terminal status, metrics, final
-message, and artifacts. See [Token usage and pricing](token-usage.md) for the result's usage
-contract.
+Use `--prompt-file` for a prompt stored on disk and `--timeout` to set a wall-clock deadline. Model,
+effort, inference-provider, and resume behavior vary by harness. See
+[Harness adapters](harnesses.md).
 
-Use `--prompt-file` for a prompt stored on disk and `--timeout` to set the process deadline. Model,
-effort, provider, and resume behavior vary by adapter, as documented in
-[Provider adapters](harnesses.md).
+## Execution profiles
+
+Select the access boundary with `--profile`:
+
+- `edit` gives the harness a writable isolated task worktree.
+- `review` exposes the task worktree read-only.
+- `sealed` exposes only declared input snapshots and does not require a Git repository.
+- `host` uses the native host filesystem and environment without AOP isolation.
+
+Inspect a profile or preview a run without starting the harness:
+
+```sh
+aop profile explain review
+aop run task-a --agent claude --profile review --dry-run \
+  --prompt "Review the parser"
+```
+
+See [Execution profiles](profiles.md) for the exact filesystem, instruction, credential,
+environment, input, output, and network boundaries.
+
+## Machine-readable results
+
+Add `--json` to `run` or `resume` for the stable machine interface. Stdout then contains only the
+normalized result object, including its run ID, harness session ID, status, timing, token usage,
+final message, and artifacts. See [Token usage and pricing](token-usage.md) for the usage contract.
 
 ## Inputs and artifacts
 
-Declare files or directories as immutable input snapshots:
+Declare files or directories as immutable input snapshots and require outputs as retained artifacts:
 
 ```sh
 aop run analysis \
@@ -60,25 +70,32 @@ aop run analysis \
   --prompt "Analyze the declared sources and write the report"
 ```
 
-AOP rejects missing paths, symlinks, special files, and duplicate basenames before launch. It
-copies accepted inputs into retained controller-owned storage, hashes them, marks them read-only,
-and mounts only those snapshots beneath `/inputs`. The provider does not receive their original
-host paths. `input-manifest.json` records their sizes and SHA-256 values.
+AOP copies accepted inputs into controller-owned storage, hashes them, and mounts the snapshots
+read-only beneath `/inputs`. The harness does not receive their original host paths. Missing paths,
+symlinks, special files, and duplicate basenames are rejected before launch.
 
-For `sealed`, an exact resume copies the parent run's retained snapshots unless new `--input`
-arguments replace them. Changed or deleted source files therefore cannot alter inherited sealed
-input. Other profiles snapshot the recorded source paths again so they receive current project
-inputs.
+An exact `sealed` resume inherits the parent run's snapshots unless new `--input` arguments replace
+them. Other profiles snapshot the recorded source paths again, so they receive the current files.
 
-Each `--artifact` is a path relative to the fresh output directory named by `AOP_OUTPUT_DIR`.
-Artifacts may be nonempty regular files or directories. AOP rejects missing declarations,
-overlapping paths, symlinks, special files, empty files, and path escapes. Accepted files are copied
-to `.aop/runs/<run-id>/artifacts/`, and the result records each logical path, archived path, size,
-and SHA-256.
+Each `--artifact` is relative to the fresh output directory exposed as `AOP_OUTPUT_DIR`. AOP accepts
+nonempty regular files and directories, archives them beneath the retained run directory, and
+records their paths, sizes, and SHA-256 values. Artifact declarations apply to one invocation, so a
+resume must declare its own required artifacts.
 
-Artifact declarations apply to one invocation. A resume gets a fresh output directory and validates
-only the artifacts declared on that `aop resume` command. See [Execution profiles](profiles.md) for
-the surrounding filesystem and instruction boundary.
+## Models
+
+Inspect models exposed by installed harnesses and their current comparison prices:
+
+```sh
+aop models
+aop models --agent codex --agent opencode
+aop models --agent hermes --json
+aop models --refresh
+```
+
+Availability can come from an authenticated harness inventory, an installed harness default, or a
+catalog fallback. The output identifies the source instead of implying every model was verified
+against the current account.
 
 ## Batch runs
 
@@ -109,79 +126,66 @@ effort = "high"
 aop batch tasks.toml --jobs 4
 ```
 
-Prompt files and inputs are resolved relative to the manifest. Each task can select its agent,
-base, model, provider, effort, profile, timeout, artifacts, and inputs. The scheduler keeps at most
-`--jobs` tasks active. On interruption it launches no additional tasks and waits for active tasks to
-finish.
+Prompt files and inputs are resolved relative to the manifest. Each task can select its harness,
+base, model, inference provider, effort, mode, profile, timeout, artifacts, and inputs. The scheduler
+runs at most `--jobs` tasks concurrently and retains successful results when a sibling fails.
 
-Each batch writes `.aop/batches/<batch-id>.json` with task-order-preserving run IDs, session IDs,
-durations, exit codes, and errors. A batch exits nonzero if any task fails without discarding
-successful sibling results.
+Each batch writes `.aop/batches/<batch-id>.json` with results in task order. The command exits
+nonzero if any task fails.
 
-## Models
+## Checkpoint and integrate
 
-Inspect the models exposed by installed agent CLIs and their current comparison prices:
+Commit a completed task and integrate its commits into the current main branch:
 
 ```sh
-aop models
-aop models --agent codex --agent opencode
-aop models --agent hermes --json
-aop models --refresh
+aop checkpoint task-a -m "Implement parser"
+aop integrate task-a --remove-worktree
 ```
 
-Availability can come from an authenticated provider inventory, an installed harness default, or a
-catalog fallback. The output records that distinction instead of implying every model was verified
-against the current account.
+Integration validates and rebases the task before fast-forwarding main. If conflicts occur, AOP
+resumes the original authoring session to resolve and validate them. See [Integration](integration.md)
+for the complete safety contract.
 
 ## Cleanup and lower-level commands
 
-When a run is no longer resumable or integrable, clean it up by run ID:
+When you no longer need to resume or integrate a task, clean it up using any of its run IDs:
 
 ```sh
 aop cleanup <run-id>
 ```
 
-Cleanup removes the disposable worktree, scratch directory, overlays, and private runtime state. It
-retains the request, input snapshots, result, logs, final message, and archived artifacts. Repeating
+Cleanup removes the task worktree, scratch data, overlays, and private harness state. It retains the
+request, input snapshots, normalized result, logs, final message, and archived artifacts. Repeating
 cleanup is safe, but an active task cannot be cleaned while it holds its execution lock.
 
-Run another command inside a task worktree with `aop exec`. Private copy-on-write overlays can reuse
-large ignored build or data directories without an up-front copy:
+Inspect or explicitly manage task worktrees when needed:
 
 ```sh
-aop exec task-a -- <agent-command>
-aop exec task-a --overlay target --overlay cache -- <evaluator-command>
-aop worktree remove task-a
+aop worktree list
+aop worktree path task-a
+aop worktree create task-b --base REF
+aop worktree remove task-b
 ```
 
-`aop exec` supplies `AOP_ROOT`, `AOP_TASK`, `AOP_WORKTREE`, and `AOP_CACHE_DIR` to the child.
-Overlays require `fuse-overlayfs`; their upper layers persist across exec calls and are deleted with
-the task. Dirty worktrees require an explicit `--force` to remove.
+Explicit creation is only needed when a worktree must exist before its first `aop run`. Removing a
+dirty worktree requires `--force`.
 
-Use [Integration](integration.md) to turn completed task changes into reviewed commits on the main
-branch.
+Run another command inside a task worktree with `aop exec`. Repeat `--overlay PATH` to give large
+ignored build or data directories private copy-on-write views:
 
-## Retained state
-
-Runtime state lives under the ignored `.aop/` directory:
-
-```text
-.aop/
-├── batches/            structured batch summaries
-├── cache/              shared cache root for non-sealed tasks
-├── sealed-cache/       session-private caches for sealed runs and exact resumes
-├── checkpoints/        task checkpoint records
-├── integrations/       successful integration audit records
-├── locks/              per-task execution and checkpoint locks
-├── overlays/<task>/    private copy-on-write upper layers for aop exec
-├── provider-state/     task-local mutable provider profiles
-├── runs/<run-id>/      request, result, logs, final message, and accepted artifacts
-├── shared-provider-state/ repository-local credential state shared across tasks
-├── tasks/               recorded task bases and worktree paths
-├── worktrees/          one isolated checkout per task
-├── integration.lock    single-writer main-branch integration lock
-└── worktrees.lock      lifecycle-operation lock
+```sh
+aop exec task-a -- <command>
+aop exec task-a --overlay target --overlay cache -- <command>
 ```
 
-AOP creates state and run directories with user-only permissions because provider profiles,
-prompts, logs, and artifacts may contain sensitive information.
+Overlays require `fuse-overlayfs`, persist across `exec` calls, and are deleted with the task.
+
+## Retained results
+
+AOP keeps controller-owned state beneath the ignored `.aop/` directory. Each
+`.aop/runs/<run-id>/` contains the request, normalized result, harness events and logs, final
+message, input evidence, and accepted artifacts available for that invocation. Batch, checkpoint,
+and integration records live in their corresponding `.aop/` directories.
+
+AOP creates this state with user-only permissions. Treat the directory as sensitive because
+provider configuration, prompts, logs, and artifacts may contain credentials or private data.

@@ -12,7 +12,7 @@ learn each harness's command flags, session format, output schema, runtime state
   [Grok Build](https://github.com/xai-org/grok-build),
   [Hermes](https://github.com/NousResearch/hermes-agent), and
   [DeepSeek Harness (`dsh`)](https://github.com/deepseek-ai/deepseek-harness) through the same
-  `run` and `resume` commands. See [Provider adapters](docs/harnesses.md) for current model support
+  `run` and `resume` commands. See [Harness adapters](docs/harnesses.md) for current model support
   and limitations.
 - Reuse each harness's existing authentication, model execution, tools, and conversations instead
   of maintaining a separate AOP credential store.

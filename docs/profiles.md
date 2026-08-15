@@ -75,4 +75,4 @@ allowed by the selected profile. Existing provider sessions, logs, caches, and u
 are excluded. Exact resume reuses the task-private state associated with that session.
 
 The exact seeded paths and adapter-specific exceptions are documented in
-[Provider adapters](harnesses.md).
+[Harness adapters](harnesses.md).

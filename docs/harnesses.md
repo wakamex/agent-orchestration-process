@@ -1,213 +1,173 @@
-# Provider adapters
+# Harness adapters
 
-This page documents authentication, model selection, resume behavior, private runtime state, and
-current limitations behind AOP's common run interface.
+AOP provides one `run` and `resume` interface over installed agent harnesses. Install and
+authenticate the harness you want to use first. AOP uses its native credentials, models, tools, and
+session mechanism while giving every run the same AOP access controls and result format.
 
-## Execution boundary
+## Supported harnesses
 
-AOP runs providers inside the selected execution profile and projects only the corresponding
-workspace, instructions, configuration, credentials, and runtime state. See
-[Execution profiles](profiles.md) for the common filesystem, environment, input, output, and network
-boundary.
+| Harness | `--agent` | Default | Model and effort selection |
+| --- | --- | --- | --- |
+| [Codex](https://github.com/openai/codex) | `codex` | Native default | Accepts native model IDs and effort levels. |
+| [Claude Code](https://code.claude.com/docs/en/overview) | `claude` | Native default | Accepts normal model aliases and effort from `low` through `max`. |
+| [Cursor Agent](https://docs.cursor.com/en/cli/overview) | `cursor` | `composer-2.5` | Reasoning and fast variants are part of the model ID, so separate effort is rejected. |
+| [Devin CLI](https://docs.devin.ai/cli/index) | `devin` | `swe-1-7` | Reasoning variants are part of the model ID, so separate effort is rejected. |
+| [OpenCode](https://github.com/anomalyco/opencode) | `opencode` | `opencode/deepseek-v4-flash` | Short model names are qualified with `opencode/`; effort selects the native variant. |
+| [Antigravity](https://github.com/google-antigravity/antigravity-cli) | `agy` | `gemini-3.5-flash`, medium | Accepts exact names printed by `agy models`; effort is `low`, `medium`, or `high`. |
+| [Grok Build](https://github.com/xai-org/grok-build) | `grok` | `grok-build` | Accepts native effort from `none` through `max`. |
+| [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes` | `deepseek/deepseek-v4-flash-0731` | Uses the configured inference provider unless both `--provider` and `--model` override it. |
+| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | `dsh` | `deepseek-v4-flash` through `deepseek-official` | Also supports `deepseek-v4-pro`; another configured route requires both `--provider` and `--model`. |
 
-## Models, effort, and provider selection
+Use `aop models` to inspect installed or configured inventories and see whether each entry came from
+the authenticated harness, an installed default, or AOP's catalog. Exact resume retains the original
+harness, model, effort, inference provider, mode, and execution profile.
 
-| Adapter | Default | Selection notes |
-| --- | --- | --- |
-| Claude | Native default | Accepts normal aliases and effort from `low` through `max`. |
-| Agy | `gemini-3.5-flash`, medium | Accepts exact names printed by `agy models`; native effort is `low`, `medium`, or `high`. |
-| Cursor Agent | `composer-2.5` | Reasoning and fast variants are part of the model ID, so separate effort is rejected. |
-| Devin | `swe-1-7` | Reasoning variants are part of the model ID, so separate effort is rejected. |
-| OpenCode | `opencode/deepseek-v4-flash` | Short names are qualified with `opencode/`; effort maps to the native variant. |
-| Grok Build | `grok-build` | Accepts native reasoning levels from `none` through `max`. |
-| Hermes | `deepseek/deepseek-v4-flash-0731` | Uses its configured provider unless both `--provider` and `--model` override it. |
-| DeepSeek Harness | `deepseek-official` and `deepseek-v4-flash` | Also supports `deepseek-v4-pro`; another configured route requires both provider and model. |
+## Authentication and private state
 
-Use `aop models` to inspect installed or configured inventories and their availability source. AOP
-reasserts the selected model, effort, and provider on exact resume wherever the native harness would
-otherwise fall back to current defaults.
+Authenticate with the native harness before using it through AOP. For isolated profiles, AOP copies
+only the credentials, configuration, and extensions allowed by the selected profile into private
+state beneath `.aop/provider-state/`. Existing global sessions, logs, and caches are not reused.
+Exact resume reuses the same private state so credential updates and harness session data remain
+available to that session.
 
-## Task-private provider state
+`sealed` uses an opaque session identity and omits local instructions and extensions. It receives
+only the authentication material required by the selected harness. Its private state and cache are
+reused only by exact resumes.
 
-Private state lives under `.aop/provider-state/<task>/` for repository tasks and beneath an opaque
-run key for sealed tasks. It is reused for exact resume. Cleanup
-removes it with the task while preserving immutable run records. AOP copies only the configuration
-and credentials needed to start the provider, leaving existing sessions, logs, and caches in the
-source profile.
+Cleanup removes mutable harness state with the task while preserving retained requests, results,
+events, logs, inputs, and artifacts. See [Execution profiles](profiles.md) for the surrounding
+filesystem and environment boundary.
 
-Sealed cache state lives under a separate opaque `.aop/sealed-cache/<run-key>/` directory. It is
-mounted only into that sealed session, reused on exact resume, and removed by sealed cleanup. It is
-never the shared `.aop/cache` used by non-sealed tasks.
-
-| Harness | Private state | Important behavior |
-| --- | --- | --- |
-| Codex | `codex/home` | Global sessions and databases are never changed |
-| Claude | `claude/home` | Runtime history and project state start private |
-| Agy | `agy/gemini` | Resume fails if the reported conversation ID changes |
-| Cursor | `cursor` | Project and chat state start private |
-| Devin | `devin` | The installed CLI bundle is not copied into task state |
-| OpenCode | `opencode` | Plugin dependencies are copied into private state |
-| Grok Build | `grok/home` | Global sessions, logs, caches, and memory are never copied |
-| Hermes | `hermes/home` | Rotating OAuth credentials are coordinated across tasks |
-| DeepSeek Harness | `dsh/home` | AOP supplies a structured, resumable runner as a final dsh patch layer |
-
-Claude uses the same filtered environment and filesystem profile as the other adapters. Its
-repository access is constrained by the selected AOP profile.
+## Harness-specific behavior
 
 ### Codex
 
-AOP seeds authentication, root configuration, user rules and skills, and the model catalog for
-`edit` and `review`. `sealed` seeds authentication only. It does
-not copy sessions, history, databases, logs, caches, or generated system skills. Set
-`AOP_CODEX_SOURCE_HOME` when the authenticated source is not `${CODEX_HOME:-~/.codex}`.
+For `edit` and `review`, AOP seeds authentication, root configuration, user rules and skills, and
+the model catalog. It does not copy sessions, history, databases, logs, caches, or generated system
+skills. `sealed` receives authentication only.
 
-### Agy
+Set `AOP_CODEX_SOURCE_HOME` when the authenticated source is not
+`${CODEX_HOME:-~/.codex}`.
 
-AOP seeds configuration and credentials from `~/.gemini`, but not conversations, history, caches,
-logs, scratch files, or databases. An exact resume must report the requested conversation ID or the
-run fails closed. `sealed` omits user configuration and retains authentication material only. Set
-`AOP_AGY_SOURCE_DIR` for a nonstandard source profile.
+### Claude Code
+
+For `edit` and `review`, AOP seeds Claude authentication and configuration into a private home while
+leaving runtime history, project state, logs, and caches behind. `sealed` receives authentication
+only. Repository access is constrained by the selected AOP profile.
 
 ### Cursor Agent
 
-`edit` and `review` copy CLI configuration, skills, plugins, policies, and authentication without copying
-IDE extensions. Project metadata, chats, tracking data, and Cursor-created worktrees start empty.
-`sealed` copies authentication only.
-`host` uses Cursor's native global state. Set `AOP_CURSOR_HOME` or
-`AOP_CURSOR_CONFIG_DIR` for nonstandard source locations.
+For `edit` and `review`, AOP seeds CLI configuration, skills, plugins, policies, and authentication
+without copying IDE extensions. Project metadata, chats, tracking data, and Cursor-created worktrees
+start empty. `sealed` receives authentication only, while `host` uses Cursor's native global state.
+
+Set `AOP_CURSOR_HOME` or `AOP_CURSOR_CONFIG_DIR` for nonstandard source locations.
 
 ### Devin CLI
 
-AOP seeds authentication and configuration, excluding installed versions, sessions,
-transcripts, logs, and databases. It invokes Devin's non-interactive dangerous permission mode
-inside the outer AOP profile. `sealed` removes instruction, MCP, plugin, hook, skill, rule, and
-memory keys from its minimal JSON configuration. On SSH, authenticate with
-`devin auth login --force-manual-token-flow`. Use `AOP_DEVIN_DATA_DIR` or
-`AOP_DEVIN_CONFIG_DIR` for nonstandard source locations.
+AOP seeds authentication and configuration without copying installed versions, sessions,
+transcripts, logs, or databases. It invokes Devin's noninteractive permission mode inside the AOP
+execution boundary. `sealed` removes instruction, MCP, plugin, hook, skill, rule, and memory settings
+from its minimal configuration.
 
-Every invocation creates a fresh ATIF trajectory. AOP validates its prompt, terminal response, and
-resume identity, records its token metrics, and archives it as `provider-result.json`.
+On SSH, authenticate with `devin auth login --force-manual-token-flow`. Set `AOP_DEVIN_DATA_DIR` or
+`AOP_DEVIN_CONFIG_DIR` for nonstandard source locations. Each invocation must produce a valid Agent
+Trajectory Interchange Format (ATIF) export containing its terminal response and resume identity.
 
 ### OpenCode
 
-`edit` and `review` seed small configuration and authentication files while keeping sessions, logs,
-model state, refreshed tokens, generated metadata, and downloads private. Existing generated plugin
-dependencies are copied into private state. `sealed` omits user configuration and instructions.
-`host` uses native global state. Set
-`AOP_OPENCODE_CONFIG_DIR` or `AOP_OPENCODE_DATA_DIR` for nonstandard source locations.
+For `edit` and `review`, AOP seeds configuration, authentication, and existing generated plugin
+dependencies while keeping sessions, logs, model state, refreshed tokens, generated metadata, and
+downloads private. `sealed` omits user configuration and instructions, while `host` uses native
+global state.
+
+Set `AOP_OPENCODE_CONFIG_DIR` or `AOP_OPENCODE_DATA_DIR` for nonstandard source locations.
+
+### Antigravity
+
+AOP seeds configuration and credentials from `~/.gemini`, but not conversations, history, caches,
+logs, scratch files, or databases. `sealed` retains authentication only. An exact resume fails if
+Antigravity reports a different conversation ID.
+
+Set `AOP_AGY_SOURCE_DIR` for a nonstandard source profile.
 
 ### Grok Build
 
-AOP seeds Grok authentication, configuration, user rules, skills, agents, commands, hooks,
-personas, plugins, and workflows into task-private `GROK_HOME` state for `edit` and `review`.
-Existing sessions, logs, caches, cross-session memory, plugin data, model caches, crash reports,
-trace exports, worktrees, and installed binaries are not copied. `sealed` retains only
-`auth.json`. Set `AOP_GROK_SOURCE_HOME` when the authenticated source is not
-`${GROK_HOME:-~/.grok}`.
+For `edit` and `review`, AOP seeds authentication, configuration, rules, skills, agents, commands,
+hooks, personas, plugins, and workflows into a private `GROK_HOME`. It does not copy sessions, logs,
+caches, cross-session memory, plugin data, model caches, crash reports, traces, worktrees, or
+installed binaries. `sealed` receives `auth.json` only.
 
-The adapter invokes Grok's native single-turn `streaming-json` interface with always-approve mode,
-no plan mode, no shared leader, no auto-update, verbatim prompts, and its nested sandbox disabled inside AOP's outer
-profile boundary. It records the terminal session ID, response, model, disjoint prompt cache
-buckets, the reasoning-token subset, timing, cost evidence, and exact resume identity. Grok defaults to `grok-build` and
-accepts native reasoning levels from `none` through `max`.
+AOP runs one noninteractive Grok turn and disables Grok's nested sandbox inside the outer AOP
+profile. It retains the exact session identity, normalized usage, timing, cost evidence, and final
+response needed by the common result interface.
 
-`GROK_STORAGE_MODE` is part of the filtered child environment only when the user set it. AOP passes
-`local` or `writeback` through unchanged and does not create a default, so an unset value retains
-Grok's native configuration and remote-setting behavior.
+If `GROK_STORAGE_MODE` is exported in the environment that starts AOP, its value is passed to Grok
+unchanged. AOP neither validates nor defaults it. Set `AOP_GROK_SOURCE_HOME` when the authenticated
+source is not `${GROK_HOME:-~/.grok}`.
 
 ### Hermes
 
-AOP seeds configuration, skills, hooks, and memories for `edit` and `review` while keeping new sessions, logs, databases,
-and caches private. Some Hermes OAuth refresh tokens rotate after use, so AOP maintains the freshest
-credentials under `.aop/shared-provider-state/hermes/auth.json`. A repository lock serializes Hermes
-turns to prevent concurrent tasks from consuming the same refresh token. Other harnesses remain
-concurrent. `aop run --provider NAME --model MODEL` overrides the profile's inference provider for
-the task, records that choice, and reuses it on resume.
+For `edit` and `review`, AOP seeds configuration, skills, hooks, and memories while keeping sessions,
+logs, databases, and caches private. `sealed` receives credentials without extensions or other user
+instruction sources.
 
-Under `sealed`, Hermes receives credentials but not skills, hooks, memories, plugins, optional MCPs,
-or other user extension directories.
+Some Hermes OAuth refresh tokens rotate after use. AOP keeps the freshest credentials in
+repository-private shared state and serializes Hermes turns so concurrent tasks cannot consume the
+same token. Other harnesses remain concurrent. Supplying both `--provider NAME` and `--model MODEL`
+overrides the configured inference route and retains it on resume.
 
-Hermes alone currently supports experimental participant mode:
+Hermes alone supports experimental participant mode:
 
 ```sh
 aop run player --agent hermes --mode participant --profile review --prompt "Submit one move"
 ```
 
-The mode persists across exact resume. Hermes 0.20 has no supported no-tools option, so AOP combines
-safe mode, one turn, and an intentionally unknown toolset that currently resolves to no model tool
-schemas. This behavior is not a durable security boundary. The outer execution profile remains the
-filesystem boundary, and AOP should replace the workaround when an official no-tools option is
-available.
+AOP requests one turn without model tools, but Hermes 0.20 does not have a supported no-tools
+option. Participant mode is therefore not a durable tool-security boundary. The selected AOP
+profile remains the filesystem boundary.
 
 ### DeepSeek Harness
 
-AOP invokes the official `dsh --profile headless` command directly. It does not use a personal
-`dsh` wrapper or assume a DeepSeek Harness source checkout. Because the released headless runner
-creates only fresh sessions and prints unstructured final text, AOP replaces only that runner row
-through the documented `--patch` interface. The packaged AOP runner drives dsh's public Agent
-Registry, chooses a stable session ID, supports exact cross-process resume, and emits one JSON result
-with the final response and per-turn token buckets. DeepSeek Harness continues to own its provider,
-agent loop, tools, prompt assembly, and JSONL session persistence.
+AOP invokes the official `dsh --profile headless` interface and adds the structured result and exact
+resume support required by AOP. DeepSeek Harness still owns its agent loop, tools, prompt assembly,
+inference route, and session persistence.
 
-Every task receives a private `DSH_HOME` under `dsh/home`. AOP reads the source `settings.yaml` and
-projects only the selected route: `llm-deepseek` for `deepseek-official`, or the exact
-`llm-pi-ai.providers.<provider>` profile selected by `--provider`. It then reads that profile's
-explicit `apiKeyEnv` and projects only the matching entry from dsh's managed `.credentials.yaml`.
-The direct DeepSeek adapter defaults that reference to `DEEPSEEK_API_KEY`, matching dsh itself.
-AOP does not derive a key name from a provider label.
+Each task receives a private `DSH_HOME`. AOP reads the native `settings.yaml`, copies only the
+selected inference route and its matching managed credential, and leaves unrelated settings,
+profiles, sessions, plugins, credentials, and user-level `.env` files behind. If a configured route
+does not name a credential environment variable, its native ambient authentication discovery still
+applies. AOP disables dsh telemetry for every run.
 
-If a pi-ai profile omits `apiKeyEnv`, AOP preserves the omission and delegates authentication to
-that provider's native ambient environment discovery. Inside `edit`, `review`, and `sealed`, the
-environment contains only the selected credential reference or the known ambient variables for the
-selected provider family. Another provider's key is excluded. `host` retains its documented native
-host environment.
+The default route is `deepseek-official` with `deepseek-v4-flash`; `deepseek-v4-pro` is also
+supported. Another route must exist under `llm-pi-ai.providers` and be selected with both
+`--provider` and `--model`. The dsh headless interface cannot list models by provider, so
+`aop models --agent dsh` reports its bundled DeepSeek defaults.
 
-AOP does not copy unrelated settings, profiles, sessions, logs, plugins, credentials, or the
-user-level `.env`. This makes cleanup own the generated profile and session log. Set
-`AOP_DSH_SOURCE_HOME` when the dsh source state is not `${DSH_HOME:-~/.dsh}`. AOP sets
-`DSH_TELEMETRY_DISABLED=1` for every dsh run.
-
-An inherited environment value matching the selected `apiKeyEnv` still wins according to dsh's
-native credential precedence. AOP does not create a second credential source or ask users to
-authenticate again for isolated work. Credential values are never placed in AOP's request, result,
-command record, or prompt.
-
-AOP disables dsh's optional `session-title-llm` row. Its auxiliary title request does not contribute
-to the agent turn or its reported token buckets, while the deterministic fallback title is enough
-for AOP's private session record.
-
-The adapter defaults to dsh's bundled `deepseek-v4-flash`, also accepts
-`deepseek-v4-pro`, and maps AOP effort `none` to native `off`. With `--provider`, it accepts an exact
-model ID and the reasoning levels dsh exposes across its pi-ai adapters. The headless command has no
-provider-aware model-list operation, so `aop models --agent dsh` reports the bundled DeepSeek
-defaults rather than claiming an account-derived inventory.
+Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`.
 
 ## Current limitations
 
-AOP normalizes bounded execution, but it cannot create capabilities that an installed harness does
-not expose.
-
 | Harness | Current limitation |
 | --- | --- |
-| Codex | No participant mode |
-| Claude | Catalog-only model list; global runtime state; no participant mode |
-| Cursor | Effort is part of the model ID; private state only in safe modes |
-| Devin | Effort is part of the model ID; successful runs require a valid ATIF export |
-| OpenCode | Private state applies only in safe modes |
-| Agy | No participant mode; exact resume fails if the conversation ID changes |
-| Hermes | Experimental participant mode; OAuth rotation serializes Hermes turns |
-| DeepSeek Harness | Developer-preview CLI; inventory reflects its two bundled defaults; no participant mode |
+| Codex | No participant mode. |
+| Claude Code | Model inventory is catalog-only; no participant mode. |
+| Cursor Agent | Effort is part of the model ID; no participant mode. |
+| Devin CLI | Effort is part of the model ID; successful runs require a valid ATIF export; no participant mode. |
+| OpenCode | No participant mode. |
+| Antigravity | Exact resume fails if the conversation ID changes; no participant mode. |
+| Grok Build | No participant mode. |
+| Hermes | Participant mode is experimental; rotating OAuth credentials serialize Hermes turns. |
+| DeepSeek Harness | Developer-preview CLI; inventory lists bundled defaults rather than the selected provider; no participant mode. |
 
-Cursor, Agy, and Devin do not report enough information for an API-equivalent cost. AOP does not
-configure language-specific build caches.
-
-Participant mode will expand only when another adapter can enforce the complete contract. The
-current Codex and Agy interfaces cannot disable all tools and coding context. Unsupported adapters
-fail before creating a task worktree.
+Cursor Agent, Antigravity, and Devin CLI do not report enough information for AOP to calculate an
+API-equivalent cost. See [Token usage and pricing](token-usage.md) for the values available from each
+harness.
 
 ## Executable overrides
 
-The following variables select alternate executables:
+Use these environment variables when a supported executable is not on the normal `PATH` or AOP
+should invoke a specific installation:
 
 ```text
 AOP_CODEX_BIN
@@ -222,23 +182,7 @@ AOP_DSH_BIN
 AOP_BWRAP_BIN
 ```
 
-For dsh installed under a user npm prefix, AOP mounts the installed `node_modules` runtime at its
-original absolute path so Node can follow the package's normal dependency links. System and
-Homebrew installations use their existing runtime mounts. `AOP_DSH_BIN` should identify the
-official packaged entry point, not a personal wrapper or a source-checkout script.
-
-## Live input-snapshot smoke test
-
-The default suite tests the shared mount contract without contacting providers. An opt-in matrix
-checks whether real authenticated harnesses can read a declared path:
-
-```sh
-AOP_LIVE_INPUT_AGENTS=agy,codex,devin,grok,hermes uv --no-config run --locked pytest tests/test_live_read_paths.py
-```
-
-Use `all` to select every adapter. `AOP_LIVE_<AGENT>_MODEL` and
-`AOP_LIVE_<AGENT>_EFFORT` select harness-specific test options.
-`AOP_LIVE_HERMES_PROVIDER` selects the Hermes inference provider, and
-`AOP_LIVE_INPUT_TIMEOUT` changes the default 300-second bound. The test uses `sealed`, verifies a
-random nonce from an immutable input snapshot, confirms the source was unchanged, and retains normal
-AOP run evidence. These tests spend provider tokens and are never part of the default suite.
+In isolated profiles, overrides should normally point to an installed harness. AOP supports system
+and Homebrew installations, self-contained executables, dsh installed through npm, and Hermes
+installed for development from a local source directory. A custom launcher may not work if it needs
+other files that are not visible inside the isolated run.

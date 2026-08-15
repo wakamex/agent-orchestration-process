@@ -1,15 +1,5 @@
 # Agent Orchestration Process (AOP)
 
-AOP runs autonomous CLI agents as bounded workers through one provider-independent interface. It
-creates isolated task worktrees, enforces execution profiles and configured deadlines, retains run
-evidence, resumes exact provider sessions, and keeps checkpointing and integration explicit.
-
-It is intended for unattended jobs such as parallel code changes, evaluation pipelines, test
-generation, and autoresearch loops. Authentication, model execution, tools, and session persistence
-remain owned by each installed agent CLI.
-
-## Why AOP?
-
 AOP gives automation one CLI for controlling different agent harnesses without requiring callers to
 learn each harness's command flags, session format, output schema, runtime state, or resume behavior:
 

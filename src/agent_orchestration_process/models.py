@@ -8,6 +8,9 @@ from typing import Any
 from .pricing import CalculatedCost, TokenUsage
 
 
+TOKEN_USAGE_SCHEMA = "aop-token-usage-v1"
+
+
 @dataclass(frozen=True)
 class InputFile:
     relative_path: str
@@ -128,6 +131,11 @@ class RunResult:
     artifacts: tuple[RunArtifact, ...] = ()
     inputs: tuple[InputSnapshot, ...] = ()
     provider_duration_seconds: float | None = None
+    usage_schema: str = TOKEN_USAGE_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.usage_schema != TOKEN_USAGE_SCHEMA:
+            raise ValueError(f"unsupported token usage schema: {self.usage_schema}")
 
     @property
     def succeeded(self) -> bool:
@@ -154,7 +162,18 @@ class RunResult:
         fields.setdefault("time_to_first_event_seconds", None)
         fields.setdefault("time_to_first_response_seconds", None)
         fields.setdefault("provider_duration_seconds", None)
-        fields["usage"] = TokenUsage.from_dict(fields.get("usage"))
+        usage_schema = fields.get("usage_schema")
+        if usage_schema is None:
+            fields["usage"] = _legacy_usage(
+                fields.get("usage"),
+                provider=fields.get("provider"),
+                inference_provider=fields.get("inference_provider"),
+            )
+            fields["usage_schema"] = TOKEN_USAGE_SCHEMA
+        elif usage_schema == TOKEN_USAGE_SCHEMA:
+            fields["usage"] = TokenUsage.from_dict(fields.get("usage"))
+        else:
+            raise ValueError(f"unsupported token usage schema: {usage_schema}")
         legacy_cost = fields.pop("api_equivalent_cost", None)
         legacy_billing = fields.get("billing")
         legacy_reported = (
@@ -181,7 +200,45 @@ class RunResult:
         fields["artifacts"] = tuple(
             RunArtifact(**artifact) for artifact in fields.get("artifacts", ())
         )
+        legacy_read_paths = fields.pop("read_paths", ())
+        fields.setdefault("inputs", legacy_read_paths)
         fields["inputs"] = tuple(
             InputSnapshot.from_dict(item) for item in fields.get("inputs", ())
         )
         return cls(**fields)
+
+
+def _legacy_usage(
+    value: object,
+    *,
+    provider: object,
+    inference_provider: object,
+) -> TokenUsage:
+    raw = value if isinstance(value, dict) else {}
+    input_tokens = _usage_integer(raw.get("input_tokens"))
+    cached_input_tokens = _usage_integer(raw.get("cached_input_tokens"))
+    output_tokens = _usage_integer(raw.get("output_tokens"))
+    reasoning_output_tokens = _usage_integer(raw.get("reasoning_output_tokens"))
+
+    # These adapters historically persisted their provider's disjoint uncached
+    # input bucket. DSH has that contract for every inference provider, so its
+    # inference provider does not alter this conversion.
+    if provider in {"agy", "cursor", "dsh"}:
+        input_tokens += cached_input_tokens
+    if provider == "opencode":
+        output_tokens += reasoning_output_tokens
+
+    _ = inference_provider
+
+    return TokenUsage(
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+        reasoning_output_tokens=reasoning_output_tokens,
+    )
+
+
+def _usage_integer(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(value, 0)

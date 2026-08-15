@@ -384,14 +384,19 @@ rather than account-verified. The `availability` and `price_scope` fields keep t
 `provider` prices are rates reported by that provider endpoint.
 
 Every run records wall-clock time and time to first event and agent response. Adapters also record
-input, cached-input, output, and reasoning-output tokens when the provider exposes them. When the
-resolved model has pricing, the result also contains `calculated_cost`: a standard API-equivalent
-USD amount calculated from the reported token buckets and a versioned price schedule. This is a
-comparison metric for subscription runs, not an amount billed to the account. Reasoning
-tokens are reported separately but are already included in output tokens and are not charged twice.
-Agy cache-read tokens are reported separately from uncached input and priced as an additive
-category. DeepSeek Harness uses additive cache pricing for its direct DeepSeek route and the
-selected provider's catalog convention for other known routes.
+usage under one provider-independent convention. `input_tokens` is total processed input including
+cached input, and `cached_input_tokens` is its cached subset. `output_tokens` is total processed
+output including reasoning, and `reasoning_output_tokens` is its reasoning subset. The subsets
+never exceed their totals, and `total_tokens` is always `input_tokens + output_tokens`. Consumers
+must not add either subset to a total. New `result.json` records declare this convention with
+`usage_schema: "aop-token-usage-v1"`. See [Token usage normalization](docs/token-usage.md) for the
+provider boundary mappings and AOP's loading rule for older unversioned records.
+
+When the resolved model has pricing, the result also contains `calculated_cost`: a standard
+API-equivalent USD amount calculated from the normalized token buckets and a versioned price
+schedule. This is a comparison metric for subscription runs, not an amount billed to the account.
+Cached input is split from uncached input for pricing, while reasoning is already included in output
+and is never charged twice.
 
 `provider_reported_cost` is separate and remains null unless the harness or provider explicitly
 emits a monetary cost for the invocation. A calculated cost can match the eventual bill exactly,

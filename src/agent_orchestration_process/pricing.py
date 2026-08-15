@@ -14,6 +14,22 @@ class TokenUsage:
     output_tokens: int = 0
     reasoning_output_tokens: int = 0
 
+    def __post_init__(self) -> None:
+        if (
+            min(
+                self.input_tokens,
+                self.cached_input_tokens,
+                self.output_tokens,
+                self.reasoning_output_tokens,
+            )
+            < 0
+        ):
+            raise ValueError("token counts cannot be negative")
+        if self.cached_input_tokens > self.input_tokens:
+            raise ValueError("cached_input_tokens cannot exceed input_tokens")
+        if self.reasoning_output_tokens > self.output_tokens:
+            raise ValueError("reasoning_output_tokens cannot exceed output_tokens")
+
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
@@ -75,7 +91,6 @@ def estimate_api_cost(
     catalog: ModelCatalog | None = None,
     *,
     providers: tuple[str, ...] = ("openai",),
-    additive_cached_input: bool = False,
     catalog_model: str | None = None,
 ) -> CalculatedCost | None:
     if model is None:
@@ -108,10 +123,7 @@ def estimate_api_cost(
         input_rate is not None and cached_rate is not None and output_rate is not None
     )
     cached = usage.cached_input_tokens
-    uncached = usage.input_tokens
-    if not additive_cached_input:
-        cached = min(cached, uncached)
-        uncached -= cached
+    uncached = usage.input_tokens - cached
     amount = (
         uncached * input_rate + cached * cached_rate + usage.output_tokens * output_rate
     ) / 1_000_000

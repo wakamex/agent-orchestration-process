@@ -226,6 +226,7 @@ def test_run_persists_structured_codex_artifacts(
     assert request["artifacts"] == []
     assert request["inputs"] == []
     assert persisted_result["succeeded"] is True
+    assert persisted_result["usage_schema"] == "aop-token-usage-v1"
     assert persisted_result["artifacts"] == []
     assert persisted_result["inference_provider"] is None
     assert persisted_result["inputs"] == []
@@ -241,6 +242,7 @@ def test_run_persists_structured_codex_artifacts(
     assert persisted_result["provider_reported_cost"] is None
 
     legacy_result = dict(persisted_result)
+    legacy_result.pop("usage_schema")
     legacy_result["api_equivalent_cost"] = dict(legacy_result.pop("calculated_cost"))
     legacy_result["api_equivalent_cost"]["estimated"] = True
     legacy_result.pop("provider_reported_cost")
@@ -252,6 +254,9 @@ def test_run_persists_structured_codex_artifacts(
     assert loaded_legacy.calculated_cost is not None
     assert loaded_legacy.calculated_cost.amount_usd == 0.000035
     assert loaded_legacy.provider_reported_cost is None
+    legacy_result["read_paths"] = legacy_result.pop("inputs")
+    loaded_read_paths = RunResult.from_dict(legacy_result)
+    assert loaded_read_paths.inputs == loaded_legacy.inputs
     assert '"type": "thread.started"' in events
     assert (run_dir / "stderr.log").read_text() == ""
 

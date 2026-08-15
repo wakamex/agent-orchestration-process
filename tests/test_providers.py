@@ -44,7 +44,7 @@ def test_dsh_run_and_exact_resume_use_the_native_patch_interface(
     assert first.model == "deepseek-v4-pro"
     assert first.effort == "max"
     assert first.final_message == "answer:first"
-    assert first.usage.input_tokens == 90
+    assert first.usage.input_tokens == 120
     assert first.usage.cached_input_tokens == 30
     assert first.usage.output_tokens == 20
     assert first.usage.reasoning_output_tokens == 7
@@ -274,6 +274,10 @@ def test_dsh_projects_the_selected_provider_and_its_exact_credential_ref(
     assert result.succeeded
     assert result.inference_provider == "anthropic"
     assert result.model == "claude-sonnet-4-5"
+    assert result.usage.input_tokens == 120
+    assert result.usage.cached_input_tokens == 30
+    assert result.usage.output_tokens == 20
+    assert result.usage.reasoning_output_tokens == 7
     assert result.billing.credential_source == "custom-anthropic-auth"
     private_home = (
         manager.state_dir / "provider-state" / "dsh-anthropic" / "dsh" / "home"
@@ -471,7 +475,7 @@ def test_cursor_defaults_to_composer_and_resumes_exact_chat(
     assert first.provider == "cursor"
     assert first.model == "composer-2.5"
     assert first.final_message == "answer:first"
-    assert first.usage.input_tokens == 100
+    assert first.usage.input_tokens == 130
     assert first.usage.cached_input_tokens == 30
     assert first.usage.output_tokens == 20
     assert first.provider_duration_seconds == 1.25
@@ -765,7 +769,7 @@ def test_opencode_defaults_to_zen_model_and_resumes_exact_session(
     assert first.final_message == "answer:first"
     assert first.usage.input_tokens == 53
     assert first.usage.cached_input_tokens == 10
-    assert first.usage.output_tokens == 5
+    assert first.usage.output_tokens == 7
     assert first.usage.reasoning_output_tokens == 2
     assert first.provider_duration_seconds == 0.5
     assert first.provider_reported_cost is not None
@@ -840,7 +844,7 @@ def test_opencode_normalizes_multi_step_tool_loop(
     assert result.final_message == "answer:OPENCODE_TOOL_LOOP"
     assert result.usage.input_tokens == 61
     assert result.usage.cached_input_tokens == 13
-    assert result.usage.output_tokens == 7
+    assert result.usage.output_tokens == 10
     assert result.usage.reasoning_output_tokens == 3
     assert result.provider_reported_cost is not None
     assert result.provider_reported_cost.amount_usd == 0.00022345
@@ -981,7 +985,7 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     assert "--add-dir" not in first.command
     assert "--gemini_dir" in first.command
     assert first.final_message == "answer:first"
-    assert first.usage.input_tokens == 100
+    assert first.usage.input_tokens == 130
     assert first.usage.cached_input_tokens == 30
     assert first.usage.output_tokens == 20
     assert first.usage.reasoning_output_tokens == 7
@@ -1298,6 +1302,7 @@ def test_hermes_run_and_exact_resume_report_per_turn_usage(
     assert resumed.succeeded
     assert resumed.session_id == first.session_id
     assert resumed.final_message == "answer:second"
+    assert resumed.usage == first.usage
     assert ["--resume", first.session_id] == resumed.command[
         resumed.command.index("--resume") : resumed.command.index("--resume") + 2
     ]
@@ -1309,7 +1314,6 @@ def test_hermes_run_and_exact_resume_report_per_turn_usage(
     assert ["--reasoning", "high"] == resumed.command[
         resumed.command.index("--reasoning") : resumed.command.index("--reasoning") + 2
     ]
-    assert resumed.usage == first.usage
     assert resumed.calculated_cost is not None
     assert resumed.calculated_cost.amount_usd == 0.000001
 

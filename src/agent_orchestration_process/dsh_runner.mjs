@@ -20,6 +20,7 @@ function summarize(events, firstSeq) {
   const usage = {
     input_tokens: 0,
     cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
     output_tokens: 0,
     reasoning_output_tokens: 0,
   }
@@ -34,6 +35,7 @@ function summarize(events, firstSeq) {
       const reported = event.data.usage ?? {}
       usage.input_tokens += reported.inputTokens ?? 0
       usage.cached_input_tokens += reported.cacheReadTokens ?? 0
+      usage.cache_write_input_tokens += reported.cacheWriteTokens ?? 0
       usage.output_tokens += reported.outputTokens ?? 0
       usage.reasoning_output_tokens += reported.reasoningTokens ?? 0
     }

@@ -72,6 +72,12 @@ def _rounded(value: float | None) -> float | None:
     return round(value, 6) if value is not None else None
 
 
+def _token_count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(value, 0)
+
+
 def _billing_probe(
     command: list[str], cwd: Path, environment: dict[str, str]
 ) -> subprocess.CompletedProcess[str] | None:
@@ -1050,12 +1056,12 @@ class GrokAdapter:
                 created = GrokAdapter._integer(
                     raw_usage.get("cache_creation_input_tokens")
                 )
-                visible_output = GrokAdapter._integer(raw_usage.get("output_tokens"))
+                total_output = GrokAdapter._integer(raw_usage.get("output_tokens"))
                 reasoning = GrokAdapter._integer(raw_usage.get("reasoning_tokens"))
                 usage = TokenUsage(
                     input_tokens=uncached + cached + created,
                     cached_input_tokens=cached,
-                    output_tokens=visible_output,
+                    output_tokens=total_output,
                     reasoning_output_tokens=reasoning,
                 )
             event_session_id = event.get("sessionId")
@@ -1328,7 +1334,11 @@ class CursorAdapter:
             )
             usage = TokenUsage.from_dict(
                 {
-                    "input_tokens": raw_usage.get("inputTokens"),
+                    "input_tokens": (
+                        _token_count(raw_usage.get("inputTokens"))
+                        + _token_count(raw_usage.get("cacheReadTokens"))
+                        + _token_count(raw_usage.get("cacheWriteTokens"))
+                    ),
                     "cached_input_tokens": raw_usage.get("cacheReadTokens"),
                     "output_tokens": raw_usage.get("outputTokens"),
                 }
@@ -1822,10 +1832,10 @@ class OpenCodeAdapter:
                         + cache_write
                     )
                     cached_input_tokens += cache_read
-                    output_tokens += OpenCodeAdapter._integer(tokens.get("output"))
-                    reasoning_output_tokens += OpenCodeAdapter._integer(
-                        tokens.get("reasoning")
-                    )
+                    visible_output = OpenCodeAdapter._integer(tokens.get("output"))
+                    reasoning_output = OpenCodeAdapter._integer(tokens.get("reasoning"))
+                    output_tokens += visible_output + reasoning_output
+                    reasoning_output_tokens += reasoning_output
                 amount = part.get("cost")
                 if isinstance(amount, (int, float)) and not isinstance(amount, bool):
                     cost_usd += max(float(amount), 0.0)
@@ -1977,7 +1987,6 @@ class AgyAdapter:
                 model,
                 parsed["usage"],
                 providers=("google",),
-                additive_cached_input=True,
                 catalog_model=_agy_catalog_model(model),
             ),
             billing=BillingProvenance(
@@ -2077,7 +2086,10 @@ class AgyAdapter:
             )
             usage = TokenUsage.from_dict(
                 {
-                    "input_tokens": raw_usage.get("input_tokens"),
+                    "input_tokens": (
+                        _token_count(raw_usage.get("input_tokens"))
+                        + _token_count(raw_usage.get("cache_read_tokens"))
+                    ),
                     "cached_input_tokens": raw_usage.get("cache_read_tokens"),
                     "output_tokens": raw_usage.get("output_tokens"),
                     "reasoning_output_tokens": raw_usage.get("thinking_tokens"),
@@ -2626,7 +2638,6 @@ class DeepSeekHarnessAdapter:
             model,
             usage,
             providers=(catalog_provider,),
-            additive_cached_input=catalog_provider == "deepseek",
         )
 
     @staticmethod
@@ -2656,7 +2667,19 @@ class DeepSeekHarnessAdapter:
                 "completed": False,
                 "error": None,
             }
-        usage = result.get("usage")
+        raw_usage = result.get("usage")
+        raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
+        uncached_input = _token_count(raw_usage.get("input_tokens"))
+        cached_input = _token_count(raw_usage.get("cached_input_tokens"))
+        cache_write = _token_count(raw_usage.get("cache_write_input_tokens"))
+        usage = TokenUsage(
+            input_tokens=uncached_input + cached_input + cache_write,
+            cached_input_tokens=cached_input,
+            output_tokens=_token_count(raw_usage.get("output_tokens")),
+            reasoning_output_tokens=_token_count(
+                raw_usage.get("reasoning_output_tokens")
+            ),
+        )
         return {
             "session_id": (
                 result.get("session_id")
@@ -2671,7 +2694,7 @@ class DeepSeekHarnessAdapter:
                 if isinstance(result.get("final_message"), str)
                 else None
             ),
-            "usage": TokenUsage.from_dict(usage if isinstance(usage, dict) else None),
+            "usage": usage,
             "completed": result.get("completed") is True,
             "error": result.get("error")
             if isinstance(result.get("error"), str)

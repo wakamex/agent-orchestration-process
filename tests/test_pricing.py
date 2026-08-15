@@ -47,17 +47,27 @@ def test_reasoning_tokens_are_not_double_counted() -> None:
     assert with_reasoning.amount_usd == without_reasoning.amount_usd
 
 
-def test_additive_cached_input_is_priced_separately() -> None:
+def test_total_tokens_contains_only_input_and_output_totals() -> None:
+    usage = TokenUsage(
+        input_tokens=100,
+        cached_input_tokens=80,
+        output_tokens=50,
+        reasoning_output_tokens=40,
+    )
+
+    assert usage.total_tokens == 150
+
+
+def test_normalized_cached_input_preserves_legacy_additive_price() -> None:
     estimate = estimate_api_cost(
         "gemini-3.5-flash-low",
         TokenUsage(
-            input_tokens=100,
+            input_tokens=400,
             cached_input_tokens=300,
             output_tokens=20,
             reasoning_output_tokens=7,
         ),
         providers=("google",),
-        additive_cached_input=True,
         catalog_model="gemini-3.5-flash",
     )
 
@@ -65,6 +75,13 @@ def test_additive_cached_input_is_priced_separately() -> None:
     assert estimate.amount_usd == 0.000375
     assert estimate.model == "gemini-3.5-flash-low"
     assert estimate.priced_as == "gemini-3.5-flash"
+
+
+def test_token_usage_rejects_overlapping_subsets_larger_than_totals() -> None:
+    with pytest.raises(ValueError, match="cached_input_tokens"):
+        TokenUsage(input_tokens=10, cached_input_tokens=11)
+    with pytest.raises(ValueError, match="reasoning_output_tokens"):
+        TokenUsage(output_tokens=10, reasoning_output_tokens=11)
 
 
 def test_long_context_multiplier_is_applied_when_documented() -> None:

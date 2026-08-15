@@ -42,7 +42,6 @@ aop run --agent codex --profile sealed --prompt "Explain the difference between 
 Run a task in an existing Git repository:
 
 ```sh
-cd /path/to/project
 aop init
 aop run task-a --agent codex --prompt "Implement the parser and its tests"
 ```

@@ -1,37 +1,31 @@
-# Harness isolation and runtime state
+# Provider adapters
 
-This page documents the provider-specific behavior behind AOP's common run and resume interface.
-Most users only need the profile and limitation summaries in the main README.
+This page documents authentication, model selection, resume behavior, private runtime state, and
+current limitations behind AOP's common run interface.
 
 ## Execution boundary
 
-AOP runs providers inside an empty `bwrap` mount namespace unless `host` is selected. It adds only
-the selected workspace, repository view, immutable input snapshots, output, private provider state,
-cache, scratch, provider executable, operating-system runtime files, and a fresh `/proc`, `/dev`,
-and `/tmp`. The child environment is cleared and rebuilt from an allowlist.
+AOP runs providers inside the selected execution profile and projects only the corresponding
+workspace, instructions, configuration, credentials, and runtime state. See
+[Execution profiles](profiles.md) for the common filesystem, environment, input, output, and network
+boundary.
 
-| Profile | Repository | Task workspace | Other host paths | Instructions |
-| --- | --- | --- | --- | --- |
-| `edit` | Read-only | Writable | Runtime allowlist | Project and user |
-| `review` | Read-only | Read-only | Runtime allowlist | Project and user |
-| `sealed` | Hidden | Empty read-only directory | Runtime allowlist | No inherited local instructions |
-| `host` | Native | Native | Native | Native |
+## Models, effort, and provider selection
 
-The worktree's `.git` pointer and shared Git directory remain read-only under `edit` and `review`.
-The repository's `.aop` directory is masked from its `/repository` view so one task cannot read run
-records, provider state, caches, or sibling worktrees. Provider permission prompts are bypassed
-because the mount boundary decides whether filesystem writes can succeed.
+| Adapter | Default | Selection notes |
+| --- | --- | --- |
+| Claude | Native default | Accepts normal aliases and effort from `low` through `max`. |
+| Agy | `gemini-3.5-flash`, medium | Accepts exact names printed by `agy models`; native effort is `low`, `medium`, or `high`. |
+| Cursor Agent | `composer-2.5` | Reasoning and fast variants are part of the model ID, so separate effort is rejected. |
+| Devin | `swe-1-7` | Reasoning variants are part of the model ID, so separate effort is rejected. |
+| OpenCode | `opencode/deepseek-v4-flash` | Short names are qualified with `opencode/`; effort maps to the native variant. |
+| Grok Build | `grok-build` | Accepts native reasoning levels from `none` through `max`. |
+| Hermes | `deepseek/deepseek-v4-flash-0731` | Uses its configured provider unless both `--provider` and `--model` override it. |
+| DeepSeek Harness | `deepseek-official` and `deepseek-v4-flash` | Also supports `deepseek-v4-pro`; another configured route requires both provider and model. |
 
-Repeatable `--input` paths are copied into controller-owned per-run snapshots before dispatch. AOP
-hashes the copies and mounts them read-only beneath `/inputs` without mounting their original host
-paths. The source-path-free child manifest and prompt use stable guest paths. Controller records
-retain the original source path for audit. An exact sealed resume snapshots the parent's immutable
-copies again by default, so changed or deleted source files cannot alter the session. Explicit new
-`--input` arguments replace the inherited snapshots.
-
-All profiles currently use native host networking. The effective policy reports that no network
-isolation is present and names local services and provider-side account state as possible context
-channels. Sealed is a filesystem and local-state boundary, not complete information isolation.
+Use `aop models` to inspect installed or configured inventories and their availability source. AOP
+reasserts the selected model, effort, and provider on exact resume wherever the native harness would
+otherwise fall back to current defaults.
 
 ## Task-private provider state
 
@@ -133,6 +127,18 @@ the task, records that choice, and reuses it on resume.
 Under `sealed`, Hermes receives credentials but not skills, hooks, memories, plugins, optional MCPs,
 or other user extension directories.
 
+Hermes alone currently supports experimental participant mode:
+
+```sh
+aop run player --agent hermes --mode participant --profile review --prompt "Submit one move"
+```
+
+The mode persists across exact resume. Hermes 0.20 has no supported no-tools option, so AOP combines
+safe mode, one turn, and an intentionally unknown toolset that currently resolves to no model tool
+schemas. This behavior is not a durable security boundary. The outer execution profile remains the
+filesystem boundary, and AOP should replace the workaround when an official no-tools option is
+available.
+
 ### DeepSeek Harness
 
 AOP invokes the official `dsh --profile headless` command directly. It does not use a personal
@@ -175,6 +181,29 @@ The adapter defaults to dsh's bundled `deepseek-v4-flash`, also accepts
 model ID and the reasoning levels dsh exposes across its pi-ai adapters. The headless command has no
 provider-aware model-list operation, so `aop models --agent dsh` reports the bundled DeepSeek
 defaults rather than claiming an account-derived inventory.
+
+## Current limitations
+
+AOP normalizes bounded execution, but it cannot create capabilities that an installed harness does
+not expose.
+
+| Harness | Current limitation |
+| --- | --- |
+| Codex | No participant mode |
+| Claude | Catalog-only model list; global runtime state; no participant mode |
+| Cursor | Effort is part of the model ID; private state only in safe modes |
+| Devin | Effort is part of the model ID; successful runs require a valid ATIF export |
+| OpenCode | Private state applies only in safe modes |
+| Agy | No participant mode; exact resume fails if the conversation ID changes |
+| Hermes | Experimental participant mode; OAuth rotation serializes Hermes turns |
+| DeepSeek Harness | Developer-preview CLI; inventory reflects its two bundled defaults; no participant mode |
+
+Cursor, Agy, and Devin do not report enough information for an API-equivalent cost. AOP does not
+configure language-specific build caches.
+
+Participant mode will expand only when another adapter can enforce the complete contract. The
+current Codex and Agy interfaces cannot disable all tools and coding context. Unsupported adapters
+fail before creating a task worktree.
 
 ## Executable overrides
 

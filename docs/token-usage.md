@@ -1,4 +1,4 @@
-# Token usage normalization
+# Token usage and pricing
 
 AOP persists token usage under one provider-independent convention. The marker for this convention
 is `usage_schema: "aop-token-usage-v1"` on `result.json`.
@@ -17,6 +17,10 @@ The invariant is:
 
 The four persisted counters are non-negative. AOP rejects a newly constructed normalized value when
 a subset exceeds its total.
+
+Every run also records wall-clock time, time to first provider event, and time to the agent response
+when the provider exposes it. Resume results contain only the current invocation's usage rather than
+cumulative session totals.
 
 ## Provider boundary mappings
 
@@ -56,6 +60,24 @@ that treated its disjoint uncached bucket as though it already included cache re
 Cache creation and cache writes count toward total processed input. AOP currently has only a cached
 read subset and no separate persisted cache-write pricing bucket, so calculated cost continues to use
 the normal input rate for those tokens. Provider-reported monetary cost remains separate.
+
+`calculated_cost` is an API-equivalent USD comparison based on normalized tokens and a versioned
+price schedule. It does not claim that a subscription account was billed that amount.
+`provider_reported_cost` remains null unless the harness or provider emits monetary cost evidence
+for the invocation. The result records billing route evidence separately as `subscription`,
+`provider-credits`, `metered-api`, `local`, or `unknown` rather than inferring billing from the
+calculated comparison.
+
+Before dispatch, AOP requires its models.dev catalog cache to be less than 24 hours old. A stale or
+missing cache is refreshed under a process lock and replaced atomically. If refresh fails, AOP does
+not use expired prices. Set `AOP_MODEL_CATALOG_CACHE` to relocate the cache, or run
+`aop models --refresh` to refresh it immediately. Every calculated cost retains its pricing source,
+retrieval time when applicable, and price version.
+
+Provider inventories and cost evidence differ. Claude can supply its own CLI-calculated comparison;
+OpenCode can report billed per-step cost; Grok can report terminal cost; and Hermes can report cost
+through its selected inference provider. Cursor, Devin, and Agy do not currently expose enough
+information for AOP to calculate an API-equivalent cost, so their calculated cost remains null.
 
 ## Loading unversioned results
 

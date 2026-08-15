@@ -31,64 +31,36 @@ chat, approve actions, watch progress, and steer a session.
 Use AOP when software needs to run bounded jobs unattended across different agent CLIs. The two are
 complementary: ACP serves interactive clients, while AOP serves automation.
 
-## Requirements and installation
+## Install and run
 
-Requirements:
+AOP requires Linux and Python 3.11 or newer. The `edit`, `review`, and `sealed` profiles require
+`bwrap`. Git is required for `edit`, `review`, and `host`. Install and authenticate at least one
+supported agent harness.
 
-- Linux
-- Python 3.11 or newer
-- `bwrap` for `edit`, `review`, and `sealed`; `host` does not use it
-- Git for `edit`, `review`, and `host`; `sealed` does not require a repository
-- uv for the installation and development commands below
-- At least one installed and authenticated supported agent CLI
-
-Install the CLI from [PyPI](https://pypi.org/project/agent-orchestration-process/):
+Install AOP from [PyPI](https://pypi.org/project/agent-orchestration-process/):
 
 ```sh
 uv tool install agent-orchestration-process
 ```
 
-For development, clone the repository and let uv create and synchronize the local environment. The
-default `dev` dependency group contains pytest and Ruff:
-
-```sh
-git clone https://github.com/wakamex/agent-orchestration-process.git
-cd agent-orchestration-process
-uv --no-config sync --locked
-uv --no-config run --locked pytest
-uv --no-config run --locked ruff check src tests
-```
-
-## First run
-
-Initialize AOP in an existing Git repository:
+Run a task in an existing Git repository:
 
 ```sh
 cd /path/to/project
 aop init
-```
-
-`aop init` adds `/.aop/` to `.gitignore`. Commit that project-level change before integrating
-tasks so the main worktree is clean.
-
-Run one bounded turn with Codex. AOP creates the isolated task worktree when it does not already
-exist:
-
-```sh
 aop run task-a --agent codex --prompt "Implement the parser and its tests"
 ```
 
-`aop run` prints the agent's final message to stdout and its AOP run ID, provider session ID, and
-run artifact directory to stderr. Resume the exact session using the AOP run ID:
+`aop init` adds `/.aop/` to `.gitignore`; commit that change before integrating tasks. AOP creates
+the task worktree automatically and prints the run ID needed to resume the exact provider session:
 
 ```sh
 aop resume <run-id> --prompt "Address the review findings"
 ```
 
-AOP retains the request, result, logs, final message, and declared artifacts under `.aop/`. See the
-[CLI guide](docs/cli.md) for inputs, artifacts, batch runs, machine-readable results, cleanup, model
-discovery, and lower-level worktree commands. See [Integration](docs/integration.md) when a task's
-changes are ready to checkpoint and merge.
+See the [CLI guide](docs/cli.md) for other harnesses, inputs, artifacts, batch runs, cleanup, and
+machine-readable results. See [Integration](docs/integration.md) when a task's changes are ready to
+checkpoint and merge.
 
 ## Execution profiles
 
@@ -121,3 +93,15 @@ Every adapter records the same result shape, including provider session identity
 timing, token usage, cost evidence, logs, and declared artifacts. See
 [Token usage and pricing](docs/token-usage.md) for the normalized token contract, provider mappings,
 and cost calculation rules.
+
+## Development
+
+Clone the repository and synchronize its locked development environment:
+
+```sh
+git clone https://github.com/wakamex/agent-orchestration-process.git
+cd agent-orchestration-process
+uv --no-config sync --locked
+uv --no-config run --locked pytest
+uv --no-config run --locked ruff check src tests
+```

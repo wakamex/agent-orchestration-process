@@ -47,6 +47,8 @@ aop = "agent_orchestration_process.cli:main"
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = "1"
 markers = [
     "live: opt-in tests that invoke authenticated external agent providers",
 ]

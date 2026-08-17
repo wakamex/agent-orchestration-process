@@ -114,7 +114,7 @@ def _atomic_write_private(path: Path, content: str) -> None:
 
 
 class RunStore:
-    """Store immutable inputs and terminal results for each invocation."""
+    """Store durable inputs and terminal results for each invocation."""
 
     def __init__(self, root: Path):
         self.root = root
@@ -4244,7 +4244,7 @@ class AgentRunner:
             if not isinstance(snapshot_root, str):
                 raise AOPError("sealed run is missing its controller input snapshot")
             resolved_snapshot = Path(snapshot_root).resolve()
-            snapshots_root = (self.manager.sealed_runtime_dir / "snapshots").resolve()
+            snapshots_root = (self.manager.state_dir / "snapshots").resolve()
             if (
                 not resolved_snapshot.is_relative_to(snapshots_root)
                 or not resolved_snapshot.is_dir()
@@ -4348,10 +4348,30 @@ class AgentRunner:
         scratch_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         scratch_dir.parent.chmod(0o700)
         scratch_dir.chmod(0o700)
-        input_dir = runtime_dir / "snapshots" / request.run_id
-        input_dir.mkdir(parents=True, exist_ok=False)
-        input_dir.parent.chmod(0o700)
+        snapshots_root = self.manager.state_dir / "snapshots"
+        snapshots_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        snapshots_root.chmod(0o700)
+        input_dir = snapshots_root / request.run_id
+        input_dir.mkdir(mode=0o700)
         input_dir.chmod(0o700)
+        input_projection_root: Path | None = None
+        if request.profile == "sealed":
+            projections_root = (runtime_dir / "input-projections").resolve()
+            recorded_projection_root = parent_controller.get("input_projection_root")
+            if isinstance(recorded_projection_root, str):
+                input_projection_root = Path(recorded_projection_root).resolve()
+                if (
+                    not input_projection_root.is_relative_to(projections_root)
+                    or not input_projection_root.is_dir()
+                ):
+                    raise AOPError(
+                        "sealed run input projection is missing or outside AOP runtime"
+                    )
+            else:
+                input_projection_root = projections_root / state_key
+            input_projection = input_projection_root / request.run_id
+        else:
+            input_projection = input_dir
         output_dir = scratch_dir / "outputs" / request.run_id
         output_dir.mkdir(parents=True, exist_ok=False)
         if parent_controller:
@@ -4391,12 +4411,18 @@ class AgentRunner:
             input_names=tuple(Path(item.mounted_path).name for item in declared_inputs),
         ).to_dict()
         effective_policy["workspace"]["controller_path"] = os.fspath(worktree.path)
-        effective_policy["controller"] = {
+        controller_policy = {
             "provider_state": os.fspath(provider_state),
             "scratch": os.fspath(scratch_dir),
             "cache": os.fspath(cache_dir),
             "input_snapshot": os.fspath(input_dir),
         }
+        if input_projection_root is not None:
+            controller_policy["input_projection"] = os.fspath(input_projection)
+            controller_policy["input_projection_root"] = os.fspath(
+                input_projection_root
+            )
+        effective_policy["controller"] = controller_policy
         effective_policy["provider_runtime"] = provider_runtime_record(self.adapter)
         effective_policy["instruction_sources"] = _instruction_sources(
             request, worktree, os.environ
@@ -4415,6 +4441,7 @@ class AgentRunner:
                 declared_inputs,
                 request.artifacts,
                 Path("/output") if request.profile != "host" else output_dir,
+                inputs_read_only=request.profile != "host",
             ),
             inputs=declared_inputs,
             effective_policy=effective_policy,
@@ -4430,7 +4457,7 @@ class AgentRunner:
                 "AOP_CACHE_DIR": os.fspath(cache_dir),
                 "AOP_PROVIDER_STATE_DIR": os.fspath(provider_state),
                 "AOP_SCRATCH_DIR": os.fspath(scratch_dir),
-                "AOP_INPUT_DIR": os.fspath(input_dir),
+                "AOP_INPUT_DIR": os.fspath(input_projection),
                 "AOP_OUTPUT_DIR": os.fspath(output_dir),
                 "AOP_RUN_ID": request.run_id,
                 "AOP_PROFILE": request.profile,
@@ -4464,9 +4491,22 @@ class AgentRunner:
                 {"schema_version": 1, "inputs": request.to_dict()["inputs"]},
             )
             self.store.write_json(input_manifest, guest_manifest)
-            environment["AOP_INPUT_MANIFEST"] = os.fspath(input_manifest)
-        _make_snapshot_read_only(input_dir)
-        result = self.adapter.execute(request, worktree, run_dir, environment)
+        _make_snapshot_private(input_dir)
+        if input_projection != input_dir:
+            input_projection_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            input_projection_root.parent.chmod(0o700)
+            input_projection_root.chmod(0o700)
+            shutil.copytree(input_dir, input_projection)
+            _make_snapshot_private(input_projection)
+        if request.inputs:
+            environment["AOP_INPUT_MANIFEST"] = os.fspath(
+                input_projection / "manifest.json"
+            )
+        try:
+            result = self.adapter.execute(request, worktree, run_dir, environment)
+        finally:
+            if input_projection != input_dir:
+                shutil.rmtree(input_projection)
         result = replace(
             result,
             inference_provider=request.inference_provider,
@@ -4770,17 +4810,17 @@ def _copy_input_directory(source: Path, destination: Path) -> None:
             raise AOPError(f"read path contains a special file: {child}")
 
 
-def _make_snapshot_read_only(root: Path) -> None:
-    for directory, names, files in os.walk(root, topdown=False):
+def _make_snapshot_private(root: Path) -> None:
+    for directory, names, files in os.walk(root):
         path = Path(directory)
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
         for name in files:
             entry = path / name
-            entry.chmod(stat.S_IRUSR)
+            entry.chmod(stat.S_IRUSR | stat.S_IWUSR)
         for name in names:
             entry = path / name
             if entry.is_dir() and not entry.is_symlink():
-                entry.chmod(stat.S_IRUSR | stat.S_IXUSR)
-        path.chmod(stat.S_IRUSR | stat.S_IXUSR)
+                entry.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
 
 def _inspect_read_path(source: Path) -> tuple[str, tuple[InputFile, ...]]:
@@ -4849,6 +4889,8 @@ def _run_prompt(
     inputs: tuple[InputSnapshot, ...],
     artifacts: tuple[str, ...],
     output_dir: Path,
+    *,
+    inputs_read_only: bool,
 ) -> str:
     if inputs:
         paths = "\n".join(
@@ -4856,11 +4898,17 @@ def _run_prompt(
             f"  SHA-256: {item.sha256} ({item.size_bytes} bytes, {item.kind})"
             for item in inputs
         )
+        access = "read-only " if inputs_read_only else ""
+        boundary = (
+            "The paths above are read-only snapshots."
+            if inputs_read_only
+            else "The host profile does not enforce read-only access to these snapshots."
+        )
         prompt = (
             f"{prompt.rstrip()}\n\n"
-            "AOP snapshotted read-only inputs:\n"
+            f"AOP snapshotted {access}inputs:\n"
             f"{paths}\n"
-            "The paths above are immutable snapshots. Source host paths are not exposed."
+            f"{boundary} Source host paths are not exposed."
         )
     return _artifact_prompt(prompt, artifacts, output_dir)
 

@@ -502,6 +502,17 @@ def _cleanup_sealed(manager: WorktreeManager, request: RunRequest) -> None:
             cache_root = (manager.sealed_runtime_dir / "sealed-cache").resolve()
             if cache_path.is_relative_to(cache_root) and cache_path.exists():
                 shutil.rmtree(cache_path)
+        input_projection_root = controller.get("input_projection_root")
+        if isinstance(input_projection_root, str):
+            projection_path = Path(input_projection_root).resolve()
+            projections_root = (
+                manager.sealed_runtime_dir / "input-projections"
+            ).resolve()
+            if (
+                projection_path.is_relative_to(projections_root)
+                and projection_path.exists()
+            ):
+                shutil.rmtree(projection_path)
 
 
 def _positive_timeout(value: str) -> float:

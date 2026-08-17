@@ -17,7 +17,7 @@ learn each harness's command flags, session format, output schema, runtime state
 - Reuse each harness's existing authentication, model execution, tools, and conversations instead
   of maintaining a separate AOP credential store.
 - Apply the same isolated worktrees, inputs-only sealed runs, configured deadlines, process cleanup,
-  immutable inputs, and validated artifacts across harnesses.
+  snapshotted inputs, and validated artifacts across harnesses.
 - Retain consistent results, logs, timing, token usage, and exact provider session identity when
   available.
 - Keep cleanup, checkpointing, and Git integration outside agent control.

@@ -58,7 +58,7 @@ final message, and artifacts. See [Token usage and pricing](token-usage.md) for 
 
 ## Inputs and artifacts
 
-Declare files or directories as immutable input snapshots and require outputs as retained artifacts:
+Declare files or directories as input snapshots and require outputs as retained artifacts:
 
 ```sh
 aop run analysis \
@@ -70,9 +70,11 @@ aop run analysis \
   --prompt "Analyze the declared sources and write the report"
 ```
 
-AOP copies accepted inputs into controller-owned storage, hashes them, and mounts the snapshots
-read-only beneath `/inputs`. The harness does not receive their original host paths. Missing paths,
-symlinks, special files, and duplicate basenames are rejected before launch.
+AOP copies accepted inputs into private controller-owned storage beneath `.aop/snapshots`, hashes
+them, and mounts the snapshots read-only beneath `/inputs` for isolated profiles. The `host` profile
+uses the same point-in-time copies but retains native host access. The harness does not receive the
+inputs' original host paths. Missing paths, symlinks, special files, and duplicate basenames are
+rejected before launch.
 
 An exact `sealed` resume inherits the parent run's snapshots unless new `--input` arguments replace
 them. Other profiles snapshot the recorded source paths again, so they receive the current files.

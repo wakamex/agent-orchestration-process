@@ -326,6 +326,9 @@ def test_declared_inputs_are_snapshotted_hashed_and_recorded(
     snapshot_root = manager.state_dir / "snapshots" / result.run_id
     assert (snapshot_root / "transcripts" / "day-4.md").read_text() == "Day four\n"
     assert (snapshot_root / "ledger.json").read_bytes() == ledger.read_bytes()
+    assert snapshot_root.stat().st_mode & 0o777 == 0o700
+    assert (snapshot_root / "transcripts").stat().st_mode & 0o777 == 0o700
+    assert (snapshot_root / "ledger.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_resume_inherits_input_sources_and_refreshes_snapshots(

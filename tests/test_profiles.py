@@ -9,7 +9,7 @@ import pytest
 from agent_orchestration_process.cli import main
 from agent_orchestration_process.isolation import PROFILES, explain_profile
 from agent_orchestration_process.runner import AgentRunner, CodexAdapter, adapter_for
-from agent_orchestration_process.worktrees import WorktreeManager
+from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
 def test_profiles_have_explicit_semantic_contracts() -> None:
@@ -79,7 +79,9 @@ def test_sealed_run_needs_no_git_and_exposes_only_snapshotted_input(
     assert request["effective_policy"]["instruction_sources"] == []
     assert os.fspath(source) not in request["prompt"]
     controller_paths = json.dumps(request["effective_policy"]["controller"])
-    assert os.fspath(manager.state_dir) not in controller_paths
+    assert request["effective_policy"]["controller"]["input_snapshot"] == os.fspath(
+        manager.state_dir / "snapshots" / result.run_id
+    )
     assert os.fspath(manager.sealed_runtime_dir) in controller_paths
 
     snapshot = (
@@ -87,7 +89,11 @@ def test_sealed_run_needs_no_git_and_exposes_only_snapshotted_input(
         / "declared.txt"
     )
     assert snapshot.read_text() == "original bytes\n"
-    assert snapshot.stat().st_mode & 0o222 == 0
+    assert snapshot.stat().st_mode & 0o777 == 0o600
+    assert snapshot.parent.stat().st_mode & 0o777 == 0o700
+    assert not Path(
+        request["effective_policy"]["controller"]["input_projection"]
+    ).exists()
     source.write_text("changed later\n")
     assert snapshot.read_text() == "original bytes\n"
     source.unlink()
@@ -126,6 +132,13 @@ def test_sealed_run_needs_no_git_and_exposes_only_snapshotted_input(
     )
     assert "human-study-label" not in resumed.command
 
+    snapshot.write_text("tampered bytes\n")
+    with pytest.raises(AOPError, match="sealed input snapshot changed"):
+        AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).resume(
+            run_id=result.run_id,
+            prompt="reject tampered snapshot",
+        )
+
 
 def test_cli_sealed_run_and_profile_explain_work_outside_git(
     tmp_path: Path,
@@ -159,6 +172,10 @@ def test_cli_sealed_run_and_profile_explain_work_outside_git(
         request["effective_policy"]["controller"]["provider_state"]
     ).exists()
     assert not Path(request["effective_policy"]["controller"]["cache"]).exists()
+    assert Path(request["effective_policy"]["controller"]["input_snapshot"]).is_dir()
+    assert not Path(
+        request["effective_policy"]["controller"]["input_projection_root"]
+    ).exists()
 
 
 def test_sealed_writable_state_is_private_between_tasks_and_reused_on_resume(
@@ -315,6 +332,13 @@ def test_every_provider_runs_under_the_sealed_semantic_boundary(
         )
         + 2
     ]
+    assert ["--ro-bind", controller["input_projection"], "/inputs"] == (
+        result.command[
+            result.command.index(controller["input_projection"])
+            - 1 : result.command.index(controller["input_projection"]) + 2
+        ]
+    )
+    assert controller["input_snapshot"] not in result.command
     assert os.fspath(manager.cache_dir) not in result.command
     forbidden_names = {"AGENTS.md", "SKILL.md", "default.rules"}
     assert not any(path.name in forbidden_names for path in state.rglob("*"))

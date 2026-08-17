@@ -2,9 +2,9 @@
 
 AOP profiles define the complete execution boundary, not only where writes are allowed. The three
 isolated profiles build an empty `bwrap` mount namespace and explicitly add the selected workspace,
-repository view, immutable inputs, output, provider runtime, private state, cache, scratch, required
-operating-system runtime paths, and fresh `/proc`, `/dev`, and `/tmp`. They do not inherit the host
-root filesystem.
+repository view, read-only input snapshots, output, provider runtime, private state, cache, scratch,
+required operating-system runtime paths, and fresh `/proc`, `/dev`, and `/tmp`. They do not inherit
+the host root filesystem.
 
 | Profile | Primary repository | Task workspace | Other host paths | Instructions | Writable guest paths |
 | --- | --- | --- | --- | --- | --- |
@@ -58,10 +58,14 @@ to that process.
 
 ## Immutable inputs and declared outputs
 
-Repeatable `--input` paths are copied into controller-owned per-run snapshots and mounted read-only
-beneath `/inputs`. Their original host paths are not mounted or included in the child command,
-environment, or prompt. Stable guest paths such as `/inputs/ledger.json` do not reveal controller
-directory names.
+Repeatable `--input` paths are copied into private, durable per-run snapshots beneath
+`.aop/snapshots`. Isolated profiles mount them read-only beneath `/inputs`. Their original host paths
+are not mounted or included in the child command, environment, or prompt. Stable guest paths such
+as `/inputs/ledger.json` do not reveal controller directory names. The `host` profile uses the same
+copies but does not enforce a read-only mount because its filesystem access is intentionally native.
+Sealed runs mount an opaque temporary projection of the durable snapshot so Linux mount metadata
+does not expose the controller path. AOP removes the projection after execution and retains the
+snapshot.
 
 Each invocation receives a fresh writable `/output`, exposed in `AOP_OUTPUT_DIR`. AOP validates and
 archives only paths declared with `--artifact`; it never copies artifacts into the main worktree.

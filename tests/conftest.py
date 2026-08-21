@@ -580,11 +580,16 @@ print(json.dumps({{
 }}), flush=True)
 print(json.dumps({{
     "type": "result",
-    "subtype": "success",
+    "subtype": "error" if prompt == "CURSOR_ERROR_WITH_RESPONSE" else "success",
     "duration_ms": 1500,
     "duration_api_ms": 1250,
-    "is_error": False,
+    "is_error": prompt == "CURSOR_ERROR_WITH_RESPONSE",
     "result": f"answer:{{prompt}}",
+    "error": (
+        "synthetic Cursor provider failure"
+        if prompt == "CURSOR_ERROR_WITH_RESPONSE"
+        else None
+    ),
     "session_id": session_id,
     "usage": {{
         "inputTokens": 100,
@@ -829,14 +834,14 @@ if prompt == "OPENCODE_TOOL_LOOP":
         "sessionID": session_id,
         "part": {{"type": "step-start"}},
     }}), flush=True)
-if prompt == "OPENCODE_ERROR":
+if prompt in {{"OPENCODE_ERROR", "OPENCODE_ERROR_WITH_RESPONSE"}}:
     print(json.dumps({{
         "type": "error",
         "timestamp": 1200,
         "sessionID": session_id,
         "error": {{"name": "ProviderError", "data": {{"message": "synthetic failure"}}}},
     }}), flush=True)
-else:
+if prompt != "OPENCODE_ERROR":
     print(json.dumps({{
         "type": "text",
         "timestamp": 1400,
@@ -976,6 +981,8 @@ if prompt.startswith("AGY_ERROR"):
         "response": None,
         "error": "synthetic agy failure",
     }})
+if prompt.startswith("AGY_ERROR_WITH_RESPONSE"):
+    result["response"] = f"answer:{{prompt}}"
 print(json.dumps({{"event": "result", "result": result}}), flush=True)
 """
     )
@@ -1230,7 +1237,11 @@ print(json.dumps({{
         "reasoning_output_tokens": 7,
     }},
     "completed": True,
-    "error": None,
+    "error": (
+        "synthetic dsh provider failure"
+        if prompt == "DSH_ERROR_WITH_RESPONSE"
+        else None
+    ),
 }}), flush=True)
 """
     )

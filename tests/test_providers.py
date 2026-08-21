@@ -98,9 +98,19 @@ def test_dsh_maps_none_effort_and_normalizes_failures(
         DeepSeekHarnessAdapter(os.fspath(fake_dsh)),
     )
     failed = runner.run(task="dsh-failure", prompt="FAIL", effort="none")
+    response = runner.run(
+        task="dsh-provider-error", prompt="DSH_ERROR_WITH_RESPONSE", effort="none"
+    )
 
     assert not failed.succeeded
     assert failed.error == "synthetic dsh failure"
+    assert failed.provider_error == "synthetic dsh failure"
+    assert response.status == "response_available_with_provider_error"
+    assert response.execution_completed
+    assert response.response_available
+    assert response.error is None
+    assert response.provider_error == "synthetic dsh provider failure"
+    assert response.final_message == "answer:DSH_ERROR_WITH_RESPONSE"
     scratch = repository / ".aop" / "scratch" / "dsh-failure"
     patch = next(scratch.glob("aop-dsh-*.cordis.yml"))
     assert 'reasoningEffort: "off"' in patch.read_text()
@@ -198,7 +208,11 @@ def test_grok_normalizes_failures_resume_identity_and_effort(
     assert not incomplete.succeeded
     assert incomplete.error == "Grok did not report a session ID"
     assert not max_turns.succeeded
-    assert max_turns.error == "Grok stopped with reason max_turn_requests"
+    assert max_turns.status == "response_available_with_provider_error"
+    assert max_turns.error is None
+    assert max_turns.provider_status == "max_turn_requests"
+    assert max_turns.provider_error == "Grok stopped with reason max_turn_requests"
+    assert max_turns.final_message == "answer:GROK_MAX_TURNS"
     assert not mismatched.succeeded
     assert mismatched.session_id is None
     assert "instead of the requested session" in mismatched.error
@@ -518,6 +532,23 @@ def test_cursor_rejects_effort_and_changed_resume_chat(
     assert "instead of the requested chat" in (resumed.error or "")
 
 
+def test_cursor_preserves_response_bearing_provider_errors(
+    repository: Path, fake_cursor: Path
+) -> None:
+    result = AgentRunner(
+        WorktreeManager.discover(repository),
+        CursorAdapter(os.fspath(fake_cursor)),
+    ).run(task="cursor-provider-error", prompt="CURSOR_ERROR_WITH_RESPONSE")
+
+    assert result.status == "response_available_with_provider_error"
+    assert result.execution_completed
+    assert result.response_available
+    assert result.error is None
+    assert result.provider_status == "error"
+    assert result.provider_error == "synthetic Cursor provider failure"
+    assert result.final_message == "answer:CURSOR_ERROR_WITH_RESPONSE"
+
+
 def test_cursor_workspace_sandbox_and_artifact(
     repository: Path, fake_cursor: Path
 ) -> None:
@@ -823,13 +854,25 @@ def test_opencode_accepts_short_zen_model_and_fails_closed_on_changed_resume(
 def test_opencode_reports_structured_provider_errors(
     repository: Path, fake_opencode: Path
 ) -> None:
-    result = AgentRunner(
+    runner = AgentRunner(
         WorktreeManager.discover(repository),
         OpenCodeAdapter(os.fspath(fake_opencode)),
-    ).run(task="opencode-error", prompt="OPENCODE_ERROR")
+    )
+    result = runner.run(task="opencode-error", prompt="OPENCODE_ERROR")
+    response = runner.run(
+        task="opencode-provider-error", prompt="OPENCODE_ERROR_WITH_RESPONSE"
+    )
 
     assert not result.succeeded
     assert result.error == "synthetic failure"
+    assert result.provider_error == "synthetic failure"
+    assert response.status == "response_available_with_provider_error"
+    assert response.execution_completed
+    assert response.response_available
+    assert response.error is None
+    assert response.provider_status == "error"
+    assert response.provider_error == "synthetic failure"
+    assert response.final_message == "answer:OPENCODE_ERROR_WITH_RESPONSE"
 
 
 def test_opencode_normalizes_multi_step_tool_loop(
@@ -1129,7 +1172,7 @@ def test_agy_requires_an_authenticated_source_profile(
     assert not (manager.state_dir / "runs").exists()
 
 
-def test_agy_terminal_error_status_fails_even_with_zero_exit(
+def test_agy_terminal_provider_error_with_response_is_classified_separately(
     repository: Path, fake_agy: Path
 ) -> None:
     runner = AgentRunner(
@@ -1138,13 +1181,41 @@ def test_agy_terminal_error_status_fails_even_with_zero_exit(
 
     result = runner.run(
         task="agy-error",
-        prompt="AGY_ERROR",
+        prompt="AGY_ERROR_WITH_RESPONSE",
         timeout_seconds=5,
     )
 
     assert result.exit_code == 0
+    assert result.execution_completed
+    assert result.response_available
     assert not result.succeeded
-    assert result.error == "synthetic agy failure"
+    assert result.status == "response_available_with_provider_error"
+    assert result.error is None
+    assert result.provider_status == "ERROR"
+    assert result.provider_error == "synthetic agy failure"
+    assert result.final_message == "answer:AGY_ERROR_WITH_RESPONSE"
+
+
+def test_agy_terminal_provider_error_without_response_remains_failed(
+    repository: Path, fake_agy: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), AgyAdapter(os.fspath(fake_agy))
+    )
+
+    result = runner.run(
+        task="agy-error-without-response",
+        prompt="AGY_ERROR",
+        timeout_seconds=5,
+    )
+
+    assert result.execution_completed
+    assert not result.response_available
+    assert not result.succeeded
+    assert result.status == "failed"
+    assert result.error == "agy terminal result did not include a response"
+    assert result.provider_status == "ERROR"
+    assert result.provider_error == "synthetic agy failure"
 
 
 def test_agy_rejects_an_unsupported_effort(repository: Path, fake_agy: Path) -> None:

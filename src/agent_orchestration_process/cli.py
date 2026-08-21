@@ -570,6 +570,12 @@ def _report_run(
     )
     if result.error:
         print(f"aop: {result.error}", file=sys.stderr)
+    if result.provider_error:
+        print(
+            f"aop: provider status {result.provider_status or 'unknown'}: "
+            f"{result.provider_error}",
+            file=sys.stderr,
+        )
     return _run_exit_code(result)
 
 
@@ -583,9 +589,11 @@ def _run_exit_code(result: RunResult) -> int:
 
 def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
     summary = manager.state_dir / "batches" / f"{result.batch_id}.json"
-    succeeded = sum(task.status == "succeeded" for task in result.tasks)
     print(
-        f"aop: batch_id={result.batch_id} succeeded={succeeded}/{len(result.tasks)} "
+        f"aop: batch_id={result.batch_id} "
+        f"succeeded={result.clean_successes}/{len(result.tasks)} "
+        f"responses_with_provider_errors={result.responses_with_provider_errors} "
+        f"without_response={result.runs_without_response} "
         f"summary={summary}",
         file=sys.stderr,
     )

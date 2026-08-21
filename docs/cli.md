@@ -133,7 +133,10 @@ base, model, inference provider, effort, mode, profile, timeout, artifacts, and 
 runs at most `--jobs` tasks concurrently and retains successful results when a sibling fails.
 
 Each batch writes `.aop/batches/<batch-id>.json` with results in task order. The command exits
-nonzero if any task fails.
+nonzero unless every task is a clean success. Terminal provider errors are recorded separately from
+execution failures. If the provider also returned a response, the task status is
+`response_available_with_provider_error` and the batch summary counts it separately from runs with
+no response.
 
 ## Checkpoint and integrate
 

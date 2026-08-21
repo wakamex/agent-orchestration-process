@@ -131,6 +131,8 @@ class RunResult:
     artifacts: tuple[RunArtifact, ...] = ()
     inputs: tuple[InputSnapshot, ...] = ()
     provider_duration_seconds: float | None = None
+    provider_status: str | None = None
+    provider_error: str | None = None
     usage_schema: str = TOKEN_USAGE_SCHEMA
 
     def __post_init__(self) -> None:
@@ -138,23 +140,54 @@ class RunResult:
             raise ValueError(f"unsupported token usage schema: {self.usage_schema}")
 
     @property
-    def succeeded(self) -> bool:
+    def execution_completed(self) -> bool:
         return (
             self.exit_code == 0
             and not self.timed_out
-            and self.error is None
             and self.session_id is not None
+        )
+
+    @property
+    def response_available(self) -> bool:
+        return self.final_message is not None
+
+    @property
+    def status(self) -> str:
+        if self.succeeded:
+            return "succeeded"
+        if (
+            self.execution_completed
+            and self.response_available
+            and self.provider_error is not None
+            and self.error is None
+        ):
+            return "response_available_with_provider_error"
+        return "failed"
+
+    @property
+    def succeeded(self) -> bool:
+        return (
+            self.execution_completed
+            and self.response_available
+            and self.error is None
+            and self.provider_error is None
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             **asdict(self),
+            "execution_completed": self.execution_completed,
+            "response_available": self.response_available,
+            "status": self.status,
             "succeeded": self.succeeded,
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> RunResult:
         fields = dict(value)
+        fields.pop("execution_completed", None)
+        fields.pop("response_available", None)
+        fields.pop("status", None)
         fields.pop("succeeded", None)
         fields.setdefault("mode", "agent")
         fields.setdefault("model", None)
@@ -162,6 +195,8 @@ class RunResult:
         fields.setdefault("time_to_first_event_seconds", None)
         fields.setdefault("time_to_first_response_seconds", None)
         fields.setdefault("provider_duration_seconds", None)
+        fields.setdefault("provider_status", None)
+        fields.setdefault("provider_error", None)
         usage_schema = fields.get("usage_schema")
         if usage_schema is None:
             fields["usage"] = _legacy_usage(

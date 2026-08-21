@@ -81,6 +81,10 @@ class BatchTaskResult:
     billing_route: str | None
     exit_code: int | None
     error: str | None
+    execution_completed: bool
+    response_available: bool
+    provider_status: str | None
+    provider_error: str | None
 
 
 @dataclass(frozen=True)
@@ -100,9 +104,27 @@ class BatchResult:
             task.status == "succeeded" for task in self.tasks
         )
 
+    @property
+    def clean_successes(self) -> int:
+        return sum(task.status == "succeeded" for task in self.tasks)
+
+    @property
+    def responses_with_provider_errors(self) -> int:
+        return sum(
+            task.status == "response_available_with_provider_error"
+            for task in self.tasks
+        )
+
+    @property
+    def runs_without_response(self) -> int:
+        return sum(not task.response_available for task in self.tasks)
+
     def to_dict(self) -> dict[str, object]:
         return {
             **asdict(self),
+            "clean_successes": self.clean_successes,
+            "responses_with_provider_errors": self.responses_with_provider_errors,
+            "runs_without_response": self.runs_without_response,
             "succeeded": self.succeeded,
         }
 
@@ -198,6 +220,10 @@ class BatchRunner:
                     billing_route=None,
                     exit_code=None,
                     error="batch interrupted before launch",
+                    execution_completed=False,
+                    response_available=False,
+                    provider_status=None,
+                    provider_error=None,
                 )
 
         result = BatchResult(
@@ -249,11 +275,15 @@ class BatchRunner:
                 billing_route=None,
                 exit_code=None,
                 error=str(error),
+                execution_completed=False,
+                response_available=False,
+                provider_status=None,
+                provider_error=None,
             )
         return BatchTaskResult(
             task=task.id,
             agent=task.agent,
-            status="succeeded" if result.succeeded else "failed",
+            status=result.status,
             mode=result.mode,
             model=result.model,
             inference_provider=result.inference_provider,
@@ -276,6 +306,10 @@ class BatchRunner:
             billing_route=result.billing.route,
             exit_code=result.exit_code,
             error=result.error,
+            execution_completed=result.execution_completed,
+            response_available=result.response_available,
+            provider_status=result.provider_status,
+            provider_error=result.provider_error,
         )
 
     def _write_result(self, result: BatchResult) -> None:

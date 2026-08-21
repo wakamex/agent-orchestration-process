@@ -214,6 +214,59 @@ prompt = "FAIL"
     assert all(task["run_id"] for task in summary["tasks"])
 
 
+def test_batch_separates_provider_errors_with_and_without_responses(
+    repository: Path,
+    fake_agy: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_AGY_BIN", os.fspath(fake_agy))
+    manifest = repository / "agy-errors.toml"
+    manifest.write_text(
+        """
+[[tasks]]
+id = "clean"
+agent = "agy"
+prompt = "OK"
+
+[[tasks]]
+id = "response"
+agent = "agy"
+prompt = "AGY_ERROR_WITH_RESPONSE"
+
+[[tasks]]
+id = "no-response"
+agent = "agy"
+prompt = "AGY_ERROR"
+"""
+    )
+    manager = WorktreeManager.discover(repository)
+
+    result = BatchRunner(manager, jobs=1).run(manifest)
+
+    assert [task.status for task in result.tasks] == [
+        "succeeded",
+        "response_available_with_provider_error",
+        "failed",
+    ]
+    assert result.clean_successes == 1
+    assert result.responses_with_provider_errors == 1
+    assert result.runs_without_response == 1
+    assert result.tasks[1].provider_status == "ERROR"
+    assert result.tasks[1].provider_error == "synthetic agy failure"
+    assert result.tasks[2].error == "agy terminal result did not include a response"
+
+    summary = json.loads(
+        (manager.state_dir / "batches" / f"{result.batch_id}.json").read_text()
+    )
+    assert summary["clean_successes"] == 1
+    assert summary["responses_with_provider_errors"] == 1
+    assert summary["runs_without_response"] == 1
+    assert summary["tasks"][1]["execution_completed"] is True
+    assert summary["tasks"][1]["response_available"] is True
+    assert summary["tasks"][1]["provider_status"] == "ERROR"
+    assert summary["tasks"][1]["provider_error"] == "synthetic agy failure"
+
+
 def test_batch_can_mix_all_non_codex_providers(
     repository: Path,
     fake_claude: Path,

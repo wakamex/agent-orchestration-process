@@ -927,11 +927,11 @@ class GrokAdapter:
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
-        elif parsed["error"]:
-            error = parsed["error"]
         elif capture.exit_code:
             error = (
-                capture.stderr.strip() or f"Grok exited with status {capture.exit_code}"
+                capture.stderr.strip()
+                or parsed["error"]
+                or f"Grok exited with status {capture.exit_code}"
             )
         elif resume_error:
             error = resume_error
@@ -974,6 +974,8 @@ class GrokAdapter:
             calculated_cost=estimate_api_cost(model, usage, providers=("xai",)),
             provider_reported_cost=reported_cost,
             billing=billing,
+            provider_status=parsed["status"],
+            provider_error=parsed["error"],
         )
 
     def _command(
@@ -1025,6 +1027,7 @@ class GrokAdapter:
         final_message = None
         response_parts: list[str] = []
         error = None
+        status = None
         completed = False
         usage = TokenUsage()
         reported_cost = None
@@ -1085,6 +1088,7 @@ class GrokAdapter:
             if event_type == "end":
                 completed = True
                 stop_reason = event.get("stopReason")
+                status = stop_reason if isinstance(stop_reason, str) else None
                 if stop_reason != "end_turn":
                     error = (
                         f"Grok stopped with reason {stop_reason}"
@@ -1092,8 +1096,10 @@ class GrokAdapter:
                         else "Grok terminal event did not report a stop reason"
                     )
             elif isinstance(event.get("message"), str):
+                status = "error"
                 error = event["message"]
             else:
+                status = "error"
                 error = "Grok turn failed"
 
         if response_parts:
@@ -1106,6 +1112,7 @@ class GrokAdapter:
             "reported_cost": reported_cost,
             "completed": completed,
             "error": error,
+            "status": status,
         }
 
     @staticmethod
@@ -1227,8 +1234,6 @@ class CursorAdapter:
                 )
         elif reported_session_id is None:
             error = "Cursor Agent result did not report a chat ID"
-        elif parsed["error"]:
-            error = parsed["error"]
         elif final_message is None:
             error = "Cursor Agent did not emit a final response"
         else:
@@ -1264,6 +1269,8 @@ class CursorAdapter:
                 detected_by="Cursor Agent billing contract",
             ),
             provider_duration_seconds=parsed["duration_seconds"],
+            provider_status=parsed["status"],
+            provider_error=parsed["error"],
         )
 
     def _command(self, request: RunRequest, worktree: Worktree) -> list[str]:
@@ -1304,6 +1311,7 @@ class CursorAdapter:
         session_id = None
         final_message = None
         error = None
+        status = None
         duration_seconds = None
         usage = TokenUsage()
         has_result = False
@@ -1323,6 +1331,8 @@ class CursorAdapter:
             result = event.get("result")
             final_message = result if isinstance(result, str) else None
             if event.get("is_error") or event.get("subtype") != "success":
+                subtype = event.get("subtype")
+                status = subtype if isinstance(subtype, str) else "error"
                 detail = event.get("error")
                 error = (
                     detail
@@ -1352,6 +1362,7 @@ class CursorAdapter:
             "session_id": session_id,
             "final_message": final_message,
             "error": error,
+            "status": status,
             "duration_seconds": duration_seconds,
             "usage": usage,
             "has_result": has_result,
@@ -1649,10 +1660,11 @@ class OpenCodeAdapter:
             )
         elif resume_error:
             error = resume_error
-        elif parsed["error"]:
-            error = parsed["error"]
         elif not parsed["has_finish"]:
-            error = "OpenCode did not emit a terminal step_finish event"
+            error = (
+                parsed["error"]
+                or "OpenCode did not emit a terminal step_finish event"
+            )
         elif reported_session_id is None:
             error = "OpenCode result did not report a session ID"
         elif final_message is None:
@@ -1690,6 +1702,8 @@ class OpenCodeAdapter:
             provider_reported_cost=reported_cost,
             billing=billing,
             provider_duration_seconds=parsed["duration_seconds"],
+            provider_status=parsed["status"],
+            provider_error=parsed["error"],
         )
 
     @staticmethod
@@ -1775,6 +1789,7 @@ class OpenCodeAdapter:
         final_message = None
         current_message_parts: list[str] = []
         error = None
+        status = None
         has_finish = False
         input_tokens = 0
         cached_input_tokens = 0
@@ -1816,6 +1831,7 @@ class OpenCodeAdapter:
                 if isinstance(text, str) and text:
                     current_message_parts.append(text)
             elif event_type == "error":
+                status = "error"
                 error = OpenCodeAdapter._error_message(event.get("error"))
             elif event_type == "step_finish" and isinstance(part, dict):
                 has_finish = True
@@ -1861,6 +1877,7 @@ class OpenCodeAdapter:
             "session_id": session_id,
             "final_message": final_message,
             "error": error,
+            "status": status,
             "has_finish": has_finish,
             "usage": usage,
             "reported_cost": reported_cost,
@@ -1959,8 +1976,8 @@ class AgyAdapter:
                 )
         elif reported_session_id is None:
             error = "agy result did not report a conversation ID"
-        elif parsed["error"]:
-            error = parsed["error"]
+        elif final_message is None:
+            error = "agy terminal result did not include a response"
         else:
             error = None
         model = parsed["model"] or request.model
@@ -1995,6 +2012,8 @@ class AgyAdapter:
                 detected_by="Antigravity authenticated profile",
             ),
             provider_duration_seconds=parsed["duration_seconds"],
+            provider_status=parsed["status"],
+            provider_error=parsed["error"],
         )
 
     def _command(self, request: RunRequest, gemini_dir: Path) -> list[str]:
@@ -2046,6 +2065,7 @@ class AgyAdapter:
         model = None
         final_message = None
         error = None
+        status = None
         duration_seconds = None
         usage = TokenUsage()
         has_result = False
@@ -2100,6 +2120,7 @@ class AgyAdapter:
             "model": model,
             "final_message": final_message,
             "error": error,
+            "status": status if isinstance(status, str) else None,
             "duration_seconds": duration_seconds,
             "usage": usage,
             "has_result": has_result,
@@ -2569,11 +2590,11 @@ class DeepSeekHarnessAdapter:
                     f"dsh resumed as session {reported_session_id} instead of the "
                     f"requested session {request.session_id}"
                 )
-        elif parsed["error"]:
-            error = parsed["error"]
         elif capture.exit_code:
             error = (
-                capture.stderr.strip() or f"dsh exited with status {capture.exit_code}"
+                capture.stderr.strip()
+                or parsed["error"]
+                or f"dsh exited with status {capture.exit_code}"
             )
         elif reported_session_id is None:
             error = "dsh did not report a session ID"
@@ -2617,6 +2638,7 @@ class DeepSeekHarnessAdapter:
                 ),
                 detected_by="DeepSeek Harness provider contract",
             ),
+            provider_error=parsed["error"],
         )
 
     @staticmethod

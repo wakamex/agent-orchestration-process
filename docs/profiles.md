@@ -36,6 +36,12 @@ All profiles currently retain native host networking because the supported provi
 Local network services and provider-side account state can therefore remain context channels.
 `sealed` is a filesystem and local-state boundary, not complete information isolation.
 
+`--no-web` adds a separate model-capability boundary. It leaves provider inference traffic enabled
+but denies model-controlled external retrieval through native web tools, browsers, extensions,
+subagents, and shell processes. AOP records the adapter-specific enforcement and effective tool
+allowlist in `request.json`. Unsupported adapters fail before dispatch rather than receiving a
+prompt-only prohibition.
+
 ## Inspect the effective profile
 
 Inspect a declared profile or preview a run without dispatching it:
@@ -50,6 +56,8 @@ Every dispatched run persists its compiled boundary in `request.json`. It record
 workspace access, guest paths, writable-path scope, input mode, environment and credential
 exposure, inherited and generated instruction policy, namespaces, network limitations, provider
 executable hash, and controller-owned state locations.
+The record also includes the requested and effective model capabilities and their enforcement
+mechanisms.
 
 Credential values are redacted from recorded commands and results, but the selected provider and
 its shell tools can read credentials exposed through the environment or private `/state`. A sealed

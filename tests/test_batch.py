@@ -26,6 +26,7 @@ model = "test-model"
 mode = "agent"
 effort = "xhigh"
 profile = "edit"
+no_web = false
 timeout = 30
 artifacts = ["paper.md"]
 inputs = ["sources", "ledger.md"]
@@ -46,6 +47,7 @@ prompt = "Add tests"
     assert tasks[0].mode == "agent"
     assert tasks[0].effort == "xhigh"
     assert tasks[0].profile == "edit"
+    assert tasks[0].no_web is False
     assert tasks[0].timeout_seconds == 30
     assert tasks[0].artifacts == ("paper.md",)
     assert tasks[0].input_paths == (

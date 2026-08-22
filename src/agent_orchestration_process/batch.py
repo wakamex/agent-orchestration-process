@@ -33,6 +33,7 @@ TASK_FIELDS = {
     "mode",
     "effort",
     "profile",
+    "no_web",
     "timeout",
     "artifacts",
     "inputs",
@@ -55,6 +56,7 @@ class BatchTask:
     effort: str | None = None
     mode: str = "agent"
     profile: str = "edit"
+    no_web: bool = False
     timeout_seconds: float | None = None
     artifacts: tuple[str, ...] = ()
     input_paths: tuple[str, ...] = ()
@@ -144,10 +146,10 @@ class BatchRunner:
         report = progress or (lambda _message: None)
         manifest = manifest_path.resolve()
         tasks = load_manifest(manifest)
-        for execution_profile, agent in sorted(
-            {(task.profile, task.agent) for task in tasks}
+        for execution_profile, agent, no_web in sorted(
+            {(task.profile, task.agent, task.no_web) for task in tasks}
         ):
-            policy = resolve_policy(execution_profile)
+            policy = resolve_policy(execution_profile, provider=agent, no_web=no_web)
             report(
                 f"policy {execution_profile}/{agent}: "
                 f"workspace={policy.workspace['access']} "
@@ -250,6 +252,7 @@ class BatchRunner:
                 effort=task.effort,
                 mode=task.mode,
                 profile=task.profile,
+                no_web=task.no_web,
                 timeout_seconds=task.timeout_seconds,
                 artifacts=task.artifacts,
                 input_paths=task.input_paths,
@@ -400,6 +403,9 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
     execution_profile = _optional_string(value, "profile", label) or "edit"
     if execution_profile not in PROFILES:
         raise AOPError(f"{label}.profile must be one of: {', '.join(PROFILES)}")
+    no_web = value.get("no_web", False)
+    if not isinstance(no_web, bool):
+        raise AOPError(f"{label}.no_web must be a boolean")
 
     timeout = value.get("timeout")
     if timeout is not None:
@@ -440,6 +446,7 @@ def _parse_task(value: object, index: int, manifest_dir: Path) -> BatchTask:
         effort=effort,
         mode=mode,
         profile=execution_profile,
+        no_web=no_web,
         timeout_seconds=timeout,
         artifacts=normalize_artifacts(artifacts),
         input_paths=tuple(resolved_input_paths),

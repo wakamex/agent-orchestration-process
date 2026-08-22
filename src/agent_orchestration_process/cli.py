@@ -128,6 +128,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="preview the intended boundary without compiling or dispatching it",
     )
+    run.add_argument(
+        "--no-web",
+        action="store_true",
+        help="deny model-controlled external retrieval or fail before dispatch",
+    )
     run.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
     run.add_argument(
         "--json", action="store_true", help="print the normalized result as JSON"
@@ -278,6 +283,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise AOPError("TASK is required unless --profile sealed is selected")
             preview = resolve_policy(
                 args.profile,
+                provider=args.agent,
+                no_web=args.no_web,
                 input_names=tuple(Path(path).name for path in args.input_paths),
             ).to_dict()
             preview["provider"] = args.agent
@@ -303,6 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 effort=args.effort,
                 mode=args.mode,
                 profile=args.profile,
+                no_web=args.no_web,
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
                 input_paths=args.input_paths,
@@ -411,6 +419,7 @@ def _report_policy(
     instructions = policy["instructions"]
     network = policy["network"]
     environment = policy["environment"]
+    model_capabilities = policy["model_capabilities"]
     assert isinstance(workspace, dict)
     assert isinstance(repository, dict)
     assert isinstance(host, dict)
@@ -418,6 +427,7 @@ def _report_policy(
     assert isinstance(instructions, dict)
     assert isinstance(network, dict)
     assert isinstance(environment, dict)
+    assert isinstance(model_capabilities, dict)
     print(f"{prefix}profile: {policy['profile']}", file=stream)
     print(
         f"{prefix}repository: {repository['access']} at "
@@ -452,6 +462,18 @@ def _report_policy(
         f"{prefix}identity: {policy['identity']}; namespaces: "
         f"{', '.join(policy['namespaces']) or 'native'}; "
         f"capabilities: {policy['capabilities']}",
+        file=stream,
+    )
+    requested_capabilities = model_capabilities["requested"]
+    effective_capabilities = model_capabilities["effective"]
+    assert isinstance(requested_capabilities, dict)
+    assert isinstance(effective_capabilities, dict)
+    print(
+        f"{prefix}external retrieval: requested "
+        f"{requested_capabilities['external_retrieval']}; effective "
+        f"{effective_capabilities['external_retrieval']}; tool network egress: "
+        f"{effective_capabilities['tool_network_egress']}; model tools: "
+        f"{effective_capabilities['model_tools']}",
         file=stream,
     )
     print(

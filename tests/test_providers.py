@@ -1501,6 +1501,157 @@ def test_hermes_participant_mode_is_tool_free_bounded_and_stable_across_resume(
     assert resumed_request["mode"] == "participant"
 
 
+def test_no_web_enforcement_is_recorded_for_supported_harnesses(
+    repository: Path,
+    fake_codex: Path,
+    fake_claude: Path,
+    fake_opencode: Path,
+    fake_grok: Path,
+    fake_hermes: Path,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    cases = [
+        (
+            CodexAdapter(os.fspath(fake_codex)),
+            "codex",
+            {"--no-tools", "--ignore-user-config", "--ignore-rules"},
+        ),
+        (
+            ClaudeAdapter(os.fspath(fake_claude)),
+            "claude",
+            {"--safe-mode", "--no-chrome", "--strict-mcp-config", "--tools"},
+        ),
+        (
+            OpenCodeAdapter(os.fspath(fake_opencode)),
+            "opencode",
+            {"--pure"},
+        ),
+        (
+            GrokAdapter(os.fspath(fake_grok)),
+            "grok",
+            {"--disable-web-search", "--no-subagents", "--tools", "MCPTool"},
+        ),
+        (
+            HermesAdapter(os.fspath(fake_hermes)),
+            "hermes",
+            {"--safe-mode", "--toolsets", "file,todo"},
+        ),
+    ]
+
+    for adapter, provider, expected_arguments in cases:
+        result = AgentRunner(manager, adapter).run(
+            task=f"no-web-{provider}",
+            prompt="test",
+            no_web=True,
+        )
+
+        assert result.succeeded
+        assert expected_arguments <= set(result.command)
+        request = json.loads(
+            (manager.state_dir / "runs" / result.run_id / "request.json").read_text()
+        )
+        capabilities = request["effective_policy"]["model_capabilities"]
+        assert request["no_web"] is True
+        assert capabilities["requested"]["external_retrieval"] == "denied"
+        assert capabilities["effective"]["external_retrieval"] == "denied"
+        assert capabilities["effective"]["tool_network_egress"] == "denied"
+        assert capabilities["effective"]["inference_network"] == "allowed"
+        assert capabilities["enforcement"]
+
+        if provider in {"claude", "hermes"}:
+            assert request["effective_policy"]["instructions"]["inherited_local"] == (
+                "none"
+            )
+            assert request["effective_policy"]["instruction_sources"] == []
+
+        if provider == "grok":
+            state = Path(request["effective_policy"]["controller"]["provider_state"])
+            grok_home = state / "grok" / "home"
+            assert grok_home.joinpath("auth.json").is_file()
+            assert not grok_home.joinpath("config.toml").exists()
+
+
+@pytest.mark.parametrize("provider", ["cursor", "devin", "agy", "dsh"])
+def test_no_web_rejects_unsupported_harness_before_creating_a_worktree(
+    repository: Path,
+    fake_cursor: Path,
+    fake_devin: Path,
+    fake_agy: Path,
+    fake_dsh: Path,
+    provider: str,
+) -> None:
+    binaries = {
+        "cursor": fake_cursor,
+        "devin": fake_devin,
+        "agy": fake_agy,
+        "dsh": fake_dsh,
+    }
+    adapters = {
+        "cursor": CursorAdapter,
+        "devin": DevinAdapter,
+        "agy": AgyAdapter,
+        "dsh": DeepSeekHarnessAdapter,
+    }
+    manager = WorktreeManager.discover(repository)
+
+    with pytest.raises(AOPError, match=f"{provider} cannot enforce --no-web"):
+        AgentRunner(manager, adapters[provider](os.fspath(binaries[provider]))).run(
+            task=f"unsupported-no-web-{provider}",
+            prompt="test",
+            no_web=True,
+        )
+
+    assert manager.list() == []
+
+
+def test_no_web_rejects_grok_host_profile_before_creating_a_worktree(
+    repository: Path, fake_grok: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+
+    with pytest.raises(
+        AOPError, match="grok cannot enforce --no-web with the host profile"
+    ):
+        AgentRunner(manager, GrokAdapter(os.fspath(fake_grok))).run(
+            task="unsupported-no-web-grok-host",
+            prompt="test",
+            profile="host",
+            no_web=True,
+        )
+
+    assert manager.list() == []
+
+
+def test_no_web_is_inherited_by_resume_with_the_same_private_state(
+    repository: Path, fake_codex: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+    first = runner.run(task="no-web-resume", prompt="first", no_web=True)
+    resumed = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).resume(
+        run_id=first.run_id, prompt="second"
+    )
+
+    assert resumed.succeeded
+    assert "--no-tools" in resumed.command
+    first_request = json.loads(
+        (manager.state_dir / "runs" / first.run_id / "request.json").read_text()
+    )
+    resumed_request = json.loads(
+        (manager.state_dir / "runs" / resumed.run_id / "request.json").read_text()
+    )
+    assert resumed_request["no_web"] is True
+    assert (
+        resumed_request["effective_policy"]["controller"]["provider_state"]
+        == first_request["effective_policy"]["controller"]["provider_state"]
+    )
+    provider_state = Path(
+        resumed_request["effective_policy"]["controller"]["provider_state"]
+    )
+    manager.remove("no-web-resume")
+    assert not provider_state.exists()
+
+
 @pytest.mark.parametrize(
     ("adapter", "provider"),
     [

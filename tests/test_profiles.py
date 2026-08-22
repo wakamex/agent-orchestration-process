@@ -278,6 +278,37 @@ def test_dry_run_does_not_create_a_task_worktree(
     assert WorktreeManager.discover(repository).list() == []
 
 
+def test_cli_no_web_dry_run_reports_effective_tool_policy_without_state(
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(repository)
+
+    assert (
+        main(
+            [
+                "run",
+                "preview",
+                "--agent",
+                "codex",
+                "--no-web",
+                "--prompt",
+                "inspect",
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    policy = json.loads(capsys.readouterr().out)
+    capabilities = policy["model_capabilities"]
+    assert capabilities["requested"]["external_retrieval"] == "denied"
+    assert capabilities["effective"]["external_retrieval"] == "denied"
+    assert capabilities["effective"]["model_tools"] == "denied"
+    assert WorktreeManager.discover(repository).list() == []
+
+
 @pytest.mark.parametrize(
     ("provider", "fixture"),
     [

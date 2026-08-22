@@ -90,6 +90,10 @@ All profiles currently retain native network connectivity because the supported 
 it. See [Execution profiles](docs/profiles.md) for the exact filesystem, instruction, environment,
 credential, input, and output boundaries.
 
+Use `--no-web` to deny model-controlled external retrieval while retaining the harness's inference
+connection. AOP records the effective tool policy and rejects harnesses that cannot enforce the
+boundary. See [CLI guide](docs/cli.md#disable-model-controlled-web-access) for current support.
+
 ## Results and usage
 
 Every adapter records the same result shape, including provider session identity when available,

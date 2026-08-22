@@ -396,6 +396,8 @@ class CodexAdapter:
             command.extend(["--model", request.model])
         if request.effort and not request.session_id:
             command.extend(["--config", f"model_reasoning_effort={request.effort}"])
+        if request.no_web:
+            command.extend(["--no-tools", "--ignore-user-config", "--ignore-rules"])
         if request.session_id:
             command.extend(["resume", request.session_id, "-"])
         else:
@@ -773,6 +775,18 @@ class ClaudeAdapter:
             "--add-dir",
             os.fspath(worktree.path),
         ]
+        if request.no_web:
+            command.extend(
+                [
+                    "--safe-mode",
+                    "--no-chrome",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    '{"mcpServers":{}}',
+                    "--tools",
+                    "Read,Edit,Write,Glob,Grep",
+                ]
+            )
         if request.session_id:
             command.extend(["--resume", request.session_id])
         else:
@@ -882,7 +896,7 @@ class GrokAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        _prepare_grok_environment(environment)
+        _prepare_grok_environment(environment, no_web=request.no_web)
         prompt_path = (
             Path(environment["AOP_SCRATCH_DIR"]) / f".grok-prompt-{request.run_id}.txt"
         )
@@ -1004,6 +1018,21 @@ class GrokAdapter:
             command.extend(["--model", request.model])
         if request.effort:
             command.extend(["--reasoning-effort", request.effort])
+        if request.no_web:
+            command.extend(
+                [
+                    "--disable-web-search",
+                    "--no-subagents",
+                    "--tools",
+                    "read_file,search_replace,grep,list_dir,todo_write",
+                    "--deny",
+                    "Bash",
+                    "--deny",
+                    "WebFetch",
+                    "--deny",
+                    "MCPTool",
+                ]
+            )
         if request.session_id:
             command.extend(["--resume", request.session_id])
         return command
@@ -1616,6 +1645,8 @@ class OpenCodeAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
+        if request.no_web:
+            environment["OPENCODE_PERMISSION"] = json.dumps({"*": "deny"})
         command = _provider_command(
             self._command(request, worktree), request, worktree, environment
         )
@@ -1763,6 +1794,8 @@ class OpenCodeAdapter:
             "--dir",
             os.fspath(worktree.path),
         ]
+        if request.no_web:
+            command.append("--pure")
         if request.model:
             command.extend(["--model", request.model])
         if request.effort:
@@ -2282,6 +2315,8 @@ class HermesAdapter:
                     "1",
                 ]
             )
+        elif request.no_web:
+            command.extend(["--safe-mode", "--toolsets", "file,todo", "--yolo"])
         else:
             command.extend(["--yolo", "--accept-hooks"])
         command.extend(["--source", "tool"])
@@ -3050,6 +3085,7 @@ def _guest_environment(
         "GROK_HOME",
         "HERMES_HOME",
         "HERMES_REAL_HOME",
+        "OPENCODE_PERMISSION",
         "AOP_INPUT_MANIFEST",
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
@@ -3292,10 +3328,12 @@ def _prepare_codex_environment(environment: dict[str, str]) -> None:
     environment["CODEX_HOME"] = os.fspath(destination)
 
 
-def _prepare_grok_environment(environment: dict[str, str]) -> None:
+def _prepare_grok_environment(
+    environment: dict[str, str], *, no_web: bool = False
+) -> None:
     source = _grok_source_home(environment)
     destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "grok" / "home"
-    _prepare_grok_state(source, destination, sealed=_sealed(environment))
+    _prepare_grok_state(source, destination, sealed=_sealed(environment) or no_web)
     environment["GROK_HOME"] = os.fspath(destination)
 
 
@@ -4195,6 +4233,7 @@ class AgentRunner:
         effort: str | None = None,
         mode: str = "agent",
         profile: str = "edit",
+        no_web: bool = False,
         timeout_seconds: float | None = None,
         artifacts: Sequence[str] = (),
         input_paths: Sequence[str | os.PathLike[str]] = (),
@@ -4203,6 +4242,7 @@ class AgentRunner:
         self._validate_inference_provider(inference_provider, model)
         if profile not in PROFILES:
             raise AOPError(f"unknown execution profile: {profile}")
+        self._validate_no_web(no_web, mode, profile)
         model, effort = self.adapter.normalize_options(model, effort)
         request = self._request(
             task=task,
@@ -4213,6 +4253,7 @@ class AgentRunner:
             effort=effort,
             mode=mode,
             profile=profile,
+            no_web=no_web,
             timeout_seconds=timeout_seconds,
             artifacts=artifacts,
         )
@@ -4242,6 +4283,9 @@ class AgentRunner:
                 )
             self.adapter = adapter_for(parent_request.provider)
         self._validate_mode(parent_request.mode)
+        self._validate_no_web(
+            parent_request.no_web, parent_request.mode, parent_request.profile
+        )
         if not parent_result.session_id:
             raise AOPError(f"run has no resumable agent session: {run_id}")
         _task_lock_held = _task_lock_held or (
@@ -4302,6 +4346,7 @@ class AgentRunner:
             effort=parent_request.effort,
             mode=parent_request.mode,
             profile=parent_request.profile,
+            no_web=parent_request.no_web,
             timeout_seconds=(
                 timeout_seconds
                 if timeout_seconds is not None
@@ -4349,10 +4394,16 @@ class AgentRunner:
         input_provenance: Sequence[str] | None = None,
     ) -> RunResult:
         parent_controller: dict[str, object] = {}
-        if request.profile == "sealed" and request.parent_run_id:
+        if (request.profile == "sealed" or request.no_web) and request.parent_run_id:
             parent = self.store.load_request(request.parent_run_id)
             parent_controller = parent.effective_policy.get("controller", {})
-        state_key = request.run_id if request.profile == "sealed" else request.task
+        state_key = (
+            request.run_id
+            if request.profile == "sealed"
+            else f"{request.task}/no-web"
+            if request.no_web
+            else request.task
+        )
         runtime_dir = (
             self.manager.sealed_runtime_dir
             if request.profile == "sealed"
@@ -4427,6 +4478,8 @@ class AgentRunner:
         )
         effective_policy = resolve_policy(
             request.profile,
+            provider=request.provider,
+            no_web=request.no_web,
             workspace_host_path=(
                 worktree.path if request.profile in {"edit", "review", "host"} else None
             ),
@@ -4446,8 +4499,10 @@ class AgentRunner:
             )
         effective_policy["controller"] = controller_policy
         effective_policy["provider_runtime"] = provider_runtime_record(self.adapter)
-        effective_policy["instruction_sources"] = _instruction_sources(
-            request, worktree, os.environ
+        effective_policy["instruction_sources"] = (
+            []
+            if effective_policy["instructions"]["inherited_local"] == "none"
+            else _instruction_sources(request, worktree, os.environ)
         )
         effective_policy["environment"]["inherited_names"] = sorted(
             (
@@ -4550,6 +4605,7 @@ class AgentRunner:
         effort: str | None,
         mode: str,
         profile: str,
+        no_web: bool,
         timeout_seconds: float | None,
         session_id: str | None = None,
         parent_run_id: str | None = None,
@@ -4566,6 +4622,7 @@ class AgentRunner:
             inference_provider=inference_provider,
             effort=effort,
             profile=profile,
+            no_web=no_web,
             effective_policy={},
             timeout_seconds=timeout_seconds,
             session_id=session_id,
@@ -4580,6 +4637,11 @@ class AgentRunner:
             raise AOPError(f"unknown agent mode: {mode}")
         if mode not in self.adapter.modes:
             raise AOPError(f"{self.adapter.provider} does not support {mode} mode")
+
+    def _validate_no_web(self, no_web: bool, mode: str, profile: str) -> None:
+        if no_web and mode == "participant":
+            raise AOPError("--no-web is not supported with participant mode")
+        resolve_policy(profile, provider=self.adapter.provider, no_web=no_web)
 
     def _validate_inference_provider(
         self, inference_provider: str | None, model: str | None

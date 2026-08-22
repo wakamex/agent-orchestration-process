@@ -22,6 +22,27 @@ Use `aop models` to inspect installed or configured inventories and see whether 
 the authenticated harness, an installed default, or AOP's catalog. Exact resume retains the original
 harness, model, effort, inference provider, mode, and execution profile.
 
+## Enforced no-web support
+
+`aop run --no-web` keeps inference traffic available while denying model-controlled external
+retrieval. Enforcement differs because the harnesses expose different native control surfaces.
+
+| Harness | Effective no-web policy |
+| --- | --- |
+| Codex | All model tools disabled; user config and rules ignored. |
+| Claude Code | Local file-tool allowlist; safe mode, Chrome, and MCP restrictions enabled. |
+| OpenCode | All model tool calls denied; external plugins disabled. |
+| Grok Build | Isolated profiles only; local file-tool allowlist; native web, subagent, shell, fetch, and MCP routes denied; authentication-only state. |
+| Hermes | `file` and `todo` toolsets only; safe mode disables customizations and MCP. |
+| Cursor Agent | Unsupported; the run fails before dispatch. |
+| Devin CLI | Unsupported; the run fails before dispatch. |
+| Antigravity | Unsupported; the run fails before dispatch. |
+| DeepSeek Harness | Unsupported; the run fails before dispatch. |
+
+The complete effective policy and adapter mechanisms are retained in each run's `request.json`.
+Exact resumes inherit the policy. AOP never substitutes a prompt instruction for missing
+enforcement.
+
 ## Authentication and private state
 
 Authenticate with the native harness before using it through AOP. For isolated profiles, AOP copies

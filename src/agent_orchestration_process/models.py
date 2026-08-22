@@ -46,6 +46,7 @@ class RunRequest:
     inference_provider: str | None
     effort: str | None
     profile: str
+    no_web: bool
     effective_policy: dict[str, Any]
     timeout_seconds: float | None
     session_id: str | None
@@ -62,6 +63,7 @@ class RunRequest:
         fields = dict(value)
         fields.setdefault("mode", "agent")
         fields.setdefault("inference_provider", None)
+        fields.setdefault("no_web", False)
         fields.setdefault("effective_policy", {})
         fields["artifacts"] = tuple(fields.get("artifacts", ()))
         fields["inputs"] = tuple(

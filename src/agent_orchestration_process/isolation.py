@@ -42,6 +42,7 @@ class ResolvedPolicy:
     identity: str
     namespaces: tuple[str, ...]
     capabilities: str
+    model_capabilities: dict[str, object]
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -105,10 +106,18 @@ def profile(name: str) -> Profile:
 def resolve_policy(
     name: str,
     *,
+    provider: str | None = None,
+    no_web: bool = False,
     workspace_host_path: Path | None = None,
     input_names: tuple[str, ...] = (),
 ) -> ResolvedPolicy:
     selected = profile(name)
+    model_capabilities = resolve_model_capabilities(
+        provider, profile=name, no_web=no_web
+    )
+    inherited_instructions = (
+        "none" if no_web and provider in {"claude", "hermes"} else selected.instructions
+    )
     workspace_visible = selected.workspace_access != "none"
     workspace = {
         "access": selected.workspace_access,
@@ -138,7 +147,7 @@ def resolve_policy(
     if selected.host_access == "native":
         writable_scopes = {"native host filesystem": "native"}
     return ResolvedPolicy(
-        schema_version=1,
+        schema_version=2,
         profile=name,
         repository={
             "access": repository_access,
@@ -226,7 +235,7 @@ def resolve_policy(
             "recorded_values": "redacted",
         },
         instructions={
-            "inherited_local": selected.instructions,
+            "inherited_local": inherited_instructions,
             "provider_builtin": "present",
             "aop_generated": "input-and-artifact-contract-when-needed",
         },
@@ -244,8 +253,105 @@ def resolve_policy(
             () if selected.host_access == "native" else ("mount", "pid", "ipc", "uts")
         ),
         capabilities="native" if selected.host_access == "native" else "none",
+        model_capabilities=model_capabilities,
     )
 
 
 def explain_profile(name: str) -> dict[str, object]:
     return resolve_policy(name).to_dict()
+
+
+_NO_WEB_POLICIES: dict[str, dict[str, object]] = {
+    "codex": {
+        "model_tools": "denied",
+        "allowed_toolsets": [],
+        "enforcement": [
+            "codex --no-tools",
+            "codex --ignore-user-config",
+            "codex --ignore-rules",
+        ],
+    },
+    "claude": {
+        "model_tools": "allowlist",
+        "allowed_toolsets": ["Read", "Edit", "Write", "Glob", "Grep"],
+        "enforcement": [
+            "claude --tools allowlist",
+            "claude --safe-mode",
+            "claude --no-chrome",
+            "claude --strict-mcp-config",
+        ],
+    },
+    "grok": {
+        "model_tools": "allowlist",
+        "allowed_toolsets": [
+            "read_file",
+            "search_replace",
+            "grep",
+            "list_dir",
+            "todo_write",
+        ],
+        "enforcement": [
+            "grok --tools allowlist",
+            "grok --disable-web-search",
+            "grok --no-subagents",
+            "grok MCPTool/Bash/WebFetch deny rules",
+            "AOP authentication-only Grok state",
+        ],
+    },
+    "hermes": {
+        "model_tools": "allowlist",
+        "allowed_toolsets": ["file", "todo"],
+        "enforcement": [
+            "hermes --toolsets file,todo",
+            "hermes --safe-mode",
+        ],
+    },
+    "opencode": {
+        "model_tools": "denied",
+        "allowed_toolsets": [],
+        "enforcement": [
+            "OpenCode wildcard tool permission deny",
+            "opencode --pure",
+        ],
+    },
+}
+
+
+def resolve_model_capabilities(
+    provider: str | None, *, profile: str, no_web: bool
+) -> dict[str, object]:
+    if not no_web:
+        return {
+            "requested": {"external_retrieval": "native"},
+            "effective": {
+                "external_retrieval": "native",
+                "tool_network_egress": "native",
+                "inference_network": "allowed",
+                "extensions": "native",
+                "model_tools": "native",
+            },
+            "enforcement": [],
+        }
+    if provider is None:
+        raise AOPError("--no-web requires a selected harness")
+    if provider == "grok" and profile == "host":
+        raise AOPError("grok cannot enforce --no-web with the host profile")
+    try:
+        provider_policy = _NO_WEB_POLICIES[provider]
+    except KeyError as error:
+        raise AOPError(
+            f"{provider} cannot enforce --no-web; AOP will not substitute "
+            "a prompt-only restriction"
+        ) from error
+    return {
+        "requested": {"external_retrieval": "denied"},
+        "effective": {
+            "external_retrieval": "denied",
+            "tool_network_egress": "denied",
+            "inference_network": "allowed",
+            "extensions": "denied",
+            "model_tools": provider_policy["model_tools"],
+            "allowed_toolsets": provider_policy["allowed_toolsets"],
+        },
+        "enforcement": provider_policy["enforcement"],
+    }

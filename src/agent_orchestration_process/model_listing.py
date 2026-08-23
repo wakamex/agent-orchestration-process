@@ -58,9 +58,7 @@ def list_models(agent: str, catalog: ModelCatalog) -> list[AvailableModel]:
             agent, _binary("cursor", "AOP_CURSOR_BIN", "agent"), ["models"], catalog
         )
     if agent == "agy":
-        return _simple_cli_models(
-            agent, _binary("agy", "AOP_AGY_BIN", "agy"), ["models"], catalog
-        )
+        return _agy_models(catalog)
     if agent == "devin":
         return _devin_models()
     if agent == "opencode":
@@ -228,6 +226,53 @@ def _simple_cli_models(
         )
     if not records:
         raise AOPError(f"{agent} did not return any models")
+    return records
+
+
+def _agy_models(catalog: ModelCatalog) -> list[AvailableModel]:
+    binary = _binary("agy", "AOP_AGY_BIN", "agy")
+    output = _run([binary, "--output-format", "json", "models"])
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise AOPError("agy returned an invalid model catalog") from error
+    command = value.get("command") if isinstance(value, dict) else None
+    data = command.get("data") if isinstance(command, dict) else None
+    models = data.get("models") if isinstance(data, dict) else None
+    if (
+        not isinstance(value, dict)
+        or value.get("status") != "SUCCESS"
+        or not isinstance(command, dict)
+        or command.get("name") != "models"
+        or not isinstance(models, list)
+    ):
+        raise AOPError("agy returned an invalid model catalog")
+
+    records = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        model = item.get("id")
+        name = item.get("label")
+        if not isinstance(model, str) or not model:
+            continue
+        if not isinstance(name, str) or not name:
+            continue
+        provider, priced_model = _registry_identity("agy", model)
+        records.append(
+            _record(
+                "agy",
+                model,
+                name,
+                "account",
+                "api-equivalent",
+                catalog,
+                provider,
+                priced_model,
+            )
+        )
+    if not records:
+        raise AOPError("agy did not return any models")
     return records
 
 

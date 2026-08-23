@@ -87,6 +87,7 @@ def test_native_model_parsers_and_pricing(
     fresh_model_catalog: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog = ensure_catalog_fresh()
+    commands = []
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
 
     monkeypatch.setattr(
@@ -101,10 +102,26 @@ def test_native_model_parsers_and_pricing(
     )
 
     def run(command: list[str], *, input: str | None = None) -> str:
+        commands.append(command)
         if command[0] == "agent":
             return "Available models\n\ngpt-5.6-sol-high - Sol High\n"
         if command[0] == "agy":
-            return "Fetching available models...\ngemini-3.5-flash-low\tGemini Flash\n"
+            return json.dumps(
+                {
+                    "status": "SUCCESS",
+                    "command": {
+                        "name": "models",
+                        "data": {
+                            "models": [
+                                {
+                                    "id": "gemini-3.5-flash-low",
+                                    "label": "Gemini Flash",
+                                }
+                            ]
+                        },
+                    },
+                }
+            )
         if command[0] == "opencode":
             return "opencode/deepseek-v4-flash\n"
         if command[0] == "grok":
@@ -150,6 +167,7 @@ def test_native_model_parsers_and_pricing(
     assert codex.price_scope == "api-equivalent"
     assert cursor.input_per_million_usd == 5
     assert agy.availability == "account"
+    assert ["agy", "--output-format", "json", "models"] in commands
     assert devin[0].model == "swe-1-7"
     assert devin[0].input_per_million_usd == 0
     assert devin[0].output_per_million_usd == 0
@@ -167,6 +185,16 @@ def test_native_model_parsers_and_pricing(
     ]
     assert dsh[0].availability == "installed-default"
     assert dsh[0].input_per_million_usd == 0.3
+
+
+def test_agy_model_inventory_rejects_an_invalid_structured_response(
+    fresh_model_catalog: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
+    monkeypatch.setattr(model_listing, "_run", lambda command: '{"status":"SUCCESS"}')
+
+    with pytest.raises(AOPError, match="agy returned an invalid model catalog"):
+        model_listing.list_models("agy", ensure_catalog_fresh())
 
 
 def test_models_json_reports_catalog_provenance(

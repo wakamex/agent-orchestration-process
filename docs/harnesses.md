@@ -110,6 +110,11 @@ AOP seeds configuration and credentials from `~/.gemini`, but not conversations,
 logs, scratch files, or databases. `sealed` retains authentication only. An exact resume fails if
 Antigravity reports a different conversation ID.
 
+When native Agy settings select `modelProvider: "gemini"`, AOP preserves `GEMINI_API_KEY` and the
+optional `GOOGLE_GEMINI_BASE_URL` override. Isolated state omits unrelated OAuth credentials, and
+`sealed` retains only the provider selection. Results record the metered API route and API-key
+credential source without recording either environment value.
+
 Set `AOP_AGY_SOURCE_DIR` for a nonstandard source profile.
 
 ### Grok Build

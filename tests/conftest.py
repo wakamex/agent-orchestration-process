@@ -907,8 +907,21 @@ args = sys.argv[1:]
 gemini_dir = pathlib.Path(args[args.index("--gemini_dir") + 1])
 runtime_dir = gemini_dir / "antigravity-cli"
 runtime_dir.mkdir(parents=True, exist_ok=True)
-if not (runtime_dir / "antigravity-oauth-token").is_file():
+prompt = args[args.index("-p") + 1]
+settings_path = runtime_dir / "settings.json"
+settings = json.loads(settings_path.read_text()) if settings_path.is_file() else {{}}
+direct_gemini = settings.get("modelProvider") == "gemini"
+if direct_gemini and not os.environ.get("GEMINI_API_KEY"):
+    print("missing Gemini API key", file=sys.stderr)
+    raise SystemExit(2)
+if not direct_gemini and not (runtime_dir / "antigravity-oauth-token").is_file():
     print("missing private authentication", file=sys.stderr)
+    raise SystemExit(2)
+if (
+    prompt.startswith("CHECK_AGY_API_ROUTE")
+    and os.environ.get("GOOGLE_GEMINI_BASE_URL") != "https://gemini.example.test/v1"
+):
+    print("missing Gemini endpoint override", file=sys.stderr)
     raise SystemExit(2)
 state_path = runtime_dir / "fake-conversation.json"
 session_id = (
@@ -928,7 +941,6 @@ model = (
     if "--model" in args
     else "gemini-3.5-flash"
 )
-prompt = args[args.index("-p") + 1]
 {SEALED_PROVIDER_PROBE}
 if prompt.startswith("AGY_DIFFERENT_SESSION"):
     session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"

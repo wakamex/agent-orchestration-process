@@ -1118,6 +1118,60 @@ def test_agy_uses_private_persistent_runtime_state_in_every_sandbox(
     assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
 
 
+@pytest.mark.parametrize("profile", ["review", "sealed"])
+def test_agy_preserves_direct_gemini_route_in_isolated_state(
+    repository: Path,
+    fake_agy: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    source_dir = Path(os.environ["AOP_AGY_SOURCE_DIR"])
+    source_settings = {
+        "modelProvider": "gemini",
+        "permissions": {"shell": "allow"},
+        "trustedWorkspaces": ["/private/source"],
+    }
+    source_dir.joinpath("antigravity-cli", "settings.json").write_text(
+        json.dumps(source_settings)
+    )
+    api_key = "test-gemini-api-key"
+    endpoint = "https://gemini.example.test/v1"
+    monkeypatch.setenv("GEMINI_API_KEY", api_key)
+    monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", endpoint)
+
+    result = AgentRunner(manager, AgyAdapter(os.fspath(fake_agy))).run(
+        task=f"agy-direct-gemini-{profile}",
+        prompt="CHECK_AGY_API_ROUTE",
+        profile=profile,
+        timeout_seconds=5,
+    )
+
+    assert result.succeeded
+    assert result.billing.route == "metered-api"
+    assert result.billing.credential_source == "gemini-api-key"
+    request_path = manager.state_dir / "runs" / result.run_id / "request.json"
+    request = json.loads(request_path.read_text())
+    private_dir = Path(request["effective_policy"]["controller"]["provider_state"])
+    private_agy = private_dir / "agy" / "gemini"
+    assert json.loads(
+        private_agy.joinpath("antigravity-cli", "settings.json").read_text()
+    ) == (
+        {"modelProvider": "gemini"} if profile == "sealed" else source_settings
+    )
+    assert not private_agy.joinpath("oauth_creds.json").exists()
+    assert not private_agy.joinpath("google_accounts.json").exists()
+    assert not private_agy.joinpath(
+        "antigravity-cli", "antigravity-oauth-token"
+    ).exists()
+    inherited = request["effective_policy"]["environment"]["inherited_names"]
+    assert "GEMINI_API_KEY" in inherited
+    assert "GOOGLE_GEMINI_BASE_URL" in inherited
+    recorded = request_path.read_text()
+    assert api_key not in recorded
+    assert endpoint not in recorded
+
+
 @pytest.mark.parametrize(
     ("prompt", "error"),
     [

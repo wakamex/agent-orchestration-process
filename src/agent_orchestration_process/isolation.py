@@ -210,6 +210,7 @@ def resolve_policy(
                     "XDG_DATA_HOME",
                     "XDG_STATE_HOME",
                     "GROK_STORAGE_MODE",
+                    "GOOGLE_GEMINI_BASE_URL",
                 ]
             ),
             "credential_names": (

@@ -2039,14 +2039,28 @@ class AgyAdapter:
                 providers=("google",),
                 catalog_model=_agy_catalog_model(model),
             ),
-            billing=BillingProvenance(
-                route="subscription",
-                credential_source="google-oauth",
-                detected_by="Antigravity authenticated profile",
-            ),
+            billing=self._billing_provenance(gemini_dir, environment),
             provider_duration_seconds=parsed["duration_seconds"],
             provider_status=parsed["status"],
             provider_error=parsed["error"],
+        )
+
+    @staticmethod
+    def _billing_provenance(
+        gemini_dir: Path, environment: dict[str, str]
+    ) -> BillingProvenance:
+        if _agy_model_provider(gemini_dir) == "gemini":
+            return BillingProvenance(
+                route="metered-api",
+                credential_source=(
+                    "gemini-api-key" if environment.get("GEMINI_API_KEY") else None
+                ),
+                detected_by="Agy private settings and environment",
+            )
+        return BillingProvenance(
+            route="subscription",
+            credential_source="google-oauth",
+            detected_by="Antigravity authenticated profile",
         )
 
     def _command(self, request: RunRequest, gemini_dir: Path) -> list[str]:
@@ -3170,6 +3184,7 @@ def _filtered_environment(environment: dict[str, str]) -> dict[str, str]:
         "DEVIN_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
+        "GOOGLE_GEMINI_BASE_URL",
         "GROK_STORAGE_MODE",
         "LANG",
         "LC_ALL",
@@ -3260,6 +3275,10 @@ _AGY_NESTED_SEED_FILES = {
 _AGY_SEALED_SEED_FILES = {"google_accounts.json", "oauth_creds.json"}
 _AGY_SEALED_NESTED_SEED_FILES = {
     "antigravity-cli": {"antigravity-oauth-token"},
+}
+_AGY_OAUTH_SEED_FILES = {"google_accounts.json", "oauth_creds.json"}
+_AGY_OAUTH_NESTED_SEED_FILES = {
+    ("antigravity-cli", "antigravity-oauth-token"),
 }
 
 _CODEX_SEED_DIRECTORIES = {"rules", "skills"}
@@ -3898,11 +3917,22 @@ def _agy_source_dir(environment: dict[str, str]) -> Path:
         ) from error
 
 
+def _agy_model_provider(gemini_dir: Path) -> str | None:
+    settings = gemini_dir / "antigravity-cli" / "settings.json"
+    try:
+        value = json.loads(settings.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    provider = value.get("modelProvider") if isinstance(value, dict) else None
+    return provider if isinstance(provider, str) and provider else None
+
+
 def _prepare_agy_dir(source: Path, destination: Path, *, sealed: bool = False) -> None:
     if destination.is_dir():
         return
     if not source.is_dir():
         raise AOPError(f"Agy profile is not a directory: {source}")
+    direct_gemini = _agy_model_provider(source) == "gemini"
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     temporary.mkdir(parents=True, mode=0o700)
     try:
@@ -3910,8 +3940,10 @@ def _prepare_agy_dir(source: Path, destination: Path, *, sealed: bool = False) -
             target = temporary / entry.name
             if not sealed and entry.name in _AGY_SEED_DIRECTORIES and entry.is_dir():
                 shutil.copytree(entry, target)
-            elif entry.is_file() and (
-                not sealed or entry.name in _AGY_SEALED_SEED_FILES
+            elif (
+                entry.is_file()
+                and (not sealed or entry.name in _AGY_SEALED_SEED_FILES)
+                and not (direct_gemini and entry.name in _AGY_OAUTH_SEED_FILES)
             ):
                 shutil.copy2(entry, target)
         nested_files = (
@@ -3923,9 +3955,15 @@ def _prepare_agy_dir(source: Path, destination: Path, *, sealed: bool = False) -
                 entry = source_directory / name
                 if not entry.is_file():
                     continue
+                if direct_gemini and (directory, name) in _AGY_OAUTH_NESTED_SEED_FILES:
+                    continue
                 target = temporary / directory / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(entry, target)
+        if sealed and direct_gemini:
+            settings = temporary / "antigravity-cli" / "settings.json"
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            settings.write_text(json.dumps({"modelProvider": "gemini"}) + "\n")
         os.replace(temporary, destination)
     except OSError as error:
         shutil.rmtree(temporary, ignore_errors=True)

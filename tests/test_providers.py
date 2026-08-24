@@ -1285,7 +1285,7 @@ def test_agy_rejects_an_unsupported_effort(repository: Path, fake_agy: Path) -> 
         )
 
 
-def test_agy_defaults_to_gemini_35_flash_medium(
+def test_agy_delegates_the_default_model_and_effort(
     repository: Path, fake_agy: Path
 ) -> None:
     runner = AgentRunner(
@@ -1296,13 +1296,9 @@ def test_agy_defaults_to_gemini_35_flash_medium(
 
     assert result.succeeded
     assert result.model == "gemini-3.5-flash"
-    assert result.effort == "medium"
-    assert ["--model", "gemini-3.5-flash"] == result.command[
-        result.command.index("--model") : result.command.index("--model") + 2
-    ]
-    assert ["--effort", "medium"] == result.command[
-        result.command.index("--effort") : result.command.index("--effort") + 2
-    ]
+    assert result.effort is None
+    assert "--model" not in result.command
+    assert "--effort" not in result.command
 
 
 def test_agy_passes_an_exact_model_without_adding_effort(

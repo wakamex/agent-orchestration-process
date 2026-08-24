@@ -13,7 +13,7 @@ session mechanism while giving every run the same AOP access controls and result
 | [Cursor Agent](https://docs.cursor.com/en/cli/overview) | `cursor` | `composer-2.5` | Reasoning and fast variants are part of the model ID, so separate effort is rejected. |
 | [Devin CLI](https://docs.devin.ai/cli/index) | `devin` | `swe-1-7` | Reasoning variants are part of the model ID, so separate effort is rejected. |
 | [OpenCode](https://github.com/anomalyco/opencode) | `opencode` | `opencode/deepseek-v4-flash` | Short model names are qualified with `opencode/`; effort selects the native variant. |
-| [Antigravity](https://github.com/google-antigravity/antigravity-cli) | `agy` | `gemini-3.5-flash`, medium | Accepts exact names printed by `agy models`; effort is `low`, `medium`, or `high`. |
+| [Antigravity](https://github.com/google-antigravity/antigravity-cli) | `agy` | Native default | Accepts exact names printed by `agy models`; effort is `low`, `medium`, or `high`. |
 | [Grok Build](https://github.com/xai-org/grok-build) | `grok` | `grok-build` | Accepts native effort from `none` through `max`. |
 | [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes` | `deepseek/deepseek-v4-flash-0731` | Uses the configured inference provider unless both `--provider` and `--model` override it. |
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | `dsh` | `deepseek-v4-flash` through `deepseek-official` | Also supports `deepseek-v4-pro`; another configured route requires both `--provider` and `--model`. |

@@ -1951,13 +1951,11 @@ class AgyAdapter:
     def normalize_options(
         self, model: str | None, effort: str | None
     ) -> tuple[str | None, str | None]:
-        selected = model or "gemini-3.5-flash"
-        level = effort if effort is not None else ("medium" if model is None else None)
-        if level is not None and level not in self.EFFORTS:
+        if effort is not None and effort not in self.EFFORTS:
             raise AOPError(
                 f"agy effort must be one of: {', '.join(sorted(self.EFFORTS))}"
             )
-        return selected, level
+        return model, effort
 
     def execute(
         self,

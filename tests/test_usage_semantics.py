@@ -139,6 +139,32 @@ def test_devin_retained_atif_metrics_use_prompt_total_and_cached_subset(
     assert _usage_tuple(usage) == (15_356, 292, 758, 0)
 
 
+def test_devin_fresh_export_rejects_a_foreign_user_prompt(tmp_path: Path) -> None:
+    export = tmp_path / "trajectory.json"
+    export.write_text(
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.6",
+                "session_id": "foreign-session",
+                "steps": [
+                    {"source": "user", "message": "another run"},
+                    {"source": "agent", "message": "foreign answer"},
+                ],
+            }
+        )
+    )
+
+    parsed = DevinAdapter._parse_export(
+        export,
+        "current run",
+        allow_missing_prompt=True,
+    )
+
+    assert parsed["error"] == (
+        "Devin trajectory export did not contain the current prompt"
+    )
+
+
 def test_opencode_retained_step_adds_cache_to_input_and_reasoning_to_output() -> None:
     event = {
         "type": "step_finish",

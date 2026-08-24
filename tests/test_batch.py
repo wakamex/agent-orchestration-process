@@ -371,6 +371,54 @@ prompt = "four"
     assert result.tasks[7].model == "deepseek-v4-pro"
 
 
+def test_concurrent_devin_runs_own_exports_without_user_steps(
+    repository: Path,
+    fake_devin: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AOP_DEVIN_BIN", os.fspath(fake_devin))
+    manifest = repository / "concurrent-devin.toml"
+    manifest.write_text(
+        """
+[[tasks]]
+id = "devin-one"
+agent = "devin"
+prompt = "DEVIN_CONCURRENT_ONE"
+
+[[tasks]]
+id = "devin-two"
+agent = "devin"
+prompt = "DEVIN_CONCURRENT_TWO"
+"""
+    )
+    manager = WorktreeManager.discover(repository)
+
+    result = BatchRunner(manager, jobs=2).run(manifest)
+
+    assert result.succeeded
+    assert {task.session_id for task in result.tasks} == {"tested-one", "tested-two"}
+    provider_states = set()
+    for task, prompt in zip(
+        result.tasks,
+        ("DEVIN_CONCURRENT_ONE", "DEVIN_CONCURRENT_TWO"),
+        strict=True,
+    ):
+        assert task.run_id is not None
+        run_dir = manager.state_dir / "runs" / task.run_id
+        request = json.loads(run_dir.joinpath("request.json").read_text())
+        run_result = json.loads(run_dir.joinpath("result.json").read_text())
+        exported = json.loads(run_dir.joinpath("provider-result.json").read_text())
+        provider_states.add(request["effective_policy"]["controller"]["provider_state"])
+        assert run_result["final_message"] == f"answer:{prompt}"
+        assert not any(step["source"] == "user" for step in exported["steps"])
+        assert exported["steps"][-1]["message"] == f"answer:{prompt}"
+        export_flag = run_result["command"].index("--export")
+        assert run_result["command"][export_flag + 1] == (
+            f"/scratch/.devin-export-{task.run_id}.json"
+        )
+    assert len(provider_states) == 2
+
+
 def test_batch_runs_hermes_participant_mode_and_records_provenance(
     repository: Path,
     fake_hermes: Path,

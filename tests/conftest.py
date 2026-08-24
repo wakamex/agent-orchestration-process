@@ -625,6 +625,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 args = sys.argv[1:]
 if args == ["models", "list", "--format", "json"]:
@@ -661,6 +662,16 @@ state_path = data_dir / "cli" / "fake-session.json"
 export_path = pathlib.Path(args[args.index("--export") + 1])
 prompt = args[args.index("-p") + 1]
 {SEALED_PROVIDER_PROBE}
+concurrent_export = prompt.startswith("DEVIN_CONCURRENT_")
+if concurrent_export:
+    barrier = cache_dir / "concurrent-export-barrier"
+    barrier.mkdir(parents=True, exist_ok=True)
+    barrier.joinpath(prompt).touch()
+    deadline = time.monotonic() + 5
+    while len(list(barrier.iterdir())) < 2:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("concurrent Devin test did not overlap")
+        time.sleep(0.01)
 if "--resume" in args:
     requested_session = args[args.index("--resume") + 1]
     state = json.loads(state_path.read_text())
@@ -669,7 +680,11 @@ if "--resume" in args:
     session_id = requested_session
     model = state["model"]
 else:
-    session_id = "tested-basil"
+    session_id = (
+        f"tested-{{prompt.rsplit('_', 1)[-1].lower()}}"
+        if concurrent_export
+        else "tested-basil"
+    )
     model = args[args.index("--model") + 1]
     state_path.write_text(json.dumps({{"session_id": session_id, "model": model}}))
 if prompt == "DEVIN_DIFFERENT_SESSION":
@@ -703,7 +718,11 @@ export_path.write_text(json.dumps({{
     "session_id": session_id,
     "agent": {{"name": "devin", "model_name": "SWE-1.7"}},
     "steps": [
-        {{"step_id": 1, "source": "user", "message": prompt}},
+        *(
+            []
+            if concurrent_export
+            else [{{"step_id": 1, "source": "user", "message": prompt}}]
+        ),
         {{
             "step_id": 2,
             "source": "agent",

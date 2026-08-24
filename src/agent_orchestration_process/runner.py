@@ -1442,7 +1442,11 @@ class DevinAdapter:
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
-        parsed = self._parse_export(export_path, request.prompt)
+        parsed = self._parse_export(
+            export_path,
+            request.prompt,
+            allow_missing_prompt=request.session_id is None,
+        )
         if export_path.is_file():
             _atomic_write(run_dir / "provider-result.json", export_path.read_text())
             export_path.unlink()
@@ -1525,7 +1529,9 @@ class DevinAdapter:
         return command
 
     @staticmethod
-    def _parse_export(path: Path, prompt: str) -> dict[str, object]:
+    def _parse_export(
+        path: Path, prompt: str, *, allow_missing_prompt: bool = False
+    ) -> dict[str, object]:
         try:
             value = json.loads(path.read_text())
         except FileNotFoundError:
@@ -1548,17 +1554,20 @@ class DevinAdapter:
                 "Devin trajectory export did not contain steps"
             )
         turn_start = None
+        has_user_step = False
         for index, step in enumerate(steps):
-            if (
-                isinstance(step, dict)
-                and step.get("source") == "user"
-                and step.get("message") == prompt
-            ):
-                turn_start = index
+            if isinstance(step, dict) and step.get("source") == "user":
+                has_user_step = True
+                if step.get("message") == prompt:
+                    turn_start = index
         if turn_start is None:
-            return DevinAdapter._invalid_export(
-                "Devin trajectory export did not contain the current prompt"
-            )
+            if has_user_step or not allow_missing_prompt:
+                return DevinAdapter._invalid_export(
+                    "Devin trajectory export did not contain the current prompt"
+                )
+            # A fresh run owns both its empty private session state and export path.
+            # Devin can omit the user step while retaining the current agent steps.
+            turn_start = -1
         agent_steps = [
             step
             for step in steps[turn_start + 1 :]

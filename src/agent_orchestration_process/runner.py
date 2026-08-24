@@ -2974,7 +2974,10 @@ def _provider_runtime(
     guest = Path("/runtime/provider")
     provider_guest = guest / resolved.name
     command[0] = os.fspath(provider_guest)
-    mounts = [(os.fspath(resolved), os.fspath(provider_guest))]
+    if provider == "cursor":
+        mounts = [(os.fspath(resolved.parent), os.fspath(guest))]
+    else:
+        mounts = [(os.fspath(resolved), os.fspath(provider_guest))]
     try:
         first_line = resolved.open("rb").readline(4096).decode(errors="ignore").strip()
     except OSError:

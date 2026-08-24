@@ -16,6 +16,7 @@ from agent_orchestration_process.models import RunResult
 from agent_orchestration_process.runner import (
     AgentRunner,
     CodexAdapter,
+    CursorAdapter,
     _filtered_environment,
     _provider_runtime,
 )
@@ -51,6 +52,56 @@ def test_dsh_runtime_preserves_a_user_npm_installation(
     node_modules = prefix / "lib" / "node_modules"
     assert command == [os.fspath(binary), "--version"]
     assert mounts == [(os.fspath(node_modules), os.fspath(node_modules))]
+
+
+def test_cursor_runtime_projects_wrapper_siblings_read_only(
+    repository: Path,
+    fake_cursor: Path,
+    tmp_path: Path,
+) -> None:
+    version = tmp_path / "cursor-agent" / "versions" / "2026.08.11-test"
+    version.mkdir(parents=True)
+    wrapper = version / "cursor-agent"
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'script_dir="$(dirname "$(realpath "$0")")"\n'
+        'exec "$script_dir/node" "$script_dir/index.js" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    node = version / "node"
+    node.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'script_dir="$(dirname "$(realpath "$0")")"\n'
+        'test -f "$script_dir/runtime-chunk.js"\n'
+        'if touch "$script_dir/runtime-write" 2>/dev/null; then\n'
+        "  exit 91\n"
+        "fi\n"
+        'exec /usr/bin/python3 "$@"\n'
+    )
+    node.chmod(0o755)
+    version.joinpath("index.js").write_text(fake_cursor.read_text())
+    version.joinpath("runtime-chunk.js").write_text("runtime chunk\n")
+
+    result = AgentRunner(
+        WorktreeManager.discover(repository),
+        CursorAdapter(os.fspath(wrapper)),
+    ).run(task="cursor-sibling-runtime", prompt="test", timeout_seconds=5)
+
+    assert result.succeeded
+    assert result.final_message == "answer:test"
+    assert not version.joinpath("runtime-write").exists()
+    assert ["--ro-bind", os.fspath(version), "/runtime/provider"] in [
+        result.command[index : index + 3] for index in range(len(result.command) - 2)
+    ]
+    request = json.loads(
+        repository.joinpath(".aop", "runs", result.run_id, "request.json").read_text()
+    )
+    assert request["effective_policy"]["provider_runtime"]["executable"] == (
+        os.fspath(wrapper)
+    )
+    assert request["effective_policy"]["provider_runtime"]["sha256"]
 
 
 def test_hermes_runtime_projects_only_editable_python_runtime(

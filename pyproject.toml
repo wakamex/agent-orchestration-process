@@ -5,7 +5,7 @@ build-backend = "uv_build"
 [project]
 name = "agent-orchestration-process"
 version = "0.1.7"
-description = "Bounded multi-harness agent orchestration for autoresearch loops"
+description = "Run bounded, non-interactive jobs across agent harnesses with isolation, exact resume, and provenance"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "AOP contributors" }]

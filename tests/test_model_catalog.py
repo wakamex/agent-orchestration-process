@@ -89,6 +89,7 @@ def test_native_model_parsers_and_pricing(
     catalog = ensure_catalog_fresh()
     commands = []
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
+    monkeypatch.setattr(model_listing, "require_supported_agy", lambda binary: None)
 
     monkeypatch.setattr(
         model_listing,
@@ -191,6 +192,7 @@ def test_agy_model_inventory_rejects_an_invalid_structured_response(
     fresh_model_catalog: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
+    monkeypatch.setattr(model_listing, "require_supported_agy", lambda binary: None)
     monkeypatch.setattr(model_listing, "_run", lambda command: '{"status":"SUCCESS"}')
 
     with pytest.raises(AOPError, match="agy returned an invalid model catalog"):

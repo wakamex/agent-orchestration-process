@@ -186,6 +186,10 @@ Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`.
 | Hermes | Participant mode is experimental; rotating OAuth credentials serialize Hermes turns. |
 | DeepSeek Harness | Developer-preview CLI; inventory lists bundled defaults rather than the selected provider; no participant mode. |
 
+Antigravity integration requires Agy 1.1.16 or newer. AOP checks the installed version before
+dispatch and model discovery so an older or unrecognized interface fails before task state is
+created.
+
 Cursor Agent, Antigravity, and Devin CLI do not report enough information for AOP to calculate an
 API-equivalent cost. See [Token usage and pricing](token-usage.md) for the values available from each
 harness.

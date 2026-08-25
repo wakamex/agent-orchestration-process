@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_orchestration_process import runner as runner_module
 from agent_orchestration_process.pricing import TokenUsage
 from agent_orchestration_process.runner import (
     AgyAdapter,
@@ -1283,6 +1284,28 @@ def test_agy_rejects_an_unsupported_effort(repository: Path, fake_agy: Path) -> 
             prompt="test",
             effort="xhigh",
         )
+
+
+def test_agy_rejects_an_unsupported_version_before_creating_state(
+    repository: Path,
+    fake_agy: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = WorktreeManager.discover(repository)
+
+    def reject(_binary: str) -> None:
+        raise AOPError("Agy 1.1.15 is unsupported; AOP requires Agy 1.1.16 or newer")
+
+    monkeypatch.setattr(runner_module, "require_supported_agy", reject)
+
+    with pytest.raises(AOPError, match="Agy 1.1.15 is unsupported"):
+        AgentRunner(manager, AgyAdapter(os.fspath(fake_agy))).run(
+            task="old-agy",
+            prompt="test",
+        )
+
+    assert manager.list() == []
+    assert not manager.state_dir.joinpath("provider-state").exists()
 
 
 def test_agy_delegates_the_default_model_and_effort(

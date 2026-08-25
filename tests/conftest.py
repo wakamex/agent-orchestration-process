@@ -923,6 +923,9 @@ import pathlib
 import sys
 
 args = sys.argv[1:]
+if args == ["--version"]:
+    print("1.1.19")
+    raise SystemExit(0)
 gemini_dir = pathlib.Path(args[args.index("--gemini_dir") + 1])
 runtime_dir = gemini_dir / "antigravity-cli"
 runtime_dir.mkdir(parents=True, exist_ok=True)

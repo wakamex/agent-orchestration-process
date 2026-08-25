@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .model_catalog import ModelCatalog
+from .provider_versions import require_supported_agy
 from .worktrees import AOPError
 
 
@@ -231,6 +232,7 @@ def _simple_cli_models(
 
 def _agy_models(catalog: ModelCatalog) -> list[AvailableModel]:
     binary = _binary("agy", "AOP_AGY_BIN", "agy")
+    require_supported_agy(binary)
     output = _run([binary, "--output-format", "json", "models"])
     try:
         value = json.loads(output)

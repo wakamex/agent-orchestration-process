@@ -35,6 +35,7 @@ from .models import (
 from .locks import exclusive_lock, task_lock_path
 from .isolation import PROFILES, resolve_policy
 from .pricing import CalculatedCost, TokenUsage, estimate_api_cost
+from .provider_versions import require_supported_agy
 from .worktrees import AOPError, Worktree, WorktreeManager
 
 
@@ -1956,6 +1957,9 @@ class AgyAdapter:
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_AGY_BIN", "agy")
+
+    def validate_installation(self) -> None:
+        require_supported_agy(self.binary)
 
     def normalize_options(
         self, model: str | None, effort: str | None
@@ -4291,6 +4295,7 @@ class AgentRunner:
         if profile not in PROFILES:
             raise AOPError(f"unknown execution profile: {profile}")
         self._validate_no_web(no_web, mode, profile)
+        self._validate_adapter_installation()
         model, effort = self.adapter.normalize_options(model, effort)
         request = self._request(
             task=task,
@@ -4334,6 +4339,7 @@ class AgentRunner:
         self._validate_no_web(
             parent_request.no_web, parent_request.mode, parent_request.profile
         )
+        self._validate_adapter_installation()
         if not parent_result.session_id:
             raise AOPError(f"run has no resumable agent session: {run_id}")
         _task_lock_held = _task_lock_held or (
@@ -4685,6 +4691,11 @@ class AgentRunner:
             raise AOPError(f"unknown agent mode: {mode}")
         if mode not in self.adapter.modes:
             raise AOPError(f"{self.adapter.provider} does not support {mode} mode")
+
+    def _validate_adapter_installation(self) -> None:
+        validate = getattr(self.adapter, "validate_installation", None)
+        if callable(validate):
+            validate()
 
     def _validate_no_web(self, no_web: bool, mode: str, profile: str) -> None:
         if no_web and mode == "participant":

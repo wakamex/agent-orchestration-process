@@ -22,6 +22,27 @@ Use `aop models` to inspect installed or configured inventories and see whether 
 the authenticated harness, an installed default, or AOP's catalog. Exact resume retains the original
 harness, model, effort, inference provider, mode, and execution profile.
 
+Every adapter supports bounded execution, exact resume, all four execution profiles, input
+snapshots, validated artifacts, normalized terminal results and token usage, and retained
+provenance. Harness-native automation surfaces determine the remaining feature differences:
+
+| Harness | Enforced no-web | Participant | Model inventory | Provider override | Calculated cost | Provider-reported cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| Codex | Yes | No | Account | No | API-equivalent | No |
+| Claude Code | Yes | No | Catalog | No | CLI-calculated | No |
+| Cursor Agent | No | No | Account | No | No | No |
+| Devin CLI | No | No | Account | No | No | No |
+| OpenCode | Yes | No | Account | No | API-equivalent | When emitted |
+| Antigravity | No | No | Account | No | API-equivalent | No |
+| Grok Build | Isolated profiles only | No | Account | No | API-equivalent | When emitted |
+| Hermes | Yes | Experimental | Configured route | Yes | API-equivalent or CLI-calculated | When emitted |
+| DeepSeek Harness | No | No | Bundled defaults | Yes | Known provider routes | No |
+
+Calculated cost is an API-equivalent comparison unless the table identifies a native CLI
+calculation. Provider-reported cost remains separate and is retained only when the harness exposes
+monetary evidence for the selected billing route. Hermes turns are serialized when shared rotating
+OAuth credentials require it; other harnesses remain concurrent.
+
 ## Enforced no-web support
 
 `aop run --no-web` keeps inference traffic available while denying model-controlled external
@@ -190,9 +211,8 @@ Antigravity integration requires Agy 1.1.16 or newer. AOP checks the installed v
 dispatch and model discovery so an older or unrecognized interface fails before task state is
 created.
 
-Cursor Agent, Antigravity, and Devin CLI do not report enough information for AOP to calculate an
-API-equivalent cost. See [Token usage and pricing](token-usage.md) for the values available from each
-harness.
+Cursor Agent and Devin CLI do not report enough information for AOP to calculate an API-equivalent
+cost. See [Token usage and pricing](token-usage.md) for the values available from each harness.
 
 ## Executable overrides
 

@@ -40,9 +40,11 @@ sign means the provider reports disjoint buckets that AOP combines into a normal
 | OpenCode | input, cache read, and cache write are disjoint | input + cache read + cache write | output and reasoning are disjoint | output + reasoning, with reasoning as subset |
 
 Hermes exports cumulative session counters. AOP snapshots the session before and after an invocation
-and persists only the component-wise invocation delta. Devin selects only agent steps after the
-current user prompt. The other adapters consume per-invocation terminal events. Resuming a session
-therefore does not turn a new run's usage into a cumulative session total.
+and persists only the component-wise invocation delta. For a Devin resume, AOP selects only agent
+steps after the current user prompt. A fresh run whose run-owned ATIF export omits every user step
+uses all agent steps from that new private session. The other adapters consume per-invocation
+terminal events. Resuming a session therefore does not turn a new run's usage into a cumulative
+session total.
 
 ## Pricing
 
@@ -76,7 +78,7 @@ retrieval time when applicable, and price version.
 
 Provider inventories and cost evidence differ. Claude can supply its own CLI-calculated comparison;
 OpenCode can report billed per-step cost; Grok can report terminal cost; and Hermes can report cost
-through its selected inference provider. Cursor, Devin, and Agy do not currently expose enough
+through its selected inference provider. Cursor and Devin do not currently expose enough
 information for AOP to calculate an API-equivalent cost, so their calculated cost remains null.
 
 ## Loading unversioned results

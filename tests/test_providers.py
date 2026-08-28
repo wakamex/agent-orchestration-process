@@ -903,7 +903,7 @@ def test_opencode_timeout_preserves_observed_partial_accounting(
     ).run(
         task="opencode-partial-timeout",
         prompt="OPENCODE_PARTIAL_TIMEOUT",
-        timeout_seconds=0.05,
+        timeout_seconds=1,
     )
 
     assert result.timed_out

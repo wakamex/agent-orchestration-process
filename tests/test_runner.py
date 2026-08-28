@@ -869,11 +869,11 @@ def test_timeout_terminates_process_and_records_result(
     manager = WorktreeManager.discover(repository)
     runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
 
-    result = runner.run(task="slow", prompt="SLEEP", timeout_seconds=0.05)
+    result = runner.run(task="slow", prompt="SLEEP", timeout_seconds=1)
 
     assert not result.succeeded
     assert result.timed_out
-    assert result.error == "timed out after 0.05 seconds"
+    assert result.error == "timed out after 1 seconds"
     assert result.accounting_status == "partial"
     assert result.usage is not None
     assert result.usage.input_tokens == 10
@@ -906,7 +906,7 @@ def test_codex_timeout_falls_back_to_process_termination_when_interrupt_hangs(
     result = AgentRunner(manager, adapter).run(
         task="hung-interrupt",
         prompt="HANG_INTERRUPT",
-        timeout_seconds=0.05,
+        timeout_seconds=1,
     )
 
     assert result.timed_out

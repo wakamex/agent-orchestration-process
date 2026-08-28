@@ -21,3 +21,7 @@
   remain inspectable after the run.
 - Optimize for the long-term product rather than accidental local setup. A clean break is acceptable
   before users exist when it removes ambiguity or avoids a foreseeable rewrite.
+
+## Release validation
+
+Before creating a release tag, push the intended release commit to `main` without the tag and require a successful `Validate` push workflow for that exact commit SHA. Find the run with `gh run list --workflow validation.yml --commit "$release_sha" --event push`, wait for it with `gh run watch RUN_ID --exit-status`, and confirm `origin/main` still resolves to the same SHA. A tag-triggered validation run is not a substitute for this pre-tag gate. Create and push the annotated tag only after the gate passes.

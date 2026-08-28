@@ -74,6 +74,7 @@ class BatchTaskResult:
     run_id: str | None
     session_id: str | None
     duration_seconds: float | None
+    accounting_status: str | None
     input_tokens: int | None
     cached_input_tokens: int | None
     output_tokens: int | None
@@ -213,6 +214,7 @@ class BatchRunner:
                     run_id=None,
                     session_id=None,
                     duration_seconds=None,
+                    accounting_status=None,
                     input_tokens=None,
                     cached_input_tokens=None,
                     output_tokens=None,
@@ -269,6 +271,7 @@ class BatchRunner:
                 run_id=None,
                 session_id=None,
                 duration_seconds=None,
+                accounting_status=None,
                 input_tokens=None,
                 cached_input_tokens=None,
                 output_tokens=None,
@@ -294,10 +297,15 @@ class BatchRunner:
             run_id=result.run_id,
             session_id=result.session_id,
             duration_seconds=result.duration_seconds,
-            input_tokens=result.usage.input_tokens,
-            cached_input_tokens=result.usage.cached_input_tokens,
-            output_tokens=result.usage.output_tokens,
-            reasoning_output_tokens=result.usage.reasoning_output_tokens,
+            accounting_status=result.accounting_status,
+            input_tokens=result.usage.input_tokens if result.usage else None,
+            cached_input_tokens=(
+                result.usage.cached_input_tokens if result.usage else None
+            ),
+            output_tokens=result.usage.output_tokens if result.usage else None,
+            reasoning_output_tokens=(
+                result.usage.reasoning_output_tokens if result.usage else None
+            ),
             calculated_cost_usd=(
                 result.calculated_cost.amount_usd if result.calculated_cost else None
             ),

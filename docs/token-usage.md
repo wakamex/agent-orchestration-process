@@ -1,7 +1,6 @@
 # Token usage and pricing
 
-AOP persists token usage under one provider-independent convention. The marker for this convention
-is `usage_schema: "aop-token-usage-v1"` on `result.json`.
+AOP persists token usage under one provider-independent convention. The marker for this convention is `usage_schema: "aop-token-usage-v2"` on `result.json`.
 
 The invariant is:
 
@@ -17,6 +16,12 @@ The invariant is:
 
 The four persisted counters are non-negative. AOP rejects a newly constructed normalized value when
 a subset exceeds its total.
+
+## Deadline accounting
+
+Every result records an `accounting_status` of `complete`, `partial`, or `unavailable`. A normally terminated invocation is `complete`, and its `usage` object may legitimately contain four measured zero counters. A timed-out invocation is `partial` when AOP captured provider usage or monetary evidence before terminating it. A timed-out invocation is `unavailable` when the provider emitted no accounting evidence, in which case `usage`, `calculated_cost`, and `provider_reported_cost` are null rather than measured zero.
+
+Calculated cost is retained for a partial result only when token usage was observed. Provider-reported cost can be retained independently because it is direct monetary evidence. These rules are adapter-neutral; each adapter only identifies whether its native event or session export contained usage evidence.
 
 Every run also records wall-clock time, time to first provider event, and time to the agent response
 when the provider exposes it. Resume results contain only the current invocation's usage rather than
@@ -87,7 +92,7 @@ information for AOP to calculate an API-equivalent cost, so their calculated cos
 
 Unversioned `result.json` records predate the common convention and use mixed meanings. AOP leaves
 those files and their raw provider artifacts unchanged. `RunResult.from_dict()` applies this
-centralized in-memory conversion and marks the loaded object as `aop-token-usage-v1`:
+centralized in-memory conversion and marks the loaded object as `aop-token-usage-v2`:
 
 | Legacy provider | In-memory conversion |
 | --- | --- |
@@ -104,10 +109,6 @@ raw artifacts. The loader does not consult or alter those artifacts.
 
 ## Downstream consumer rule
 
-Consumers such as `clanker-analytics` should require
-`usage_schema: "aop-token-usage-v1"`, use the four counters as stored, and calculate total tokens as
-`input_tokens + output_tokens`. They must never add cached input or reasoning output. Missing or
-unknown schema markers should be rejected instead of guessed.
+Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v2"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the four counters as stored and calculate total tokens as `input_tokens + output_tokens`. Never add cached input or reasoning output. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Missing or unknown schema markers should be rejected instead of guessed.
 
-Legacy conversion remains centralized in AOP's `RunResult` loader for unversioned records that have
-not been migrated by their owner. Downstream consumers do not need to reproduce the provider table.
+Legacy conversion remains centralized in AOP's `RunResult` loader for unversioned and v1 records that have not been migrated by their owner. Downstream consumers do not need to reproduce the provider table.

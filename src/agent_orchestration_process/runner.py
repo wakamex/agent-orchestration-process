@@ -86,6 +86,46 @@ def _token_count(value: object) -> int:
     return max(value, 0)
 
 
+@dataclass(frozen=True)
+class _Accounting:
+    usage: TokenUsage | None
+    calculated_cost: CalculatedCost | None
+    provider_reported_cost: ProviderReportedCost | None
+    status: str
+
+
+def _finalize_accounting(
+    *,
+    timed_out: bool,
+    usage: TokenUsage,
+    usage_observed: bool,
+    calculated_cost: CalculatedCost | None,
+    provider_reported_cost: ProviderReportedCost | None = None,
+) -> _Accounting:
+    if not timed_out:
+        return _Accounting(
+            usage=usage,
+            calculated_cost=calculated_cost,
+            provider_reported_cost=provider_reported_cost,
+            status="complete",
+        )
+    retained_usage = usage if usage_observed else None
+    retained_calculated_cost = calculated_cost if usage_observed else None
+    if retained_usage is None and provider_reported_cost is None:
+        return _Accounting(
+            usage=None,
+            calculated_cost=None,
+            provider_reported_cost=None,
+            status="unavailable",
+        )
+    return _Accounting(
+        usage=retained_usage,
+        calculated_cost=retained_calculated_cost,
+        provider_reported_cost=provider_reported_cost,
+        status="partial",
+    )
+
+
 def _billing_probe(
     command: list[str], cwd: Path, environment: dict[str, str]
 ) -> subprocess.CompletedProcess[str] | None:
@@ -304,7 +344,9 @@ class CodexAdapter:
         _atomic_write(run_dir / "events.jsonl", stdout)
         _atomic_write(run_dir / "stderr.log", stderr)
 
-        reported_session_id, event_error, usage, completed = self._parse_events(stdout)
+        reported_session_id, event_error, usage, completed, usage_observed = (
+            self._parse_events(stdout)
+        )
         session_id = reported_session_id
         resume_error = None
         if request.session_id and reported_session_id != request.session_id:
@@ -340,6 +382,16 @@ class CodexAdapter:
             _atomic_write(run_dir / "last-message.txt", final_message)
             last_message_path.unlink()
         billing = self._billing_provenance(request, worktree.path, environment)
+        accounting = _finalize_accounting(
+            timed_out=timed_out,
+            usage=usage,
+            usage_observed=usage_observed,
+            calculated_cost=estimate_api_cost(
+                request.model,
+                usage,
+                providers=("zai",) if request.inference_route else ("openai",),
+            ),
+        )
 
         return RunResult(
             run_id=request.run_id,
@@ -366,12 +418,9 @@ class CodexAdapter:
             timed_out=timed_out,
             error=error,
             final_message=final_message,
-            usage=usage,
-            calculated_cost=estimate_api_cost(
-                request.model,
-                usage,
-                providers=("zai",) if request.inference_route else ("openai",),
-            ),
+            usage=accounting.usage,
+            calculated_cost=accounting.calculated_cost,
+            accounting_status=accounting.status,
             billing=billing,
             inference_route=request.inference_route,
         )
@@ -436,11 +485,12 @@ class CodexAdapter:
     @staticmethod
     def _parse_events(
         output: str,
-    ) -> tuple[str | None, str | None, TokenUsage, bool]:
+    ) -> tuple[str | None, str | None, TokenUsage, bool, bool]:
         session_id = None
         error = None
         usage = TokenUsage()
         completed = False
+        usage_observed = False
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -466,6 +516,7 @@ class CodexAdapter:
             elif event_type == "turn.completed":
                 completed = True
                 if isinstance(event.get("usage"), dict):
+                    usage_observed = True
                     current = TokenUsage.from_dict(event["usage"])
                     usage = TokenUsage(
                         input_tokens=usage.input_tokens + current.input_tokens,
@@ -478,7 +529,7 @@ class CodexAdapter:
                             + current.reasoning_output_tokens
                         ),
                     )
-        return session_id, error, usage, completed
+        return session_id, error, usage, completed, usage_observed
 
     @staticmethod
     def _is_agent_message(line: str) -> bool:
@@ -703,6 +754,12 @@ class ClaudeAdapter:
         else:
             error = None
         billing = self._billing_provenance(worktree.path, environment)
+        accounting = _finalize_accounting(
+            timed_out=capture.timed_out,
+            usage=parsed["usage"],
+            usage_observed=parsed["usage_observed"],
+            calculated_cost=parsed["cost"],
+        )
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
@@ -721,8 +778,9 @@ class ClaudeAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=parsed["usage"],
-            calculated_cost=parsed["cost"],
+            usage=accounting.usage,
+            calculated_cost=accounting.calculated_cost,
+            accounting_status=accounting.status,
             billing=billing,
         )
 
@@ -848,6 +906,7 @@ class ClaudeAdapter:
         usage = TokenUsage()
         cost = None
         has_result = False
+        usage_observed = False
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -866,9 +925,9 @@ class ClaudeAdapter:
             )
             if event.get("is_error"):
                 error = final_message or "Claude turn failed"
-            raw_usage = (
-                event.get("usage") if isinstance(event.get("usage"), dict) else {}
-            )
+            raw_usage = event.get("usage")
+            usage_observed = isinstance(raw_usage, dict)
+            raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
             uncached = int(raw_usage.get("input_tokens", 0) or 0)
             cached = int(raw_usage.get("cache_read_input_tokens", 0) or 0)
             created = int(raw_usage.get("cache_creation_input_tokens", 0) or 0)
@@ -897,6 +956,7 @@ class ClaudeAdapter:
             "usage": usage,
             "cost": cost,
             "has_result": has_result,
+            "usage_observed": usage_observed,
         }
 
 
@@ -995,6 +1055,13 @@ class GrokAdapter:
             if billing.route in {"metered-api", "provider-credits"}
             else None
         )
+        accounting = _finalize_accounting(
+            timed_out=capture.timed_out,
+            usage=usage,
+            usage_observed=parsed["usage_observed"],
+            calculated_cost=estimate_api_cost(model, usage, providers=("xai",)),
+            provider_reported_cost=reported_cost,
+        )
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
@@ -1013,9 +1080,10 @@ class GrokAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=usage,
-            calculated_cost=estimate_api_cost(model, usage, providers=("xai",)),
-            provider_reported_cost=reported_cost,
+            usage=accounting.usage,
+            calculated_cost=accounting.calculated_cost,
+            provider_reported_cost=accounting.provider_reported_cost,
+            accounting_status=accounting.status,
             billing=billing,
             provider_status=parsed["status"],
             provider_error=parsed["error"],
@@ -1090,6 +1158,7 @@ class GrokAdapter:
         usage = TokenUsage()
         reported_cost = None
         model = None
+        usage_observed = False
 
         for line in output.splitlines():
             try:
@@ -1112,6 +1181,7 @@ class GrokAdapter:
 
             raw_usage = event.get("usage")
             if isinstance(raw_usage, dict):
+                usage_observed = True
                 uncached = GrokAdapter._integer(raw_usage.get("input_tokens"))
                 cached = GrokAdapter._integer(raw_usage.get("cache_read_input_tokens"))
                 created = GrokAdapter._integer(
@@ -1171,6 +1241,7 @@ class GrokAdapter:
             "completed": completed,
             "error": error,
             "status": status,
+            "usage_observed": usage_observed,
         }
 
     @staticmethod
@@ -1297,6 +1368,12 @@ class CursorAdapter:
         else:
             error = None
 
+        accounting = _finalize_accounting(
+            timed_out=capture.timed_out,
+            usage=parsed["usage"],
+            usage_observed=parsed["usage_observed"],
+            calculated_cost=None,
+        )
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
@@ -1315,8 +1392,9 @@ class CursorAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=parsed["usage"],
+            usage=accounting.usage,
             calculated_cost=None,
+            accounting_status=accounting.status,
             billing=BillingProvenance(
                 route="provider-credits",
                 credential_source=(
@@ -1373,6 +1451,7 @@ class CursorAdapter:
         duration_seconds = None
         usage = TokenUsage()
         has_result = False
+        usage_observed = False
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -1397,9 +1476,9 @@ class CursorAdapter:
                     if isinstance(detail, str) and detail
                     else final_message or "Cursor Agent turn failed"
                 )
-            raw_usage = (
-                event.get("usage") if isinstance(event.get("usage"), dict) else {}
-            )
+            raw_usage = event.get("usage")
+            usage_observed = isinstance(raw_usage, dict)
+            raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
             usage = TokenUsage.from_dict(
                 {
                     "input_tokens": (
@@ -1424,6 +1503,7 @@ class CursorAdapter:
             "duration_seconds": duration_seconds,
             "usage": usage,
             "has_result": has_result,
+            "usage_observed": usage_observed,
         }
 
 
@@ -1513,6 +1593,12 @@ class DevinAdapter:
         else:
             error = None
 
+        accounting = _finalize_accounting(
+            timed_out=capture.timed_out,
+            usage=parsed["usage"],
+            usage_observed=parsed["usage_observed"],
+            calculated_cost=None,
+        )
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
@@ -1531,8 +1617,9 @@ class DevinAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=parsed["usage"],
+            usage=accounting.usage,
             calculated_cost=None,
+            accounting_status=accounting.status,
             billing=BillingProvenance(
                 route="provider-credits",
                 credential_source="devin-account",
@@ -1630,6 +1717,14 @@ class DevinAdapter:
                 DevinAdapter._metric(step, "completion_tokens") for step in agent_steps
             ),
         )
+        usage_observed = any(
+            isinstance((metrics := step.get("metrics")), dict)
+            and any(
+                name in metrics
+                for name in ("prompt_tokens", "cached_tokens", "completion_tokens")
+            )
+            for step in agent_steps
+        )
         session_id = value.get("session_id")
         return {
             "session_id": session_id
@@ -1638,6 +1733,7 @@ class DevinAdapter:
             "model": model,
             "final_message": final_message,
             "usage": usage,
+            "usage_observed": usage_observed,
             "error": None,
         }
 
@@ -1656,6 +1752,7 @@ class DevinAdapter:
             "model": None,
             "final_message": None,
             "usage": TokenUsage(),
+            "usage_observed": False,
             "error": error,
         }
 
@@ -1747,6 +1844,14 @@ class OpenCodeAdapter:
             if billing.route in {"metered-api", "provider-credits"}
             else None
         )
+        calculated_cost = self._calculated_cost(request.model, usage)
+        accounting = _finalize_accounting(
+            timed_out=capture.timed_out,
+            usage=usage,
+            usage_observed=parsed["usage_observed"],
+            calculated_cost=calculated_cost,
+            provider_reported_cost=reported_cost,
+        )
 
         return RunResult(
             run_id=request.run_id,
@@ -1766,9 +1871,10 @@ class OpenCodeAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=usage,
-            calculated_cost=self._calculated_cost(request.model, usage),
-            provider_reported_cost=reported_cost,
+            usage=accounting.usage,
+            calculated_cost=accounting.calculated_cost,
+            provider_reported_cost=accounting.provider_reported_cost,
+            accounting_status=accounting.status,
             billing=billing,
             provider_duration_seconds=parsed["duration_seconds"],
             provider_status=parsed["status"],
@@ -1862,6 +1968,7 @@ class OpenCodeAdapter:
         error = None
         status = None
         has_finish = False
+        usage_observed = False
         input_tokens = 0
         cached_input_tokens = 0
         output_tokens = 0
@@ -1909,6 +2016,7 @@ class OpenCodeAdapter:
                 final_message = "".join(current_message_parts) or None
                 tokens = part.get("tokens")
                 if isinstance(tokens, dict):
+                    usage_observed = True
                     cache = tokens.get("cache")
                     cache = cache if isinstance(cache, dict) else {}
                     cache_read = OpenCodeAdapter._integer(cache.get("read"))
@@ -1953,6 +2061,7 @@ class OpenCodeAdapter:
             "usage": usage,
             "reported_cost": reported_cost,
             "duration_seconds": duration_seconds,
+            "usage_observed": usage_observed,
         }
 
     @staticmethod
@@ -2053,6 +2162,18 @@ class AgyAdapter:
         else:
             error = None
         model = parsed["model"] or request.model
+        usage = parsed["usage"]
+        accounting = _finalize_accounting(
+            timed_out=capture.timed_out,
+            usage=usage,
+            usage_observed=parsed["usage_observed"],
+            calculated_cost=estimate_api_cost(
+                model,
+                usage,
+                providers=("google",),
+                catalog_model=_agy_catalog_model(model),
+            ),
+        )
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
@@ -2071,13 +2192,9 @@ class AgyAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=parsed["usage"],
-            calculated_cost=estimate_api_cost(
-                model,
-                parsed["usage"],
-                providers=("google",),
-                catalog_model=_agy_catalog_model(model),
-            ),
+            usage=accounting.usage,
+            calculated_cost=accounting.calculated_cost,
+            accounting_status=accounting.status,
             billing=self._billing_provenance(gemini_dir, environment),
             provider_duration_seconds=parsed["duration_seconds"],
             provider_status=parsed["status"],
@@ -2155,6 +2272,7 @@ class AgyAdapter:
         duration_seconds = None
         usage = TokenUsage()
         has_result = False
+        usage_observed = False
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -2187,9 +2305,9 @@ class AgyAdapter:
             duration = payload.get("duration_seconds")
             if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                 duration_seconds = round(float(duration), 6)
-            raw_usage = (
-                payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
-            )
+            raw_usage = payload.get("usage")
+            usage_observed = isinstance(raw_usage, dict)
+            raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
             usage = TokenUsage.from_dict(
                 {
                     "input_tokens": (
@@ -2210,6 +2328,7 @@ class AgyAdapter:
             "duration_seconds": duration_seconds,
             "usage": usage,
             "has_result": has_result,
+            "usage_observed": usage_observed,
         }
 
 
@@ -2299,6 +2418,16 @@ class HermesAdapter:
         billing = self._billing_provenance(after)
         if billing.route not in {"metered-api", "provider-credits"}:
             reported_cost = None
+        usage_observed = after is not None and (
+            baseline is None or after.usage != baseline.usage
+        )
+        accounting = _finalize_accounting(
+            timed_out=capture.timed_out,
+            usage=usage,
+            usage_observed=usage_observed,
+            calculated_cost=calculated_cost,
+            provider_reported_cost=reported_cost,
+        )
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
@@ -2328,9 +2457,10 @@ class HermesAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=usage,
-            calculated_cost=calculated_cost,
-            provider_reported_cost=reported_cost,
+            usage=accounting.usage,
+            calculated_cost=accounting.calculated_cost,
+            provider_reported_cost=accounting.provider_reported_cost,
+            accounting_status=accounting.status,
             billing=billing,
         )
 
@@ -2694,6 +2824,12 @@ class DeepSeekHarnessAdapter:
             error = None
         model = parsed["model"] or request.model
         usage = parsed["usage"]
+        accounting = _finalize_accounting(
+            timed_out=capture.timed_out,
+            usage=usage,
+            usage_observed=parsed["usage_observed"],
+            calculated_cost=self._estimate_cost(request, model, usage),
+        )
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
@@ -2715,8 +2851,9 @@ class DeepSeekHarnessAdapter:
             timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=usage,
-            calculated_cost=self._estimate_cost(request, model, usage),
+            usage=accounting.usage,
+            calculated_cost=accounting.calculated_cost,
+            accounting_status=accounting.status,
             billing=BillingProvenance(
                 route="metered-api",
                 credential_source=(
@@ -2774,10 +2911,12 @@ class DeepSeekHarnessAdapter:
                 "model": None,
                 "final_message": None,
                 "usage": TokenUsage(),
+                "usage_observed": False,
                 "completed": False,
                 "error": None,
             }
         raw_usage = result.get("usage")
+        usage_observed = isinstance(raw_usage, dict)
         raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
         uncached_input = _token_count(raw_usage.get("input_tokens"))
         cached_input = _token_count(raw_usage.get("cached_input_tokens"))
@@ -2805,6 +2944,7 @@ class DeepSeekHarnessAdapter:
                 else None
             ),
             "usage": usage,
+            "usage_observed": usage_observed,
             "completed": result.get("completed") is True,
             "error": result.get("error")
             if isinstance(result.get("error"), str)

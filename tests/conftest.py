@@ -808,6 +808,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 args = sys.argv[1:]
 if args[0] != "run" or "--format" not in args or "--auto" not in args:
@@ -866,7 +867,7 @@ print(json.dumps({{
     "sessionID": session_id,
     "part": {{"type": "step-start"}},
 }}), flush=True)
-if prompt == "OPENCODE_TOOL_LOOP":
+if prompt in {{"OPENCODE_TOOL_LOOP", "OPENCODE_PARTIAL_TIMEOUT"}}:
     print(json.dumps({{
         "type": "text",
         "timestamp": 1100,
@@ -890,6 +891,8 @@ if prompt == "OPENCODE_TOOL_LOOP":
             "cost": 0.0001,
         }},
     }}), flush=True)
+    if prompt == "OPENCODE_PARTIAL_TIMEOUT":
+        time.sleep(10)
     print(json.dumps({{
         "type": "step_start",
         "timestamp": 1300,

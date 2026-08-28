@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_orchestration_process.models import TOKEN_USAGE_SCHEMA, RunResult
+from agent_orchestration_process.models import (
+    LEGACY_TOKEN_USAGE_SCHEMA,
+    TOKEN_USAGE_SCHEMA,
+    RunResult,
+)
 from agent_orchestration_process.pricing import TokenUsage
 from agent_orchestration_process.runner import (
     AgyAdapter,
@@ -39,9 +43,12 @@ def test_codex_retained_terminal_usage_is_already_normalized() -> None:
         },
     }
 
-    _, _, usage, completed = CodexAdapter._parse_events(json.dumps(event))
+    _, _, usage, completed, usage_observed = CodexAdapter._parse_events(
+        json.dumps(event)
+    )
 
     assert completed
+    assert usage_observed
     assert _usage_tuple(usage) == (34_709, 13_056, 397, 135)
 
 
@@ -308,6 +315,7 @@ def test_versioned_result_round_trips_without_renormalization() -> None:
         },
     )
     raw["usage_schema"] = TOKEN_USAGE_SCHEMA
+    raw["accounting_status"] = "complete"
 
     result = RunResult.from_dict(raw)
     serialized = result.to_dict()
@@ -316,6 +324,37 @@ def test_versioned_result_round_trips_without_renormalization() -> None:
     assert serialized["usage_schema"] == TOKEN_USAGE_SCHEMA
     assert round_tripped == result
     assert _usage_tuple(round_tripped.usage) == (40, 30, 20, 7)
+
+
+def test_versioned_complete_result_preserves_measured_zero_usage() -> None:
+    raw = _result_dict("codex", {})
+    raw["usage_schema"] = TOKEN_USAGE_SCHEMA
+    raw["accounting_status"] = "complete"
+
+    result = RunResult.from_dict(raw)
+
+    assert result.accounting_status == "complete"
+    assert result.usage == TokenUsage()
+    assert result.to_dict()["usage"] == {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+
+
+def test_legacy_timed_out_zero_usage_loads_as_unavailable() -> None:
+    raw = _result_dict("codex", {})
+    raw["usage_schema"] = LEGACY_TOKEN_USAGE_SCHEMA
+    raw["timed_out"] = True
+    raw["exit_code"] = -15
+
+    result = RunResult.from_dict(raw)
+
+    assert result.usage_schema == TOKEN_USAGE_SCHEMA
+    assert result.accounting_status == "unavailable"
+    assert result.usage is None
+    assert result.calculated_cost is None
 
 
 def test_unknown_usage_schema_is_rejected() -> None:

@@ -894,6 +894,30 @@ def test_opencode_normalizes_multi_step_tool_loop(
     assert result.provider_reported_cost.amount_usd == 0.00022345
 
 
+def test_opencode_timeout_preserves_observed_partial_accounting(
+    repository: Path, fake_opencode: Path
+) -> None:
+    result = AgentRunner(
+        WorktreeManager.discover(repository),
+        OpenCodeAdapter(os.fspath(fake_opencode)),
+    ).run(
+        task="opencode-partial-timeout",
+        prompt="OPENCODE_PARTIAL_TIMEOUT",
+        timeout_seconds=0.05,
+    )
+
+    assert result.timed_out
+    assert result.accounting_status == "partial"
+    assert result.usage == TokenUsage(
+        input_tokens=8,
+        cached_input_tokens=3,
+        output_tokens=3,
+        reasoning_output_tokens=1,
+    )
+    assert result.provider_reported_cost is not None
+    assert result.provider_reported_cost.amount_usd == 0.0001
+
+
 def test_opencode_workspace_sandbox_and_artifact(
     repository: Path, fake_opencode: Path
 ) -> None:

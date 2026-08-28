@@ -97,6 +97,7 @@ prompt = "four"
     assert all(task.run_id for task in result.tasks)
     assert result.tasks[0].input_tokens == 1
     assert result.tasks[0].output_tokens == 1
+    assert result.tasks[0].accounting_status == "complete"
     assert result.tasks[0].calculated_cost_usd == 0.000035
     assert result.tasks[0].provider_reported_cost_usd is None
     assert result.tasks[0].billing_route == "subscription"
@@ -109,6 +110,7 @@ prompt = "four"
     assert len(summary["tasks"]) == 4
     assert summary["tasks"][0]["model"] == "gpt-5.6-sol"
     assert summary["tasks"][0]["billing_route"] == "subscription"
+    assert summary["tasks"][0]["accounting_status"] == "complete"
 
 
 def test_batch_archives_declared_artifacts(

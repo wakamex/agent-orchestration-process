@@ -277,7 +277,8 @@ def test_run_persists_structured_codex_artifacts(
     assert request["artifacts"] == []
     assert request["inputs"] == []
     assert persisted_result["succeeded"] is True
-    assert persisted_result["usage_schema"] == "aop-token-usage-v1"
+    assert persisted_result["usage_schema"] == "aop-token-usage-v2"
+    assert persisted_result["accounting_status"] == "complete"
     assert persisted_result["artifacts"] == []
     assert persisted_result["inference_provider"] is None
     assert persisted_result["inputs"] == []
@@ -844,8 +845,15 @@ def test_timeout_terminates_process_and_records_result(
     assert not result.succeeded
     assert result.timed_out
     assert result.error == "timed out after 0.05 seconds"
+    assert result.accounting_status == "unavailable"
+    assert result.usage is None
+    assert result.calculated_cost is None
+    assert result.provider_reported_cost is None
     result_path = repository / ".aop" / "runs" / result.run_id / "result.json"
-    assert json.loads(result_path.read_text())["timed_out"] is True
+    persisted = json.loads(result_path.read_text())
+    assert persisted["timed_out"] is True
+    assert persisted["usage"] is None
+    assert persisted["accounting_status"] == "unavailable"
 
 
 def test_turn_failure_is_not_reported_as_success(

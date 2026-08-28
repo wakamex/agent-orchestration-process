@@ -583,7 +583,11 @@ def _report_run(
             result.final_message,
             end="" if result.final_message.endswith("\n") else "\n",
         )
-    metrics = f"time={result.duration_seconds:.2f}s tokens={result.usage.total_tokens}"
+    token_count = result.usage.total_tokens if result.usage else "n/a"
+    metrics = (
+        f"time={result.duration_seconds:.2f}s tokens={token_count} "
+        f"accounting={result.accounting_status}"
+    )
     if result.calculated_cost:
         metrics += f" calculated_cost=${result.calculated_cost.amount_usd:.6f}"
     else:

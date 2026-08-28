@@ -8,7 +8,9 @@ from typing import Any
 from .pricing import CalculatedCost, TokenUsage
 
 
-TOKEN_USAGE_SCHEMA = "aop-token-usage-v1"
+LEGACY_TOKEN_USAGE_SCHEMA = "aop-token-usage-v1"
+TOKEN_USAGE_SCHEMA = "aop-token-usage-v2"
+ACCOUNTING_STATUSES = frozenset({"complete", "partial", "unavailable"})
 
 
 @dataclass(frozen=True)
@@ -150,7 +152,7 @@ class RunResult:
     timed_out: bool
     error: str | None
     final_message: str | None
-    usage: TokenUsage
+    usage: TokenUsage | None
     calculated_cost: CalculatedCost | None
     provider_reported_cost: ProviderReportedCost | None = None
     billing: BillingProvenance = BillingProvenance()
@@ -161,11 +163,27 @@ class RunResult:
     provider_duration_seconds: float | None = None
     provider_status: str | None = None
     provider_error: str | None = None
+    accounting_status: str = "complete"
     usage_schema: str = TOKEN_USAGE_SCHEMA
 
     def __post_init__(self) -> None:
         if self.usage_schema != TOKEN_USAGE_SCHEMA:
             raise ValueError(f"unsupported token usage schema: {self.usage_schema}")
+        if self.accounting_status not in ACCOUNTING_STATUSES:
+            raise ValueError(f"unsupported accounting status: {self.accounting_status}")
+        evidence = (
+            self.usage is not None
+            or self.calculated_cost is not None
+            or self.provider_reported_cost is not None
+        )
+        if self.accounting_status == "unavailable" and evidence:
+            raise ValueError("unavailable accounting cannot contain measurements")
+        if self.accounting_status == "partial" and not evidence:
+            raise ValueError("partial accounting requires a measurement")
+        if self.accounting_status == "complete" and self.usage is None:
+            raise ValueError("complete accounting requires token usage")
+        if self.calculated_cost is not None and self.usage is None:
+            raise ValueError("calculated cost requires token usage")
 
     @property
     def execution_completed(self) -> bool:
@@ -227,14 +245,26 @@ class RunResult:
         fields.setdefault("provider_error", None)
         usage_schema = fields.get("usage_schema")
         if usage_schema is None:
-            fields["usage"] = _legacy_usage(
+            usage = _legacy_usage(
                 fields.get("usage"),
                 provider=fields.get("provider"),
                 inference_provider=fields.get("inference_provider"),
             )
             fields["usage_schema"] = TOKEN_USAGE_SCHEMA
+            _load_legacy_accounting(fields, usage)
+        elif usage_schema == LEGACY_TOKEN_USAGE_SCHEMA:
+            usage = TokenUsage.from_dict(fields.get("usage"))
+            fields["usage_schema"] = TOKEN_USAGE_SCHEMA
+            _load_legacy_accounting(fields, usage)
         elif usage_schema == TOKEN_USAGE_SCHEMA:
-            fields["usage"] = TokenUsage.from_dict(fields.get("usage"))
+            status = fields.get("accounting_status")
+            if status not in ACCOUNTING_STATUSES:
+                raise ValueError(f"unsupported accounting status: {status}")
+            fields["usage"] = (
+                None
+                if fields.get("usage") is None
+                else TokenUsage.from_dict(fields.get("usage"))
+            )
         else:
             raise ValueError(f"unsupported token usage schema: {usage_schema}")
         legacy_cost = fields.pop("api_equivalent_cost", None)
@@ -272,6 +302,28 @@ class RunResult:
             InputSnapshot.from_dict(item) for item in fields.get("inputs", ())
         )
         return cls(**fields)
+
+
+def _load_legacy_accounting(fields: dict[str, Any], usage: TokenUsage) -> None:
+    if not fields.get("timed_out"):
+        fields["usage"] = usage
+        fields["accounting_status"] = "complete"
+        return
+    usage_observed = usage.total_tokens > 0
+    legacy_billing = fields.get("billing")
+    legacy_reported = (
+        isinstance(legacy_billing, dict)
+        and legacy_billing.get("actual_cost_known") is True
+    )
+    cost_observed = fields.get("provider_reported_cost") is not None or legacy_reported
+    if not usage_observed:
+        fields["calculated_cost"] = None
+        if not legacy_reported:
+            fields.pop("api_equivalent_cost", None)
+    fields["usage"] = usage if usage_observed else None
+    fields["accounting_status"] = (
+        "partial" if usage_observed or cost_observed else "unavailable"
+    )
 
 
 def _legacy_usage(

@@ -222,22 +222,27 @@ import sys
 import time
 
 args = sys.argv[1:]
+app_server = False
 if args == ["app-server", "--stdio"]:
+    app_server = True
     leaked = [name for name in os.environ if name.endswith("_API_KEY")]
-    if leaked:
-        print(f"Codex config discovery inherited credentials: {{leaked}}", file=sys.stderr)
-        raise SystemExit(2)
     configured = json.loads(os.environ.get("AOP_FAKE_CODEX_CONFIG_READ", "null"))
     config = configured or {{
         "model": "test",
         "model_provider": None,
         "model_providers": {{}},
     }}
+    session_id = {SESSION_ID!r}
+    turn_id = "019f4da1-342f-7670-8aac-25999973b295"
+    prompt = None
     for line in sys.stdin:
         request = json.loads(line)
         if request.get("id") == 1:
             print(json.dumps({{"id": 1, "result": {{"codexHome": os.environ.get("CODEX_HOME")}}}}), flush=True)
         elif request.get("method") == "config/read":
+            if leaked:
+                print(f"Codex config discovery inherited credentials: {{leaked}}", file=sys.stderr)
+                raise SystemExit(2)
             origins = {{}}
             for provider in config.get("model_providers", {{}}):
                 for field in ("base_url", "env_key", "wire_api"):
@@ -245,16 +250,71 @@ if args == ["app-server", "--stdio"]:
             print(json.dumps({{"id": request["id"], "result": {{"config": config, "origins": origins}}}}), flush=True)
         elif request.get("method") == "model/list":
             print(json.dumps({{"id": request["id"], "result": {{"data": []}}}}), flush=True)
-    raise SystemExit(0)
+        elif request.get("method") in {{"thread/start", "thread/resume"}}:
+            params = request.get("params", {{}})
+            if request["method"] == "thread/resume":
+                session_id = params.get("threadId")
+                marker = pathlib.Path(os.environ["CODEX_HOME"]) / "fake-resume-id"
+                if marker.is_file():
+                    session_id = marker.read_text().strip()
+            no_web = params.get("config", {{}}).get("web_search") == "disabled"
+            expected_sandbox = "workspace-write" if no_web else "danger-full-access"
+            if params.get("approvalPolicy") != "never" or params.get("sandbox") != expected_sandbox:
+                print(json.dumps({{"id": request["id"], "error": {{"message": "unsafe app-server policy"}}}}), flush=True)
+                continue
+            if no_web:
+                sandbox = params["config"].get("sandbox_workspace_write", {{}})
+                if sandbox.get("network_access") is not False or not sandbox.get("writable_roots"):
+                    print(json.dumps({{"id": request["id"], "error": {{"message": "no-web sandbox missing"}}}}), flush=True)
+                    continue
+            print(json.dumps({{
+                "id": request["id"],
+                "result": {{
+                    "thread": {{"id": session_id, "turns": []}},
+                    "model": params.get("model") or "gpt-5.6-sol",
+                    "modelProvider": "openai",
+                    "cwd": params.get("cwd"),
+                    "approvalPolicy": "never",
+                    "approvalsReviewer": "user",
+                    "sandbox": {{"type": "dangerFullAccess"}},
+                }},
+            }}), flush=True)
+            print(json.dumps({{
+                "method": "turn/completed",
+                "params": {{
+                    "threadId": session_id,
+                    "turn": {{"id": "stale-turn", "items": [], "status": "completed"}},
+                }},
+            }}), flush=True)
+        elif request.get("method") == "turn/start":
+            params = request.get("params", {{}})
+            prompt = params["input"][0]["text"]
+            if prompt == "DIFFERENT_SESSION":
+                session_id = "different-codex-thread"
+            print(json.dumps({{
+                "id": request["id"],
+                "result": {{"turn": {{"id": turn_id, "items": [], "status": "inProgress"}}}},
+            }}), flush=True)
+            print(json.dumps({{
+                "method": "turn/started",
+                "params": {{
+                    "threadId": session_id,
+                    "turn": {{"id": turn_id, "items": [], "status": "inProgress"}},
+                }},
+            }}), flush=True)
+            break
+    if prompt is None:
+        raise SystemExit(0)
 if args == ["login", "status"]:
     if os.environ.get("AOP_FAKE_CODEX_AUTH") == "api-key":
         print("Logged in using an API key")
     else:
         print("Logged in using ChatGPT")
     raise SystemExit(0)
-prompt = sys.stdin.read()
+if not app_server:
+    prompt = sys.stdin.read()
 {SEALED_PROVIDER_PROBE}
-output_path = pathlib.Path(args[args.index("--output-last-message") + 1])
+output_path = None if app_server else pathlib.Path(args[args.index("--output-last-message") + 1])
 codex_home = pathlib.Path(os.environ["CODEX_HOME"])
 if prompt.startswith("CHECK_ZAI_ROUTE"):
     config_text = codex_home.joinpath("config.toml").read_text()
@@ -351,7 +411,46 @@ if codex_home.joinpath("skills", ".system", "generated").exists():
     print("generated Codex skills were copied", file=sys.stderr)
     raise SystemExit(1)
 
-if prompt == "SLEEP":
+if prompt in {"SLEEP", "HANG_INTERRUPT"}:
+    if app_server:
+        for line in sys.stdin:
+            request = json.loads(line)
+            if request.get("method") != "turn/interrupt":
+                continue
+            if prompt == "HANG_INTERRUPT":
+                time.sleep(10)
+            print(json.dumps({{"id": request["id"], "result": {{}}}}), flush=True)
+            print(json.dumps({{
+                "method": "thread/tokenUsage/updated",
+                "params": {{
+                    "threadId": session_id,
+                    "turnId": turn_id,
+                    "tokenUsage": {{
+                        "last": {{
+                            "inputTokens": 10,
+                            "cachedInputTokens": 4,
+                            "outputTokens": 2,
+                            "reasoningOutputTokens": 1,
+                            "totalTokens": 12,
+                        }},
+                        "total": {{
+                            "inputTokens": 10,
+                            "cachedInputTokens": 4,
+                            "outputTokens": 2,
+                            "reasoningOutputTokens": 1,
+                            "totalTokens": 12,
+                        }},
+                    }},
+                }},
+            }}), flush=True)
+            print(json.dumps({{
+                "method": "turn/completed",
+                "params": {{
+                    "threadId": session_id,
+                    "turn": {{"id": turn_id, "items": [], "status": "interrupted"}},
+                }},
+            }}), flush=True)
+            raise SystemExit(0)
     time.sleep(10)
 
 output_dir = pathlib.Path(os.environ["AOP_OUTPUT_DIR"])
@@ -388,8 +487,9 @@ elif prompt.startswith("SYMLINK_ARTIFACT"):
     target.write_text("escaped")
     output_dir.joinpath("paper.md").symlink_to(target)
 
-session_id = {SESSION_ID!r}
-if "resume" in args:
+if not app_server:
+    session_id = {SESSION_ID!r}
+if not app_server and "resume" in args:
     session_id = args[args.index("resume") + 1]
     if not codex_home.joinpath("sessions", session_id).is_file():
         print("private Codex session is missing", file=sys.stderr)
@@ -423,33 +523,92 @@ if prompt.startswith("AOP conflict resolution"):
         ).stdout.rstrip()
         pathlib.Path(name).write_text(f"{{main_content}}\\n{{task_content}}\\n")
 
-print(json.dumps({{"type": "thread.started", "thread_id": session_id}}), flush=True)
-print(json.dumps({{"type": "turn.started"}}), flush=True)
+if not app_server:
+    print(json.dumps({{"type": "thread.started", "thread_id": session_id}}), flush=True)
+    print(json.dumps({{"type": "turn.started"}}), flush=True)
 
 if prompt == "FAIL":
-    print(json.dumps({{
-        "type": "turn.failed",
-        "error": {{"message": "synthetic failure"}},
-    }}), flush=True)
+    if app_server:
+        print(json.dumps({{
+            "method": "turn/completed",
+            "params": {{
+                "threadId": session_id,
+                "turn": {{
+                    "id": turn_id,
+                    "items": [],
+                    "status": "failed",
+                    "error": {{"message": "synthetic failure"}},
+                }},
+            }},
+        }}), flush=True)
+    else:
+        print(json.dumps({{
+            "type": "turn.failed",
+            "error": {{"message": "synthetic failure"}},
+        }}), flush=True)
     raise SystemExit(1)
 
 message = f"answer:{{prompt}}"
-output_path.write_text(message)
-print(json.dumps({{
-    "type": "item.completed",
-    "item": {{"id": "item_0", "type": "agent_message", "text": message}},
-}}), flush=True)
+if output_path is not None:
+    output_path.write_text(message)
+if app_server:
+    print(json.dumps({{
+        "method": "item/completed",
+        "params": {{
+            "threadId": session_id,
+            "turnId": turn_id,
+            "completedAtMs": 1,
+            "item": {{"id": "item_0", "type": "agentMessage", "text": message}},
+        }},
+    }}), flush=True)
+else:
+    print(json.dumps({{
+        "type": "item.completed",
+        "item": {{"id": "item_0", "type": "agent_message", "text": message}},
+    }}), flush=True)
 if prompt == "INCOMPLETE":
     raise SystemExit(0)
-print(json.dumps({{
-    "type": "turn.completed",
-    "usage": {{
-        "input_tokens": 1,
-        "cached_input_tokens": 0,
-        "output_tokens": 1,
-        "reasoning_output_tokens": 0,
-    }},
-}}), flush=True)
+if app_server:
+    print(json.dumps({{
+        "method": "thread/tokenUsage/updated",
+        "params": {{
+            "threadId": session_id,
+            "turnId": turn_id,
+            "tokenUsage": {{
+                "last": {{
+                    "inputTokens": 1,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 1,
+                    "reasoningOutputTokens": 0,
+                    "totalTokens": 2,
+                }},
+                "total": {{
+                    "inputTokens": 1,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 1,
+                    "reasoningOutputTokens": 0,
+                    "totalTokens": 2,
+                }},
+            }},
+        }},
+    }}), flush=True)
+    print(json.dumps({{
+        "method": "turn/completed",
+        "params": {{
+            "threadId": session_id,
+            "turn": {{"id": turn_id, "items": [], "status": "completed"}},
+        }},
+    }}), flush=True)
+else:
+    print(json.dumps({{
+        "type": "turn.completed",
+        "usage": {{
+            "input_tokens": 1,
+            "cached_input_tokens": 0,
+            "output_tokens": 1,
+            "reasoning_output_tokens": 0,
+        }},
+    }}), flush=True)
 """
     )
     executable.chmod(0o755)

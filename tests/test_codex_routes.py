@@ -61,9 +61,7 @@ def _stub_discovery(monkeypatch: pytest.MonkeyPatch, config: dict[str, object]) 
     monkeypatch.setattr(
         codex_routes,
         "_codex_config_read",
-        lambda *args, **kwargs: {
-            "result": {"config": config, "origins": origins}
-        },
+        lambda *args, **kwargs: {"result": {"config": config, "origins": origins}},
     )
     monkeypatch.setattr(
         codex_routes,
@@ -141,9 +139,7 @@ def test_project_config_cannot_choose_the_credential_reference(
     monkeypatch.setattr(
         codex_routes,
         "_codex_config_read",
-        lambda *args, **kwargs: {
-            "result": {"config": config, "origins": origins}
-        },
+        lambda *args, **kwargs: {"result": {"config": config, "origins": origins}},
     )
 
     with pytest.raises(AOPError, match="no valid Z.AI Coding Plan"):
@@ -397,6 +393,18 @@ def test_codex_route_no_web_keeps_only_generated_provider_config(
     )
 
     assert result.succeeded
-    assert "--no-tools" in result.command
-    assert "--ignore-rules" in result.command
-    assert "--ignore-user-config" not in result.command
+    assert result.command[-2:] == ["app-server", "--stdio"]
+    events = [
+        json.loads(line)
+        for line in (repository / ".aop" / "runs" / result.run_id / "events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    thread_start = next(
+        event for event in events if event.get("method") == "thread/start"
+    )
+    config = thread_start["params"]["config"]
+    assert config["web_search"] == "disabled"
+    assert config["tools"] == {"web_search": None}
+    assert config["sandbox_workspace_write"]["network_access"] is False
+    assert thread_start["params"]["sandbox"] == "workspace-write"

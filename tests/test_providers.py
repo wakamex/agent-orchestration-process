@@ -1181,9 +1181,7 @@ def test_agy_preserves_direct_gemini_route_in_isolated_state(
     private_agy = private_dir / "agy" / "gemini"
     assert json.loads(
         private_agy.joinpath("antigravity-cli", "settings.json").read_text()
-    ) == (
-        {"modelProvider": "gemini"} if profile == "sealed" else source_settings
-    )
+    ) == ({"modelProvider": "gemini"} if profile == "sealed" else source_settings)
     assert not private_agy.joinpath("oauth_creds.json").exists()
     assert not private_agy.joinpath("google_accounts.json").exists()
     assert not private_agy.joinpath(
@@ -1613,7 +1611,7 @@ def test_no_web_enforcement_is_recorded_for_supported_harnesses(
         (
             CodexAdapter(os.fspath(fake_codex)),
             "codex",
-            {"--no-tools", "--ignore-user-config", "--ignore-rules"},
+            {"app-server", "--stdio"},
         ),
         (
             ClaudeAdapter(os.fspath(fake_claude)),
@@ -1656,6 +1654,24 @@ def test_no_web_enforcement_is_recorded_for_supported_harnesses(
         assert capabilities["effective"]["tool_network_egress"] == "denied"
         assert capabilities["effective"]["inference_network"] == "allowed"
         assert capabilities["enforcement"]
+
+        if provider == "codex":
+            events = [
+                json.loads(line)
+                for line in (
+                    manager.state_dir / "runs" / result.run_id / "events.jsonl"
+                )
+                .read_text()
+                .splitlines()
+            ]
+            start = next(
+                event for event in events if event.get("method") == "thread/start"
+            )
+            config = start["params"]["config"]
+            assert config["web_search"] == "disabled"
+            assert config["tools"] == {"web_search": None}
+            assert config["sandbox_workspace_write"]["network_access"] is False
+            assert start["params"]["sandbox"] == "workspace-write"
 
         if provider in {"claude", "hermes"}:
             assert request["effective_policy"]["instructions"]["inherited_local"] == (
@@ -1732,7 +1748,18 @@ def test_no_web_is_inherited_by_resume_with_the_same_private_state(
     )
 
     assert resumed.succeeded
-    assert "--no-tools" in resumed.command
+    events = [
+        json.loads(line)
+        for line in (manager.state_dir / "runs" / resumed.run_id / "events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    resume = next(event for event in events if event.get("method") == "thread/resume")
+    config = resume["params"]["config"]
+    assert config["web_search"] == "disabled"
+    assert config["tools"] == {"web_search": None}
+    assert config["sandbox_workspace_write"]["network_access"] is False
+    assert resume["params"]["sandbox"] == "workspace-write"
     first_request = json.loads(
         (manager.state_dir / "runs" / first.run_id / "request.json").read_text()
     )
@@ -1747,6 +1774,11 @@ def test_no_web_is_inherited_by_resume_with_the_same_private_state(
     provider_state = Path(
         resumed_request["effective_policy"]["controller"]["provider_state"]
     )
+    private_home = provider_state / "codex" / "home"
+    assert private_home.joinpath("auth.json").is_file()
+    assert not private_home.joinpath("config.toml").exists()
+    assert not private_home.joinpath("rules").exists()
+    assert not private_home.joinpath("skills").exists()
     manager.remove("no-web-resume")
     assert not provider_state.exists()
 

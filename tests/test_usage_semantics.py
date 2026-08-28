@@ -33,23 +33,110 @@ def _usage_tuple(usage: TokenUsage) -> tuple[int, int, int, int]:
 
 
 def test_codex_retained_terminal_usage_is_already_normalized() -> None:
-    event = {
-        "type": "turn.completed",
-        "usage": {
-            "input_tokens": 34_709,
-            "cached_input_tokens": 13_056,
-            "output_tokens": 397,
-            "reasoning_output_tokens": 135,
+    events = [
+        {
+            "id": 2,
+            "result": {
+                "thread": {"id": "thread", "turns": []},
+                "model": "gpt-5.6-sol",
+            },
         },
-    }
+        {
+            "id": 3,
+            "result": {"turn": {"id": "turn", "items": [], "status": "inProgress"}},
+        },
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": "thread",
+                "turnId": "turn",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 34_709,
+                        "cachedInputTokens": 13_056,
+                        "outputTokens": 397,
+                        "reasoningOutputTokens": 135,
+                        "totalTokens": 35_106,
+                    },
+                    "total": {
+                        "inputTokens": 34_709,
+                        "cachedInputTokens": 13_056,
+                        "outputTokens": 397,
+                        "reasoningOutputTokens": 135,
+                        "totalTokens": 35_106,
+                    },
+                },
+            },
+        },
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread",
+                "turn": {"id": "turn", "items": [], "status": "completed"},
+            },
+        },
+    ]
 
-    _, _, usage, completed, usage_observed = CodexAdapter._parse_events(
-        json.dumps(event)
-    )
+    parsed = CodexAdapter._parse_events("\n".join(map(json.dumps, events)))
 
-    assert completed
-    assert usage_observed
-    assert _usage_tuple(usage) == (34_709, 13_056, 397, 135)
+    assert parsed["completed"]
+    assert parsed["usage_observed"]
+    assert _usage_tuple(parsed["usage"]) == (34_709, 13_056, 397, 135)
+
+
+def test_codex_sums_current_turn_updates_without_resumed_thread_history() -> None:
+    def usage_event(turn_id: str, input_tokens: int, output_tokens: int) -> dict:
+        breakdown = {
+            "inputTokens": input_tokens,
+            "cachedInputTokens": 0,
+            "outputTokens": output_tokens,
+            "reasoningOutputTokens": 0,
+            "totalTokens": input_tokens + output_tokens,
+        }
+        return {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": "thread",
+                "turnId": turn_id,
+                "tokenUsage": {"last": breakdown, "total": breakdown},
+            },
+        }
+
+    events = [
+        usage_event("previous-turn", 1000, 100),
+        {
+            "id": 2,
+            "result": {
+                "thread": {"id": "thread", "turns": []},
+                "model": "gpt-5.6-sol",
+            },
+        },
+        {
+            "id": 3,
+            "result": {
+                "turn": {"id": "current-turn", "items": [], "status": "inProgress"}
+            },
+        },
+        usage_event("current-turn", 10, 2),
+        usage_event("current-turn", 20, 3),
+        usage_event("other-turn", 2000, 200),
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread",
+                "turn": {
+                    "id": "current-turn",
+                    "items": [],
+                    "status": "completed",
+                },
+            },
+        },
+    ]
+
+    parsed = CodexAdapter._parse_events("\n".join(map(json.dumps, events)))
+
+    assert parsed["usage_observed"]
+    assert _usage_tuple(parsed["usage"]) == (30, 0, 5, 0)
 
 
 def test_claude_retained_result_adds_cache_creation_and_read_to_input() -> None:

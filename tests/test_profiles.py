@@ -305,7 +305,10 @@ def test_cli_no_web_dry_run_reports_effective_tool_policy_without_state(
     capabilities = policy["model_capabilities"]
     assert capabilities["requested"]["external_retrieval"] == "denied"
     assert capabilities["effective"]["external_retrieval"] == "denied"
-    assert capabilities["effective"]["model_tools"] == "denied"
+    assert capabilities["effective"]["model_tools"] == "allowlist"
+    assert capabilities["effective"]["allowed_toolsets"] == [
+        "local shell and file tools"
+    ]
     assert WorktreeManager.discover(repository).list() == []
 
 

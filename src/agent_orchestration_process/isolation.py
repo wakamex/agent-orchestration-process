@@ -264,12 +264,12 @@ def explain_profile(name: str) -> dict[str, object]:
 
 _NO_WEB_POLICIES: dict[str, dict[str, object]] = {
     "codex": {
-        "model_tools": "denied",
-        "allowed_toolsets": [],
+        "model_tools": "allowlist",
+        "allowed_toolsets": ["local shell and file tools"],
         "enforcement": [
-            "codex --no-tools",
-            "codex --ignore-user-config",
-            "codex --ignore-rules",
+            "Codex app-server web search disabled",
+            "Codex workspace sandbox network disabled",
+            "AOP authentication-only Codex state",
         ],
     },
     "claude": {

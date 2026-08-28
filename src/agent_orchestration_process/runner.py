@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import signal
@@ -18,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterator, Protocol, Sequence
+from typing import Any, Callable, Iterator, Protocol, Sequence
 
 import yaml
 from yaml.constructor import ConstructorError
@@ -234,6 +235,7 @@ class AgentAdapter(Protocol):
 class CodexAdapter:
     provider = "codex"
     modes = frozenset({"agent"})
+    _SHUTDOWN_GRACE_SECONDS = 5.0
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_CODEX_BIN", "codex")
@@ -251,21 +253,28 @@ class CodexAdapter:
         environment: dict[str, str],
     ) -> RunResult:
         _prepare_codex_environment(request, environment)
-        last_message_path = (
-            Path(environment["AOP_SCRATCH_DIR"])
-            / f".codex-last-message-{request.run_id}.txt"
-        )
         command = _provider_command(
-            self._command(request, worktree, last_message_path),
+            [self.binary, "app-server", "--stdio"],
             request,
             worktree,
             environment,
         )
         started_at = _now()
         started = time.monotonic()
-        timed_out = False
-        first_event_seconds = None
-        first_response_seconds = None
+        protocol_cwd = (
+            os.fspath(worktree.path) if request.profile == "host" else "/workspace"
+        )
+        codex_writable_roots = (
+            [
+                environment["AOP_OUTPUT_DIR"],
+                environment["AOP_SCRATCH_DIR"],
+                environment["AOP_PROVIDER_STATE_DIR"],
+                environment["AOP_CACHE_DIR"],
+                "/tmp",
+            ]
+            if request.profile == "host"
+            else ["/output", "/scratch", "/state", "/cache", "/tmp"]
+        )
 
         try:
             process = subprocess.Popen(
@@ -283,70 +292,39 @@ class CodexAdapter:
             stdout = ""
             stderr = f"command not found: {self.binary}\n"
             exit_code = 127
+            timed_out = False
+            first_event_seconds = None
+            first_response_seconds = None
         else:
-            stdout_parts: list[str] = []
-            stderr_parts: list[str] = []
-
-            def read_stdout() -> None:
-                nonlocal first_event_seconds, first_response_seconds
-                assert process.stdout is not None
-                for line in process.stdout:
-                    elapsed = time.monotonic() - started
-                    if first_event_seconds is None:
-                        first_event_seconds = elapsed
-                    if first_response_seconds is None and self._is_agent_message(line):
-                        first_response_seconds = elapsed
-                    stdout_parts.append(line)
-
-            def read_stderr() -> None:
-                assert process.stderr is not None
-                stderr_parts.extend(process.stderr)
-
-            stdout_reader = threading.Thread(target=read_stdout, daemon=True)
-            stderr_reader = threading.Thread(target=read_stderr, daemon=True)
-            stdout_reader.start()
-            stderr_reader.start()
-
             try:
-                assert process.stdin is not None
-                try:
-                    process.stdin.write(request.prompt)
-                    process.stdin.flush()
-                except BrokenPipeError:
-                    pass
-                finally:
-                    process.stdin.close()
-                process.wait(timeout=request.timeout_seconds)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                self._signal_process_group(process, signal.SIGTERM)
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self._signal_process_group(process, signal.SIGKILL)
-                    process.wait()
+                capture = self._run_app_server(
+                    process,
+                    request=request,
+                    cwd=protocol_cwd,
+                    writable_roots=codex_writable_roots,
+                    started=started,
+                )
             except KeyboardInterrupt:
-                self._signal_process_group(process, signal.SIGTERM)
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self._signal_process_group(process, signal.SIGKILL)
-                    process.wait()
+                self._stop_process(process)
                 raise
-            finally:
-                stdout_reader.join(timeout=5)
-                stderr_reader.join(timeout=5)
-            stdout = "".join(stdout_parts)
-            stderr = "".join(stderr_parts)
-            exit_code = process.returncode
+            stdout = capture.stdout
+            stderr = capture.stderr
+            exit_code = capture.exit_code
+            timed_out = capture.timed_out
+            first_event_seconds = capture.first_event_seconds
+            first_response_seconds = capture.first_response_seconds
 
         duration = time.monotonic() - started
         _atomic_write(run_dir / "events.jsonl", stdout)
         _atomic_write(run_dir / "stderr.log", stderr)
 
-        reported_session_id, event_error, usage, completed, usage_observed = (
-            self._parse_events(stdout)
-        )
+        parsed = self._parse_events(stdout)
+        reported_session_id = parsed["session_id"]
+        event_error = parsed["error"]
+        usage = parsed["usage"]
+        completed = parsed["completed"]
+        usage_observed = parsed["usage_observed"]
+        effective_model = request.model or parsed["model"]
         session_id = reported_session_id
         resume_error = None
         if request.session_id and reported_session_id != request.session_id:
@@ -370,24 +348,22 @@ class CodexAdapter:
         elif resume_error:
             error = resume_error
         elif reported_session_id is None:
-            error = "Codex did not emit a thread.started event"
+            error = "Codex did not return a thread identity"
         elif not completed:
-            error = "Codex did not emit a terminal turn.completed event"
+            error = "Codex did not emit a terminal turn/completed notification"
         else:
             error = None
 
-        final_message = None
-        if last_message_path.exists():
-            final_message = last_message_path.read_text()
+        final_message = parsed["final_message"]
+        if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
-            last_message_path.unlink()
         billing = self._billing_provenance(request, worktree.path, environment)
         accounting = _finalize_accounting(
             timed_out=timed_out,
             usage=usage,
             usage_observed=usage_observed,
             calculated_cost=estimate_api_cost(
-                request.model,
+                effective_model,
                 usage,
                 providers=("zai",) if request.inference_route else ("openai",),
             ),
@@ -398,7 +374,7 @@ class CodexAdapter:
             provider=request.provider,
             mode=request.mode,
             task=request.task,
-            model=request.model,
+            model=effective_model,
             effort=request.effort,
             session_id=session_id,
             command=_recorded_command(
@@ -423,6 +399,8 @@ class CodexAdapter:
             accounting_status=accounting.status,
             billing=billing,
             inference_route=request.inference_route,
+            provider_duration_seconds=parsed["provider_duration_seconds"],
+            provider_status=parsed["provider_status"],
         )
 
     def _billing_provenance(
@@ -452,45 +430,229 @@ class CodexAdapter:
             )
         return BillingProvenance(detected_by="codex login status")
 
-    def _command(
-        self, request: RunRequest, worktree: Worktree, last_message_path: Path
-    ) -> list[str]:
-        command = [
-            self.binary,
-            "exec",
-            "--json",
-            "--color",
-            "never",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--output-last-message",
-            os.fspath(last_message_path),
-            "-C",
-            os.fspath(worktree.path),
-        ]
-        if request.model and not request.session_id:
-            command.extend(["--model", request.model])
-        if request.effort and not request.session_id:
-            command.extend(["--config", f"model_reasoning_effort={request.effort}"])
-        if request.no_web:
-            command.append("--no-tools")
-            if request.inference_route is None:
-                command.append("--ignore-user-config")
-            command.append("--ignore-rules")
-        if request.session_id:
-            command.extend(["resume", request.session_id, "-"])
-        else:
-            command.append("-")
-        return command
+    def _run_app_server(
+        self,
+        process: subprocess.Popen[str],
+        *,
+        request: RunRequest,
+        cwd: str,
+        writable_roots: list[str],
+        started: float,
+    ) -> _ProcessCapture:
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        capture_lock = threading.Lock()
+        lines: queue.Queue[str | None] = queue.Queue()
+        first_event_seconds = None
+        first_response_seconds = None
+
+        def read_stdout() -> None:
+            nonlocal first_event_seconds, first_response_seconds
+            for line in process.stdout:
+                elapsed = time.monotonic() - started
+                if first_event_seconds is None:
+                    first_event_seconds = elapsed
+                if first_response_seconds is None and self._is_agent_message(line):
+                    first_response_seconds = elapsed
+                with capture_lock:
+                    stdout_parts.append(line)
+                lines.put(line)
+            lines.put(None)
+
+        def read_stderr() -> None:
+            stderr_parts.extend(process.stderr)
+
+        stdout_reader = threading.Thread(target=read_stdout, daemon=True)
+        stderr_reader = threading.Thread(target=read_stderr, daemon=True)
+        stdout_reader.start()
+        stderr_reader.start()
+        deadline = (
+            started + request.timeout_seconds
+            if request.timeout_seconds is not None
+            else None
+        )
+        responses: dict[int, dict[str, Any]] = {}
+        thread_id: str | None = None
+        turn_id: str | None = None
+        terminal_turn_ids: set[str] = set()
+        timed_out = False
+        interrupt_completed = False
+
+        def send(method: str, request_id: int | None, params: dict[str, Any]) -> bool:
+            value: dict[str, Any] = {"method": method, "params": params}
+            if request_id is not None:
+                value["id"] = request_id
+            serialized = f"{json.dumps(value)}\n"
+            with capture_lock:
+                stdout_parts.append(serialized)
+            try:
+                process.stdin.write(serialized)
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                return False
+            return True
+
+        def receive(until: float | None) -> bool:
+            nonlocal thread_id, turn_id
+            timeout = None if until is None else max(until - time.monotonic(), 0)
+            try:
+                line = lines.get(timeout=timeout)
+            except queue.Empty:
+                return False
+            if line is None:
+                return False
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                return True
+            if not isinstance(value, dict):
+                return True
+            response_id = value.get("id")
+            if isinstance(response_id, int):
+                responses[response_id] = value
+                result = value.get("result")
+                if response_id == 2 and isinstance(result, dict):
+                    thread = result.get("thread")
+                    if isinstance(thread, dict) and isinstance(thread.get("id"), str):
+                        thread_id = thread["id"]
+                elif response_id == 3 and isinstance(result, dict):
+                    turn = result.get("turn")
+                    if isinstance(turn, dict) and isinstance(turn.get("id"), str):
+                        turn_id = turn["id"]
+            if value.get("method") == "turn/completed":
+                params = value.get("params")
+                turn = params.get("turn") if isinstance(params, dict) else None
+                if isinstance(turn, dict) and isinstance(turn.get("id"), str):
+                    terminal_turn_ids.add(turn["id"])
+            return True
+
+        def wait_for(predicate: Callable[[], bool], until: float | None) -> bool:
+            while not predicate():
+                if until is not None and time.monotonic() >= until:
+                    return False
+                if not receive(until):
+                    return predicate()
+            return True
+
+        def response_ok(response_id: int) -> bool:
+            response = responses.get(response_id)
+            return response is not None and "error" not in response
+
+        try:
+            send(
+                "initialize",
+                1,
+                {
+                    "clientInfo": {
+                        "name": "aop",
+                        "title": "AOP",
+                        "version": "0.1.0",
+                    }
+                },
+            )
+            if not wait_for(lambda: 1 in responses, deadline) or not response_ok(1):
+                timed_out = deadline is not None and time.monotonic() >= deadline
+            else:
+                send("initialized", None, {})
+                thread_params: dict[str, Any] = {
+                    "cwd": cwd,
+                    "approvalPolicy": "never",
+                    "sandbox": (
+                        "workspace-write" if request.no_web else "danger-full-access"
+                    ),
+                }
+                if request.session_id:
+                    thread_method = "thread/resume"
+                    thread_params["threadId"] = request.session_id
+                else:
+                    thread_method = "thread/start"
+                    if request.model:
+                        thread_params["model"] = request.model
+                if request.no_web:
+                    thread_params["config"] = {
+                        "web_search": "disabled",
+                        "tools": {"web_search": None},
+                        "sandbox_workspace_write": {
+                            "network_access": False,
+                            "writable_roots": writable_roots,
+                        },
+                    }
+                send(thread_method, 2, thread_params)
+                if not wait_for(lambda: 2 in responses, deadline) or not response_ok(2):
+                    timed_out = deadline is not None and time.monotonic() >= deadline
+                elif thread_id is not None:
+                    turn_params: dict[str, Any] = {
+                        "threadId": thread_id,
+                        "input": [{"type": "text", "text": request.prompt}],
+                    }
+                    if request.effort and not request.session_id:
+                        turn_params["effort"] = request.effort
+                    send("turn/start", 3, turn_params)
+                    if not wait_for(
+                        lambda: 3 in responses, deadline
+                    ) or not response_ok(3):
+                        timed_out = (
+                            deadline is not None and time.monotonic() >= deadline
+                        )
+                    elif turn_id is not None and not wait_for(
+                        lambda: turn_id in terminal_turn_ids, deadline
+                    ):
+                        timed_out = (
+                            deadline is not None and time.monotonic() >= deadline
+                        )
+
+            if timed_out and thread_id is not None and turn_id is not None:
+                send(
+                    "turn/interrupt",
+                    4,
+                    {"threadId": thread_id, "turnId": turn_id},
+                )
+                interrupt_completed = wait_for(
+                    lambda: turn_id in terminal_turn_ids,
+                    time.monotonic() + self._SHUTDOWN_GRACE_SECONDS,
+                )
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+            if process.poll() is None:
+                if timed_out and not interrupt_completed:
+                    self._stop_process(process)
+                else:
+                    try:
+                        process.wait(timeout=self._SHUTDOWN_GRACE_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        self._stop_process(process)
+            stdout_reader.join(timeout=self._SHUTDOWN_GRACE_SECONDS)
+            stderr_reader.join(timeout=self._SHUTDOWN_GRACE_SECONDS)
+
+        return _ProcessCapture(
+            stdout="".join(stdout_parts),
+            stderr="".join(stderr_parts),
+            exit_code=process.returncode,
+            timed_out=timed_out,
+            duration_seconds=round(time.monotonic() - started, 6),
+            first_event_seconds=_rounded(first_event_seconds),
+            first_response_seconds=_rounded(first_response_seconds),
+        )
 
     @staticmethod
-    def _parse_events(
-        output: str,
-    ) -> tuple[str | None, str | None, TokenUsage, bool, bool]:
+    def _parse_events(output: str) -> dict[str, Any]:
         session_id = None
+        turn_id = None
+        model = None
         error = None
         usage = TokenUsage()
         completed = False
         usage_observed = False
+        final_message = None
+        provider_duration_seconds = None
+        provider_status = None
+        events = []
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -498,38 +660,96 @@ class CodexAdapter:
                 continue
             if not isinstance(event, dict):
                 continue
-            event_type = event.get("type")
-            if event_type == "thread.started" and isinstance(
-                event.get("thread_id"), str
-            ):
-                session_id = event["thread_id"]
-            elif event_type == "turn.failed":
-                payload = event.get("error")
+            events.append(event)
+            response_id = event.get("id")
+            result = event.get("result")
+            if response_id == 2 and isinstance(result, dict):
+                thread = result.get("thread")
+                if isinstance(thread, dict) and isinstance(thread.get("id"), str):
+                    session_id = thread["id"]
+                if isinstance(result.get("model"), str):
+                    model = result["model"]
+            elif response_id == 3 and isinstance(result, dict):
+                turn = result.get("turn")
+                if isinstance(turn, dict) and isinstance(turn.get("id"), str):
+                    turn_id = turn["id"]
+            if "error" in event and isinstance(response_id, int):
+                payload = event["error"]
                 if isinstance(payload, dict) and isinstance(
                     payload.get("message"), str
                 ):
                     error = payload["message"]
-                else:
-                    error = "Codex turn failed"
-            elif event_type == "error" and isinstance(event.get("message"), str):
-                error = event["message"]
-            elif event_type == "turn.completed":
-                completed = True
-                if isinstance(event.get("usage"), dict):
+                elif error is None:
+                    error = "Codex app-server request failed"
+
+        for event in events:
+            method = event.get("method")
+            params = event.get("params")
+            if not isinstance(params, dict):
+                continue
+            if (
+                method == "thread/tokenUsage/updated"
+                and params.get("turnId") == turn_id
+            ):
+                token_usage = params.get("tokenUsage")
+                last = (
+                    token_usage.get("last") if isinstance(token_usage, dict) else None
+                )
+                if isinstance(last, dict):
                     usage_observed = True
-                    current = TokenUsage.from_dict(event["usage"])
                     usage = TokenUsage(
-                        input_tokens=usage.input_tokens + current.input_tokens,
-                        cached_input_tokens=(
-                            usage.cached_input_tokens + current.cached_input_tokens
-                        ),
-                        output_tokens=usage.output_tokens + current.output_tokens,
-                        reasoning_output_tokens=(
-                            usage.reasoning_output_tokens
-                            + current.reasoning_output_tokens
-                        ),
+                        input_tokens=usage.input_tokens
+                        + _token_count(last.get("inputTokens")),
+                        cached_input_tokens=usage.cached_input_tokens
+                        + _token_count(last.get("cachedInputTokens")),
+                        output_tokens=usage.output_tokens
+                        + _token_count(last.get("outputTokens")),
+                        reasoning_output_tokens=usage.reasoning_output_tokens
+                        + _token_count(last.get("reasoningOutputTokens")),
                     )
-        return session_id, error, usage, completed, usage_observed
+            elif method == "item/completed" and params.get("turnId") == turn_id:
+                item = params.get("item")
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "agentMessage"
+                    and isinstance(item.get("text"), str)
+                ):
+                    final_message = item["text"]
+            elif method == "turn/completed":
+                turn = params.get("turn")
+                if isinstance(turn, dict) and turn.get("id") == turn_id:
+                    completed = True
+                    status = turn.get("status")
+                    if isinstance(status, str):
+                        provider_status = status
+                    duration_ms = turn.get("durationMs")
+                    if isinstance(duration_ms, int) and not isinstance(
+                        duration_ms, bool
+                    ):
+                        provider_duration_seconds = round(duration_ms / 1000, 6)
+                    if status == "failed":
+                        payload = turn.get("error")
+                        if isinstance(payload, dict) and isinstance(
+                            payload.get("message"), str
+                        ):
+                            error = payload["message"]
+                        else:
+                            error = "Codex turn failed"
+                    elif status == "interrupted" and error is None:
+                        error = "Codex turn was interrupted"
+            elif method == "error" and isinstance(params.get("message"), str):
+                error = params["message"]
+        return {
+            "session_id": session_id,
+            "model": model,
+            "error": error,
+            "usage": usage,
+            "completed": completed,
+            "usage_observed": usage_observed,
+            "final_message": final_message,
+            "provider_duration_seconds": provider_duration_seconds,
+            "provider_status": provider_status,
+        }
 
     @staticmethod
     def _is_agent_message(line: str) -> bool:
@@ -537,12 +757,24 @@ class CodexAdapter:
             event = json.loads(line)
         except json.JSONDecodeError:
             return False
-        return (
-            isinstance(event, dict)
-            and event.get("type") in {"item.started", "item.updated", "item.completed"}
-            and isinstance(event.get("item"), dict)
-            and event["item"].get("type") == "agent_message"
+        return isinstance(event, dict) and (
+            event.get("method") == "item/agentMessage/delta"
+            or (
+                event.get("method") in {"item/started", "item/completed"}
+                and isinstance(event.get("params"), dict)
+                and isinstance(event["params"].get("item"), dict)
+                and event["params"]["item"].get("type") == "agentMessage"
+            )
         )
+
+    @classmethod
+    def _stop_process(cls, process: subprocess.Popen[str]) -> None:
+        cls._signal_process_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=cls._SHUTDOWN_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            cls._signal_process_group(process, signal.SIGKILL)
+            process.wait()
 
     @staticmethod
     def _signal_process_group(
@@ -1828,8 +2060,7 @@ class OpenCodeAdapter:
             error = resume_error
         elif not parsed["has_finish"]:
             error = (
-                parsed["error"]
-                or "OpenCode did not emit a terminal step_finish event"
+                parsed["error"] or "OpenCode did not emit a terminal step_finish event"
             )
         elif reported_session_id is None:
             error = "OpenCode result did not report a session ID"
@@ -3549,7 +3780,7 @@ def _prepare_codex_environment(
     _prepare_codex_state(
         source,
         destination,
-        sealed=_sealed(environment),
+        sealed=_sealed(environment) or request.no_web,
         custom_route=request.inference_route is not None,
     )
     if request.inference_route is not None:

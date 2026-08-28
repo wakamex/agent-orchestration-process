@@ -65,15 +65,12 @@ shell execution. The harness keeps the inference network access needed to call i
 If the selected adapter cannot prove the complete boundary, AOP rejects the run before creating a
 worktree or provider state.
 
-The effective policy is stored in `request.json` under `model_capabilities`. Some harnesses require
-a stronger restriction than the name suggests. Codex and OpenCode currently run without any
-model-visible tools, while Claude, Grok, and Hermes retain explicit local-only tool allowlists.
-Cursor, Devin, Antigravity, and DeepSeek Harness currently reject `--no-web`.
-Grok also rejects the `host` profile because host-visible global customizations cannot be excluded
-with its current automation interface.
+The effective policy is stored in `request.json` under `model_capabilities`. Some harnesses require a stronger restriction than the name suggests. OpenCode currently runs without any model-visible tools, while Codex, Claude, Grok, and Hermes retain local-only tools. Cursor, Devin, Antigravity, and DeepSeek Harness currently reject `--no-web`. Grok also rejects the `host` profile because host-visible global customizations cannot be excluded with its current automation interface.
 
 Exact resumes inherit the original `--no-web` policy and private provider state. For batch
 manifests, set `no_web = true` on a task.
+
+Codex runs use app-server for new turns and exact resumes. When `--timeout` expires, AOP requests native turn interruption and allows up to five additional seconds only for terminal accounting and process teardown. That grace does not extend the requested work budget, and the result remains timed out.
 
 ## Machine-readable results
 

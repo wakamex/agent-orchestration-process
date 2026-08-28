@@ -23,6 +23,8 @@ Every result records an `accounting_status` of `complete`, `partial`, or `unavai
 
 Calculated cost is retained for a partial result only when token usage was observed. Provider-reported cost can be retained independently because it is direct monetary evidence. These rules are adapter-neutral; each adapter only identifies whether its native event or session export contained usage evidence.
 
+Codex app-server emits usage updates scoped to the active turn. AOP sums the `last` usage breakdown from each current-turn update, excluding cumulative totals and updates for previous turns on exact resume. At a deadline, AOP requests native `turn/interrupt` and retains any usage delivered during the bounded teardown grace. ChatGPT subscription authentication does not provide per-run monetary spend, so AOP calculates an API-equivalent comparison from the observed tokens and effective model while leaving `provider_reported_cost` null. If Codex emits no usage for the interrupted turn, accounting remains unavailable rather than falling back to session-history recovery.
+
 Every run also records wall-clock time, time to first provider event, and time to the agent response
 when the provider exposes it. Resume results contain only the current invocation's usage rather than
 cumulative session totals.

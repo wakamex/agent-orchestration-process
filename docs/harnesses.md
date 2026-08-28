@@ -50,7 +50,7 @@ retrieval. Enforcement differs because the harnesses expose different native con
 
 | Harness | Effective no-web policy |
 | --- | --- |
-| Codex | All model tools disabled and rules ignored. Native routes ignore user config; selected external routes receive an AOP-generated provider-only config. |
+| Codex | Native web search and tool network access disabled; local shell and file tools remain available inside Codex's network-disabled workspace sandbox. Native routes use authentication-only state; selected external routes receive an AOP-generated provider-only config. |
 | Claude Code | Local file-tool allowlist; safe mode, Chrome, and MCP restrictions enabled. |
 | OpenCode | All model tool calls denied; external plugins disabled. |
 | Grok Build | Isolated profiles only; local file-tool allowlist; native web, subagent, shell, fetch, and MCP routes denied; authentication-only state. |
@@ -85,6 +85,10 @@ filesystem and environment boundary.
 ### Codex
 
 For native routes under `edit` and `review`, AOP seeds authentication, root configuration, user rules and skills, and the model catalog. It does not copy sessions, history, databases, logs, caches, or generated system skills. Native `sealed` runs receive authentication only.
+
+AOP executes new Codex turns and exact resumes through Codex app-server. The native protocol supplies thread identity, terminal messages, per-turn token usage, effective model identity, and exact resume without AOP reading Codex session history. When a run reaches its AOP deadline, AOP sends `turn/interrupt`, allows a bounded five-second accounting and teardown grace outside the requested run time, and then terminates the provider process if it does not stop. A timed-out turn remains failed even when native interruption returns terminal accounting evidence.
+
+Under `--no-web`, AOP gives app-server authentication-only state, disables native web search, and selects Codex's workspace sandbox with network access disabled. Local shell and file tools remain usable within the outer AOP filesystem profile, so an `edit` run can modify its task worktree without permitting tool-controlled network retrieval.
 
 Z.AI Coding Plan remains a Codex inference route rather than a separate harness. Configure a native Codex provider for `https://api.z.ai/api/v1` with `wire_api = "responses"`, `requires_openai_auth = false`, and one environment-key credential. AOP reads the effective layered Codex configuration for the task working directory through app-server `config/read`, records the stable route identity as `zai-coding-plan`, and separately preserves the native Codex provider key.
 

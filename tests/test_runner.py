@@ -260,9 +260,9 @@ def test_run_persists_structured_codex_artifacts(
     assert result.time_to_first_event_seconds is not None
     assert result.time_to_first_response_seconds is not None
     assert result.provider_duration_seconds is None
+    assert result.provider_status == "completed"
     assert result.command[0] == "bwrap"
-    assert "--dangerously-bypass-approvals-and-sandbox" in result.command
-    assert result.command[-1] == "-"
+    assert result.command[-2:] == ["app-server", "--stdio"]
 
     run_dir = repository / ".aop" / "runs" / result.run_id
     assert (repository / ".aop" / "runs").stat().st_mode & 0o777 == 0o700
@@ -309,7 +309,9 @@ def test_run_persists_structured_codex_artifacts(
     legacy_result["read_paths"] = legacy_result.pop("inputs")
     loaded_read_paths = RunResult.from_dict(legacy_result)
     assert loaded_read_paths.inputs == loaded_legacy.inputs
-    assert '"type": "thread.started"' in events
+    assert '"method": "thread/start"' in events
+    assert '"approvalPolicy": "never"' in events
+    assert '"sandbox": "danger-full-access"' in events
     assert (run_dir / "stderr.log").read_text() == ""
 
 
@@ -781,9 +783,36 @@ def test_resume_uses_recorded_session_and_links_runs(
     assert resumed.effort == "medium"
     assert resumed.calculated_cost is not None
     assert resumed.final_message == "answer:second"
-    resume_index = resumed.command.index("resume")
-    assert resumed.command[resume_index + 1 : resume_index + 3] == [SESSION_ID, "-"]
-    assert "--model" not in resumed.command
+    assert resumed.command[-2:] == ["app-server", "--stdio"]
+    first_events = [
+        json.loads(line)
+        for line in (manager.state_dir / "runs" / first.run_id / "events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    resumed_events = [
+        json.loads(line)
+        for line in (manager.state_dir / "runs" / resumed.run_id / "events.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    first_start = next(
+        event for event in first_events if event.get("method") == "thread/start"
+    )
+    first_turn = next(
+        event for event in first_events if event.get("method") == "turn/start"
+    )
+    resume = next(
+        event for event in resumed_events if event.get("method") == "thread/resume"
+    )
+    resumed_turn = next(
+        event for event in resumed_events if event.get("method") == "turn/start"
+    )
+    assert first_start["params"]["model"] == "gpt-5.6-terra"
+    assert first_turn["params"]["effort"] == "medium"
+    assert resume["params"]["threadId"] == SESSION_ID
+    assert "model" not in resume["params"]
+    assert "effort" not in resumed_turn["params"]
 
     request_path = repository / ".aop" / "runs" / resumed.run_id / "request.json"
     request = json.loads(request_path.read_text())
@@ -845,15 +874,46 @@ def test_timeout_terminates_process_and_records_result(
     assert not result.succeeded
     assert result.timed_out
     assert result.error == "timed out after 0.05 seconds"
-    assert result.accounting_status == "unavailable"
-    assert result.usage is None
-    assert result.calculated_cost is None
+    assert result.accounting_status == "partial"
+    assert result.usage is not None
+    assert result.usage.input_tokens == 10
+    assert result.usage.cached_input_tokens == 4
+    assert result.usage.output_tokens == 2
+    assert result.usage.reasoning_output_tokens == 1
+    assert result.calculated_cost is not None
+    assert result.calculated_cost.amount_usd == 0.000092
+    assert result.provider_status == "interrupted"
     assert result.provider_reported_cost is None
     result_path = repository / ".aop" / "runs" / result.run_id / "result.json"
     persisted = json.loads(result_path.read_text())
     assert persisted["timed_out"] is True
-    assert persisted["usage"] is None
-    assert persisted["accounting_status"] == "unavailable"
+    assert persisted["usage"] == {
+        "input_tokens": 10,
+        "cached_input_tokens": 4,
+        "output_tokens": 2,
+        "reasoning_output_tokens": 1,
+    }
+    assert persisted["accounting_status"] == "partial"
+
+
+def test_codex_timeout_falls_back_to_process_termination_when_interrupt_hangs(
+    repository: Path, fake_codex: Path
+) -> None:
+    manager = WorktreeManager.discover(repository)
+    adapter = CodexAdapter(os.fspath(fake_codex))
+    adapter._SHUTDOWN_GRACE_SECONDS = 0.05
+
+    result = AgentRunner(manager, adapter).run(
+        task="hung-interrupt",
+        prompt="HANG_INTERRUPT",
+        timeout_seconds=0.05,
+    )
+
+    assert result.timed_out
+    assert result.accounting_status == "unavailable"
+    assert result.usage is None
+    events = (manager.state_dir / "runs" / result.run_id / "events.jsonl").read_text()
+    assert '"method": "turn/interrupt"' in events
 
 
 def test_turn_failure_is_not_reported_as_success(
@@ -882,7 +942,7 @@ def test_codex_requires_a_terminal_completion_event(
     assert result.exit_code == 0
     assert result.session_id == SESSION_ID
     assert result.final_message == "answer:INCOMPLETE"
-    assert result.error == "Codex did not emit a terminal turn.completed event"
+    assert result.error == "Codex did not emit a terminal turn/completed notification"
 
 
 def test_codex_rejects_a_changed_resume_thread(
@@ -891,8 +951,16 @@ def test_codex_rejects_a_changed_resume_thread(
     manager = WorktreeManager.discover(repository)
     runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
     first = runner.run(task="codex-resume-identity", prompt="first")
+    private_home = (
+        manager.state_dir
+        / "provider-state"
+        / "codex-resume-identity"
+        / "codex"
+        / "home"
+    )
+    private_home.joinpath("fake-resume-id").write_text("different-codex-thread")
 
-    resumed = runner.resume(run_id=first.run_id, prompt="DIFFERENT_SESSION")
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
 
     assert not resumed.succeeded
     assert resumed.exit_code == 0

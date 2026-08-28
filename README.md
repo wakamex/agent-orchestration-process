@@ -102,6 +102,8 @@ timing, token usage, cost evidence, logs, and declared artifacts. See
 [Token usage and pricing](docs/token-usage.md) for the normalized token contract, provider mappings,
 and cost calculation rules.
 
+Results distinguish complete accounting from partial or unavailable deadline accounting. If AOP terminates a run before the harness reports usage, `usage` and cost fields remain null instead of being reported as measured zero.
+
 ## Development
 
 Clone the repository and synchronize its locked development environment:

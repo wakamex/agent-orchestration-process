@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -126,6 +127,12 @@ def test_sealed_runtime_falls_back_when_user_runtime_is_read_only(
     assert runtime.parent == Path("/tmp") / f"aop-sealed-{os.getuid()}"
 
 
+@pytest.mark.skipif(
+    not Path("/dev/fuse").exists()
+    or shutil.which("fuse-overlayfs") is None
+    or shutil.which("fusermount3") is None,
+    reason="FUSE overlay support is unavailable",
+)
 def test_exec_overlay_is_private_and_persists_until_task_removal(
     repository: Path,
 ) -> None:

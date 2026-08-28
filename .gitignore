@@ -1,4 +1,6 @@
 /.aop/
+/.codex-zai/
+/.env
 /.pytest_cache/
 /.ruff_cache/
 /.venv/

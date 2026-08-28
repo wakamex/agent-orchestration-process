@@ -23,6 +23,12 @@ schema, runtime state, or resume behavior:
   available.
 - Keep cleanup, checkpointing, and Git integration outside agent control.
 
+Codex runs can also use [Z.AI Coding Plan](docs/harnesses.md#codex) as the `zai-coding-plan` inference provider rather than as a separate harness. AOP resolves the effective native Codex configuration, validates the authenticated model inventory, projects only the selected credential into isolated runs, and preserves the exact route for resume. List the currently available models with:
+
+```sh
+aop models --agent codex --provider zai-coding-plan
+```
+
 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/) standardizes interactive
 communication between agents and clients such as editors and IDEs. Use ACP when a person needs to
 chat, approve actions, watch progress, and steer a session.

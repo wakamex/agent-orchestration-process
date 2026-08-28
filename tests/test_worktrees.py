@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_orchestration_process import worktrees
 from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
@@ -110,6 +111,19 @@ def test_exec_exposes_task_environment(repository: Path) -> None:
     ]
 
     manager.remove("exec-task", force=True)
+
+
+def test_sealed_runtime_falls_back_when_user_runtime_is_read_only(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_runtime = tmp_path / "user-runtime"
+    user_runtime.mkdir()
+    monkeypatch.setattr(worktrees, "_user_runtime_dir", lambda: user_runtime)
+    monkeypatch.setattr(worktrees.os, "access", lambda path, mode: False)
+
+    runtime = WorktreeManager(repository).sealed_runtime_dir
+
+    assert runtime.parent == Path("/tmp") / f"aop-sealed-{os.getuid()}"
 
 
 def test_exec_overlay_is_private_and_persists_until_task_removal(

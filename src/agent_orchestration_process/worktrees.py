@@ -20,6 +20,10 @@ TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 IGNORE_ENTRY = "/.aop/"
 
 
+def _user_runtime_dir() -> Path:
+    return Path("/run/user") / str(os.getuid())
+
+
 class AOPError(RuntimeError):
     """A user-actionable orchestration error."""
 
@@ -69,8 +73,13 @@ class WorktreeManager:
     @property
     def sealed_runtime_dir(self) -> Path:
         identity = hashlib.sha256(os.fsencode(self.root)).hexdigest()[:24]
-        user_runtime = Path("/run/user") / str(os.getuid())
-        base = user_runtime if user_runtime.is_dir() else Path("/tmp")
+        user_runtime = _user_runtime_dir()
+        base = (
+            user_runtime
+            if user_runtime.is_dir()
+            and os.access(user_runtime, os.W_OK | os.X_OK)
+            else Path("/tmp")
+        )
         return base / f"aop-sealed-{os.getuid()}" / identity
 
     @classmethod

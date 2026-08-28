@@ -233,6 +233,7 @@ def test_models_json_reports_catalog_provenance(
 def test_codex_provider_inventory_reports_route_and_authenticated_snapshot(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
     route = InferenceRoute(
         provider="zai-coding-plan",
         native_provider="zai",

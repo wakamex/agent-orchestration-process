@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "agent-orchestration-process"
-version = "0.1.11"
+version = "0.1.12"
 description = "Run bounded, non-interactive jobs across agent harnesses with isolation, exact resume, and provenance"
 readme = "README.md"
 requires-python = ">=3.11"

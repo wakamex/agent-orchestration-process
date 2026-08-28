@@ -23,10 +23,17 @@ from typing import Callable, Iterator, Protocol, Sequence
 import yaml
 from yaml.constructor import ConstructorError
 
+from .codex_routes import (
+    inventory_document,
+    projected_codex_config,
+    resolve_codex_route,
+    verify_codex_route,
+)
 from .models import (
     BillingProvenance,
     InputFile,
     InputSnapshot,
+    InferenceRoute,
     RunArtifact,
     RunRequest,
     RunResult,
@@ -203,7 +210,7 @@ class CodexAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        _prepare_codex_environment(environment)
+        _prepare_codex_environment(request, environment)
         last_message_path = (
             Path(environment["AOP_SCRATCH_DIR"])
             / f".codex-last-message-{request.run_id}.txt"
@@ -332,7 +339,7 @@ class CodexAdapter:
             final_message = last_message_path.read_text()
             _atomic_write(run_dir / "last-message.txt", final_message)
             last_message_path.unlink()
-        billing = self._billing_provenance(worktree.path, environment)
+        billing = self._billing_provenance(request, worktree.path, environment)
 
         return RunResult(
             run_id=request.run_id,
@@ -342,7 +349,14 @@ class CodexAdapter:
             model=request.model,
             effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(command),
+            command=_recorded_command(
+                command,
+                secret_names=(
+                    {request.inference_route.credential_env}
+                    if request.inference_route is not None
+                    else None
+                ),
+            ),
             started_at=started_at,
             finished_at=_now(),
             duration_seconds=round(duration, 6),
@@ -353,13 +367,24 @@ class CodexAdapter:
             error=error,
             final_message=final_message,
             usage=usage,
-            calculated_cost=estimate_api_cost(request.model, usage),
+            calculated_cost=estimate_api_cost(
+                request.model,
+                usage,
+                providers=("zai",) if request.inference_route else ("openai",),
+            ),
             billing=billing,
+            inference_route=request.inference_route,
         )
 
     def _billing_provenance(
-        self, cwd: Path, environment: dict[str, str]
+        self, request: RunRequest, cwd: Path, environment: dict[str, str]
     ) -> BillingProvenance:
+        if request.inference_route is not None:
+            return BillingProvenance(
+                route="subscription",
+                credential_source=request.inference_route.credential_env,
+                detected_by="validated Z.AI Coding Plan route",
+            )
         status = _billing_probe([self.binary, "login", "status"], cwd, environment)
         if status is None:
             return BillingProvenance()
@@ -398,7 +423,10 @@ class CodexAdapter:
         if request.effort and not request.session_id:
             command.extend(["--config", f"model_reasoning_effort={request.effort}"])
         if request.no_web:
-            command.extend(["--no-tools", "--ignore-user-config", "--ignore-rules"])
+            command.append("--no-tools")
+            if request.inference_route is None:
+                command.append("--ignore-user-config")
+            command.append("--ignore-rules")
         if request.session_id:
             command.extend(["resume", request.session_id, "-"])
         else:
@@ -3092,6 +3120,12 @@ def _guest_environment(
     environment: dict[str, str], mappings: tuple[tuple[Path, Path], ...]
 ) -> dict[str, str]:
     selected = _filtered_environment(environment)
+    codex_credential_ref = environment.get("AOP_CODEX_CREDENTIAL_REF")
+    if codex_credential_ref is not None:
+        for name in _AUTH_ENV_NAMES:
+            selected.pop(name, None)
+        if codex_credential_ref in environment:
+            selected[codex_credential_ref] = environment[codex_credential_ref]
     allowed_dsh_auth = environment.get("AOP_DSH_ALLOWED_AUTH_ENV")
     if allowed_dsh_auth is not None:
         allowed = set(allowed_dsh_auth.split(",")) if allowed_dsh_auth else set()
@@ -3172,6 +3206,14 @@ _DSH_AUTH_ENV_NAMES = {
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "XAI_API_KEY",
+}
+
+_AUTH_ENV_NAMES = _DSH_AUTH_ENV_NAMES | {
+    "CURSOR_API_KEY",
+    "DEVIN_API_KEY",
+    "NOUS_API_KEY",
+    "OPENCODE_API_KEY",
+    "ZAI_API_KEY",
 }
 
 
@@ -3354,10 +3396,41 @@ _DEVIN_DATA_RUNTIME_NAMES = {
 }
 
 
-def _prepare_codex_environment(environment: dict[str, str]) -> None:
+def _prepare_codex_environment(
+    request: RunRequest, environment: dict[str, str]
+) -> None:
     source = _codex_source_home(environment)
-    destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "codex" / "home"
-    _prepare_codex_state(source, destination, sealed=_sealed(environment))
+    codex_root = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "codex"
+    destination = (
+        codex_root / "routes" / request.inference_route.inventory_sha256 / "home"
+        if request.inference_route is not None
+        else codex_root / "home"
+    )
+    _prepare_codex_state(
+        source,
+        destination,
+        sealed=_sealed(environment),
+        custom_route=request.inference_route is not None,
+    )
+    if request.inference_route is not None:
+        assert request.model is not None
+        catalog_path = destination / "models.json"
+        if request.profile != "host":
+            catalog_path = (
+                Path("/state")
+                / destination.relative_to(Path(environment["AOP_PROVIDER_STATE_DIR"]))
+                / "models.json"
+            )
+        _atomic_write_private(
+            destination / "config.toml",
+            projected_codex_config(
+                request.inference_route, request.model, os.fspath(catalog_path)
+            ),
+        )
+        _atomic_write_private(
+            destination / "models.json", inventory_document(request.inference_route)
+        )
+        environment["AOP_CODEX_CREDENTIAL_REF"] = request.inference_route.credential_env
     environment["CODEX_HOME"] = os.fspath(destination)
 
 
@@ -3539,7 +3612,11 @@ def _codex_source_home(environment: dict[str, str]) -> Path | None:
 
 
 def _prepare_codex_state(
-    source: Path | None, destination: Path, *, sealed: bool = False
+    source: Path | None,
+    destination: Path,
+    *,
+    sealed: bool = False,
+    custom_route: bool = False,
 ) -> None:
     if destination.is_dir():
         return
@@ -3550,6 +3627,8 @@ def _prepare_codex_state(
             for entry in source.iterdir():
                 target = temporary / entry.name
                 if sealed and entry.name != "auth.json":
+                    continue
+                if custom_route and entry.is_file():
                     continue
                 if entry.name in _CODEX_SEED_DIRECTORIES and entry.is_dir():
                     ignore = (
@@ -4315,6 +4394,22 @@ class AgentRunner:
             if profile == "sealed"
             else self._get_or_create_worktree(task, base)
         )
+        if self.adapter.provider == "codex":
+            source_home = _codex_source_home(os.environ)
+            inference_provider, model, route = resolve_codex_route(
+                self.adapter.binary,
+                source_home,
+                worktree.path,
+                inference_provider,
+                model,
+                os.environ,
+            )
+            request = replace(
+                request,
+                model=model,
+                inference_provider=inference_provider,
+                inference_route=route,
+            )
         return self._execute(request, worktree, input_paths=input_paths)
 
     def resume(
@@ -4391,12 +4486,17 @@ class AgentRunner:
         selected_inputs = (
             inherited_inputs if input_paths is None else tuple(input_paths)
         )
+        if parent_request.inference_route is not None:
+            verify_codex_route(
+                parent_request.inference_route, parent_request.model, os.environ
+            )
         request = self._request(
             task=parent_request.task,
             prompt=prompt,
             base=parent_request.base,
             model=parent_request.model,
             inference_provider=parent_request.inference_provider,
+            inference_route=parent_request.inference_route,
             effort=parent_request.effort,
             mode=parent_request.mode,
             profile=parent_request.profile,
@@ -4565,6 +4665,27 @@ class AgentRunner:
                 else _filtered_environment(os.environ).keys()
             )
         )
+        if request.inference_route is not None:
+            credential = request.inference_route.credential_env
+            if request.profile != "host":
+                effective_policy["environment"]["credential_names"] = [credential]
+                allowed = set(effective_policy["environment"]["allowed_names"])
+                allowed.difference_update(_AUTH_ENV_NAMES)
+                allowed.add(credential)
+                effective_policy["environment"]["allowed_names"] = sorted(allowed)
+                inherited = set(effective_policy["environment"]["inherited_names"])
+                inherited.difference_update(_AUTH_ENV_NAMES)
+                inherited.add(credential)
+                effective_policy["environment"]["inherited_names"] = sorted(inherited)
+            if request.no_web:
+                capabilities = effective_policy["model_capabilities"]
+                enforcement = capabilities.get("enforcement", [])
+                capabilities["enforcement"] = [
+                    "AOP projected provider-only Codex config"
+                    if item == "codex --ignore-user-config"
+                    else item
+                    for item in enforcement
+                ]
         request = replace(
             request,
             prompt=_run_prompt(
@@ -4641,6 +4762,7 @@ class AgentRunner:
         result = replace(
             result,
             inference_provider=request.inference_provider,
+            inference_route=request.inference_route,
             inputs=request.inputs,
         )
         if result.succeeded and request.artifacts:
@@ -4661,6 +4783,7 @@ class AgentRunner:
         profile: str,
         no_web: bool,
         timeout_seconds: float | None,
+        inference_route: InferenceRoute | None = None,
         session_id: str | None = None,
         parent_run_id: str | None = None,
         artifacts: Sequence[str] = (),
@@ -4674,6 +4797,7 @@ class AgentRunner:
             base=base,
             model=model,
             inference_provider=inference_provider,
+            inference_route=inference_route,
             effort=effort,
             profile=profile,
             no_web=no_web,
@@ -4707,7 +4831,7 @@ class AgentRunner:
     ) -> None:
         if inference_provider is None:
             return
-        if self.adapter.provider not in {"hermes", "dsh"}:
+        if self.adapter.provider not in {"codex", "hermes", "dsh"}:
             raise AOPError(
                 f"{self.adapter.provider} does not support --provider overrides"
             )

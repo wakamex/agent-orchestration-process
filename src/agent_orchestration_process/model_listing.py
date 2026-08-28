@@ -15,7 +15,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .codex_routes import ZAI_CODING_PLAN, resolve_codex_route
 from .model_catalog import ModelCatalog
+from .models import InferenceRoute
 from .provider_versions import require_supported_agy
 from .worktrees import AOPError
 
@@ -41,6 +43,10 @@ class AvailableModel:
     name: str
     availability: str
     price_scope: str
+    inference_provider: str | None = None
+    inventory_retrieved_at: str | None = None
+    inventory_sha256: str | None = None
+    authenticated: bool = False
     input_per_million_usd: float | None = None
     cached_input_per_million_usd: float | None = None
     cache_write_per_million_usd: float | None = None
@@ -51,9 +57,17 @@ class AvailableModel:
         return asdict(self)
 
 
-def list_models(agent: str, catalog: ModelCatalog) -> list[AvailableModel]:
+def list_models(
+    agent: str,
+    catalog: ModelCatalog,
+    inference_provider: str | None = None,
+) -> list[AvailableModel]:
     if agent == "codex":
-        return _codex_models(catalog)
+        return _codex_models(catalog, inference_provider)
+    if inference_provider is not None:
+        raise AOPError(
+            "--provider model inventory is currently supported only for Codex"
+        )
     if agent == "cursor":
         return _simple_cli_models(
             agent, _binary("cursor", "AOP_CURSOR_BIN", "agent"), ["models"], catalog
@@ -94,8 +108,25 @@ def list_models(agent: str, catalog: ModelCatalog) -> list[AvailableModel]:
     raise AOPError(f"unsupported agent: {agent}")
 
 
-def _codex_models(catalog: ModelCatalog) -> list[AvailableModel]:
+def _codex_models(
+    catalog: ModelCatalog, inference_provider: str | None
+) -> list[AvailableModel]:
     binary = _binary("codex", "AOP_CODEX_BIN", "codex")
+    configured = os.environ.get("AOP_CODEX_SOURCE_HOME") or os.environ.get("CODEX_HOME")
+    source_home = Path(configured).expanduser().resolve() if configured else None
+    provider, _, route = resolve_codex_route(
+        binary,
+        source_home,
+        Path.cwd(),
+        inference_provider,
+        None,
+        os.environ,
+        require_explicit_model=False,
+    )
+    if route is not None:
+        return _codex_route_models(catalog, route)
+    if provider is not None:
+        raise AOPError(f"Codex did not resolve provider {inference_provider}")
     response = _codex_model_response(binary)
     data = response.get("result", {}).get("data") if response else None
     if not isinstance(data, list):
@@ -115,6 +146,33 @@ def _codex_models(catalog: ModelCatalog) -> list[AvailableModel]:
                 catalog,
                 "openai",
                 model,
+            )
+        )
+    return records
+
+
+def _codex_route_models(
+    catalog: ModelCatalog, route: InferenceRoute
+) -> list[AvailableModel]:
+    if route.provider != ZAI_CODING_PLAN:
+        raise AOPError(f"Codex did not resolve provider {route.provider}")
+    records = []
+    for value in route.inventory_models:
+        model = value["slug"]
+        records.append(
+            _record(
+                "codex",
+                model,
+                str(value.get("display_name") or model),
+                "authenticated-endpoint",
+                "api-equivalent",
+                catalog,
+                "zai",
+                model,
+                inference_provider=route.provider,
+                inventory_retrieved_at=route.inventory_retrieved_at,
+                inventory_sha256=route.inventory_sha256,
+                authenticated=route.authenticated,
             )
         )
     return records
@@ -480,6 +538,11 @@ def _record(
     catalog: ModelCatalog,
     provider: str | None,
     priced_model: str | None,
+    *,
+    inference_provider: str | None = None,
+    inventory_retrieved_at: str | None = None,
+    inventory_sha256: str | None = None,
+    authenticated: bool = False,
 ) -> AvailableModel:
     metadata = (
         catalog.model(provider, priced_model) if provider and priced_model else None
@@ -492,6 +555,10 @@ def _record(
         name=name,
         availability=availability,
         price_scope=price_scope if cost else "unknown",
+        inference_provider=inference_provider,
+        inventory_retrieved_at=inventory_retrieved_at,
+        inventory_sha256=inventory_sha256,
+        authenticated=authenticated,
         input_per_million_usd=_number(cost.get("input")),
         cached_input_per_million_usd=_number(cost.get("cache_read")),
         cache_write_per_million_usd=_number(cost.get("cache_write")),

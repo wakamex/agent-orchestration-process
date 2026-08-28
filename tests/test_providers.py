@@ -1501,14 +1501,16 @@ def test_hermes_provider_override_is_recorded_and_reused_on_resume(
     assert resumed_result["inference_provider"] == "xai-oauth"
 
 
-def test_provider_override_requires_hermes_and_an_explicit_model(
+def test_provider_override_requires_a_supported_route_and_explicit_model(
     repository: Path,
     fake_codex: Path,
     fake_hermes: Path,
 ) -> None:
     manager = WorktreeManager.discover(repository)
 
-    with pytest.raises(AOPError, match="codex does not support --provider"):
+    with pytest.raises(
+        AOPError, match='codex inference provider "openai" is not supported'
+    ):
         AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
             task="unsupported-provider",
             prompt="unused",

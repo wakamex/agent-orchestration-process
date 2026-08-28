@@ -45,6 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     models.add_argument(
         "--refresh", action="store_true", help="refresh the shared model catalog now"
     )
+    models.add_argument(
+        "--provider",
+        help="list an inference provider inventory; currently Codex-only",
+    )
     models.add_argument("--json", action="store_true", help="print JSON")
 
     commands.add_parser("init", help="prepare the current Git repository for AOP")
@@ -104,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--provider",
         dest="inference_provider",
-        help="override the inference provider for Hermes or DeepSeek Harness",
+        help="override the inference provider for Codex, Hermes, or DeepSeek Harness",
     )
     run.add_argument(
         "--mode",
@@ -193,8 +197,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = build_parser().parse_args(raw_arguments)
 
         if args.command == "models":
+            agents = args.agent or AGENTS
+            if args.provider is not None and agents != ["codex"]:
+                raise AOPError("models --provider requires exactly --agent codex")
             catalog = ensure_catalog_fresh(force=args.refresh)
-            return _report_models(args.agent or AGENTS, catalog, json_output=args.json)
+            return _report_models(
+                agents,
+                catalog,
+                inference_provider=args.provider,
+                json_output=args.json,
+            )
 
         if args.command == "profile":
             policy = explain_profile(args.profile)
@@ -660,13 +672,17 @@ def _report_batch(result: BatchResult, manager: WorktreeManager) -> int:
 
 
 def _report_models(
-    agents: Sequence[str], catalog: ModelCatalog, *, json_output: bool
+    agents: Sequence[str],
+    catalog: ModelCatalog,
+    *,
+    inference_provider: str | None = None,
+    json_output: bool,
 ) -> int:
     models: list[AvailableModel] = []
     errors: dict[str, str] = {}
     for agent in agents:
         try:
-            models.extend(list_models(agent, catalog))
+            models.extend(list_models(agent, catalog, inference_provider))
         except AOPError as error:
             errors[agent] = str(error)
     models.sort(key=lambda item: (item.agent, item.model))
@@ -688,12 +704,13 @@ def _report_models(
         )
     else:
         print(
-            "agent\tmodel\tavailability\tprice-scope\tinput\tcache-read\t"
+            "agent\tprovider\tmodel\tavailability\tprice-scope\tinput\tcache-read\t"
             "cache-write\toutput"
         )
         for model in models:
             print(
-                f"{model.agent}\t{model.model}\t{model.availability}\t"
+                f"{model.agent}\t{model.inference_provider or '(native)'}\t"
+                f"{model.model}\t{model.availability}\t"
                 f"{model.price_scope}\t{_price(model.input_per_million_usd)}\t"
                 f"{_price(model.cached_input_per_million_usd)}\t"
                 f"{_price(model.cache_write_per_million_usd)}\t"

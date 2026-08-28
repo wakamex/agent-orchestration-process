@@ -8,7 +8,7 @@ session mechanism while giving every run the same AOP access controls and result
 
 | Harness | `--agent` | Default | Model and effort selection |
 | --- | --- | --- | --- |
-| [Codex](https://github.com/openai/codex) | `codex` | Native default | Accepts native model IDs and effort levels. |
+| [Codex](https://github.com/openai/codex) | `codex` | Native default | Accepts native model IDs and effort levels. Z.AI Coding Plan is available as the `zai-coding-plan` inference provider. |
 | [Claude Code](https://code.claude.com/docs/en/overview) | `claude` | Native default | Accepts normal model aliases and effort from `low` through `max`. |
 | [Cursor Agent](https://docs.cursor.com/en/cli/overview) | `cursor` | `composer-2.5` | Reasoning and fast variants are part of the model ID, so separate effort is rejected. |
 | [Devin CLI](https://docs.devin.ai/cli/index) | `devin` | `swe-1-7` | Reasoning variants are part of the model ID, so separate effort is rejected. |
@@ -28,7 +28,7 @@ provenance. Harness-native automation surfaces determine the remaining feature d
 
 | Harness | Enforced no-web | Participant | Model inventory | Provider override | Calculated cost | Provider-reported cost |
 | --- | --- | --- | --- | --- | --- | --- |
-| Codex | Yes | No | Account | No | API-equivalent | No |
+| Codex | Yes | No | Account or authenticated route | Z.AI Coding Plan | API-equivalent | No |
 | Claude Code | Yes | No | Catalog | No | CLI-calculated | No |
 | Cursor Agent | No | No | Account | No | No | No |
 | Devin CLI | No | No | Account | No | No | No |
@@ -50,7 +50,7 @@ retrieval. Enforcement differs because the harnesses expose different native con
 
 | Harness | Effective no-web policy |
 | --- | --- |
-| Codex | All model tools disabled; user config and rules ignored. |
+| Codex | All model tools disabled and rules ignored. Native routes ignore user config; selected external routes receive an AOP-generated provider-only config. |
 | Claude Code | Local file-tool allowlist; safe mode, Chrome, and MCP restrictions enabled. |
 | OpenCode | All model tool calls denied; external plugins disabled. |
 | Grok Build | Isolated profiles only; local file-tool allowlist; native web, subagent, shell, fetch, and MCP routes denied; authentication-only state. |
@@ -84,9 +84,19 @@ filesystem and environment boundary.
 
 ### Codex
 
-For `edit` and `review`, AOP seeds authentication, root configuration, user rules and skills, and
-the model catalog. It does not copy sessions, history, databases, logs, caches, or generated system
-skills. `sealed` receives authentication only.
+For native routes under `edit` and `review`, AOP seeds authentication, root configuration, user rules and skills, and the model catalog. It does not copy sessions, history, databases, logs, caches, or generated system skills. Native `sealed` runs receive authentication only.
+
+Z.AI Coding Plan remains a Codex inference route rather than a separate harness. Configure a native Codex provider for `https://api.z.ai/api/v1` with `wire_api = "responses"`, `requires_openai_auth = false`, and one environment-key credential. AOP reads the effective layered Codex configuration for the task working directory through app-server `config/read`, records the stable route identity as `zai-coding-plan`, and separately preserves the native Codex provider key.
+
+Use both `--provider zai-coding-plan` and `--model MODEL` for an explicit override. When native Codex configuration already selects the validated route, AOP records its effective model and route without requiring an override. AOP rejects ambiguous route matches, noncanonical endpoints, mixed authentication, missing credentials, and models absent from the fresh authenticated inventory.
+
+For isolated Z.AI runs, AOP creates route-private Codex state containing only the selected provider, pinned authenticated model catalog, and allowed rules or skills for the profile. It projects only the configured credential environment variable and never copies ChatGPT authentication, `.env`, unrelated providers, or unrelated API keys. Exact resume retains the original route and inventory snapshot while rereading the pinned credential variable and verifying current model availability.
+
+Inspect the current route inventory with:
+
+```sh
+aop models --agent codex --provider zai-coding-plan --json
+```
 
 Set `AOP_CODEX_SOURCE_HOME` when the authenticated source is not
 `${CODEX_HOME:-~/.codex}`.

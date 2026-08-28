@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from agent_orchestration_process import cli, model_catalog, model_listing
+from agent_orchestration_process.models import InferenceRoute
 from agent_orchestration_process.model_catalog import ModelCatalog, ensure_catalog_fresh
 from agent_orchestration_process.worktrees import AOPError
 
@@ -90,6 +91,11 @@ def test_native_model_parsers_and_pricing(
     commands = []
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
     monkeypatch.setattr(model_listing, "require_supported_agy", lambda binary: None)
+    monkeypatch.setattr(
+        model_listing,
+        "resolve_codex_route",
+        lambda *args, **kwargs: (None, None, None),
+    )
 
     monkeypatch.setattr(
         model_listing,
@@ -205,7 +211,7 @@ def test_models_json_reports_catalog_provenance(
     monkeypatch.setattr(
         cli,
         "list_models",
-        lambda agent, catalog: [
+        lambda agent, catalog, provider=None: [
             model_listing.AvailableModel(
                 agent=agent,
                 model="example",
@@ -222,6 +228,49 @@ def test_models_json_reports_catalog_provenance(
     assert output["models"][0]["model"] == "example"
     assert output["catalog"]["source"] == model_catalog.CATALOG_URL
     assert len(output["catalog"]["sha256"]) == 64
+
+
+def test_codex_provider_inventory_reports_route_and_authenticated_snapshot(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    route = InferenceRoute(
+        provider="zai-coding-plan",
+        native_provider="zai",
+        endpoint="https://api.z.ai/api/v1",
+        wire_api="responses",
+        credential_env="ZAI_API_KEY",
+        authenticated=True,
+        inventory_retrieved_at="2026-08-28T00:00:00+00:00",
+        inventory_sha256="b" * 64,
+        inventory_models=({"slug": "glm-5.3-flash", "display_name": "GLM-5.3 Flash"},),
+    )
+    monkeypatch.setattr(
+        model_listing,
+        "resolve_codex_route",
+        lambda *args, **kwargs: ("zai-coding-plan", None, route),
+    )
+
+    assert (
+        cli.main(
+            [
+                "models",
+                "--agent",
+                "codex",
+                "--provider",
+                "zai-coding-plan",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    model = output["models"][0]
+    assert model["model"] == "glm-5.3-flash"
+    assert model["inference_provider"] == "zai-coding-plan"
+    assert model["authenticated"] is True
+    assert model["inventory_sha256"] == "b" * 64
+    assert model["input_per_million_usd"] == 0.5
 
 
 def test_hermes_uses_live_provider_prices(

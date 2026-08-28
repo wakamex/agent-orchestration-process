@@ -35,6 +35,27 @@ class InputSnapshot:
 
 
 @dataclass(frozen=True)
+class InferenceRoute:
+    provider: str
+    native_provider: str
+    endpoint: str
+    wire_api: str
+    credential_env: str
+    authenticated: bool
+    inventory_retrieved_at: str
+    inventory_sha256: str
+    inventory_models: tuple[dict[str, Any], ...]
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> InferenceRoute | None:
+        if value is None:
+            return None
+        fields = dict(value)
+        fields["inventory_models"] = tuple(fields.get("inventory_models", ()))
+        return cls(**fields)
+
+
+@dataclass(frozen=True)
 class RunRequest:
     run_id: str
     provider: str
@@ -44,6 +65,7 @@ class RunRequest:
     base: str
     model: str | None
     inference_provider: str | None
+    inference_route: InferenceRoute | None
     effort: str | None
     profile: str
     no_web: bool
@@ -63,6 +85,9 @@ class RunRequest:
         fields = dict(value)
         fields.setdefault("mode", "agent")
         fields.setdefault("inference_provider", None)
+        fields["inference_route"] = InferenceRoute.from_dict(
+            fields.get("inference_route")
+        )
         fields.setdefault("no_web", False)
         fields.setdefault("effective_policy", {})
         fields["artifacts"] = tuple(fields.get("artifacts", ()))
@@ -130,6 +155,7 @@ class RunResult:
     provider_reported_cost: ProviderReportedCost | None = None
     billing: BillingProvenance = BillingProvenance()
     inference_provider: str | None = None
+    inference_route: InferenceRoute | None = None
     artifacts: tuple[RunArtifact, ...] = ()
     inputs: tuple[InputSnapshot, ...] = ()
     provider_duration_seconds: float | None = None
@@ -234,6 +260,9 @@ class RunResult:
         )
         fields["billing"] = BillingProvenance.from_dict(legacy_billing)
         fields.setdefault("inference_provider", None)
+        fields["inference_route"] = InferenceRoute.from_dict(
+            fields.get("inference_route")
+        )
         fields["artifacts"] = tuple(
             RunArtifact(**artifact) for artifact in fields.get("artifacts", ())
         )

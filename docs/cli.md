@@ -116,9 +116,12 @@ Inspect models exposed by installed harnesses and their current comparison price
 ```sh
 aop models
 aop models --agent codex --agent opencode
+aop models --agent codex --provider zai-coding-plan --json
 aop models --agent hermes --json
 aop models --refresh
 ```
+
+`models --provider` currently selects a Codex inference route and therefore requires exactly `--agent codex`. Z.AI Coding Plan inventory is fetched from its authenticated route on every listing and includes the canonical inference provider, retrieval time, normalized inventory hash, and authenticated status. Models.dev pricing remains a separately versioned API-equivalent comparison.
 
 Availability can come from an authenticated harness inventory, an installed harness default, or a
 catalog fallback. The output identifies the source instead of implying every model was verified

@@ -70,6 +70,8 @@ for the invocation. The result records billing route evidence separately as `sub
 `provider-credits`, `metered-api`, `local`, or `unknown` rather than inferring billing from the
 calculated comparison.
 
+Codex runs through `zai-coding-plan` price the selected GLM model against the models.dev `zai` provider. The calculated amount remains an API-equivalent comparison, while billing records the Z.AI Coding Plan route as `subscription` and the selected environment credential name without persisting its value. AOP does not report that comparison as actual spend, quota consumption, or provider credits.
+
 Before dispatch, AOP requires its models.dev catalog cache to be less than 24 hours old. A stale or
 missing cache is refreshed under a process lock and replaced atomically. If refresh fails, AOP does
 not use expired prices. Set `AOP_MODEL_CATALOG_CACHE` to relocate the cache, or run

@@ -143,6 +143,14 @@ def fresh_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
                 }
             }
         },
+        "zai": {
+            "models": {
+                "glm-5.3-flash": {
+                    "name": "GLM-5.3 Flash",
+                    "cost": {"input": 0.5, "cache_read": 0.1, "output": 3},
+                }
+            }
+        },
     }
     raw = json.dumps(providers, separators=(",", ":"), sort_keys=True).encode()
     path = tmp_path / "model-catalog.json"
@@ -214,6 +222,30 @@ import sys
 import time
 
 args = sys.argv[1:]
+if args == ["app-server", "--stdio"]:
+    leaked = [name for name in os.environ if name.endswith("_API_KEY")]
+    if leaked:
+        print(f"Codex config discovery inherited credentials: {{leaked}}", file=sys.stderr)
+        raise SystemExit(2)
+    configured = json.loads(os.environ.get("AOP_FAKE_CODEX_CONFIG_READ", "null"))
+    config = configured or {{
+        "model": "test",
+        "model_provider": None,
+        "model_providers": {{}},
+    }}
+    for line in sys.stdin:
+        request = json.loads(line)
+        if request.get("id") == 1:
+            print(json.dumps({{"id": 1, "result": {{"codexHome": os.environ.get("CODEX_HOME")}}}}), flush=True)
+        elif request.get("method") == "config/read":
+            origins = {{}}
+            for provider in config.get("model_providers", {{}}):
+                for field in ("base_url", "env_key", "wire_api"):
+                    origins[f"model_providers.{{provider}}.{{field}}"] = {{"name": {{"type": "user"}}}}
+            print(json.dumps({{"id": request["id"], "result": {{"config": config, "origins": origins}}}}), flush=True)
+        elif request.get("method") == "model/list":
+            print(json.dumps({{"id": request["id"], "result": {{"data": []}}}}), flush=True)
+    raise SystemExit(0)
 if args == ["login", "status"]:
     if os.environ.get("AOP_FAKE_CODEX_AUTH") == "api-key":
         print("Logged in using an API key")
@@ -224,6 +256,17 @@ prompt = sys.stdin.read()
 {SEALED_PROVIDER_PROBE}
 output_path = pathlib.Path(args[args.index("--output-last-message") + 1])
 codex_home = pathlib.Path(os.environ["CODEX_HOME"])
+if prompt.startswith("CHECK_ZAI_ROUTE"):
+    config_text = codex_home.joinpath("config.toml").read_text()
+    inventory = json.loads(codex_home.joinpath("models.json").read_text())
+    if 'base_url = "https://api.z.ai/api/v1"' not in config_text:
+        raise RuntimeError("projected Codex route is missing")
+    if "unrelated" in config_text or len(inventory.get("models", [])) != 1:
+        raise RuntimeError("projected Codex state contains unrelated providers")
+    if codex_home.joinpath("auth.json").exists():
+        raise RuntimeError("projected Codex route inherited unrelated authentication")
+    if not os.environ.get("ZAI_API_KEY") or "OPENAI_API_KEY" in os.environ:
+        raise RuntimeError("Codex route credential projection is not least-authority")
 if prompt.startswith("CHECK_READ_PATHS"):
     manifest = json.loads(pathlib.Path(os.environ["AOP_INPUT_MANIFEST"]).read_text())
     input_dir = pathlib.Path(os.environ["AOP_INPUT_DIR"])
@@ -297,7 +340,7 @@ if prompt.startswith("CHECK_PROFILE_ACCESS"):
         if expected == "review":
             raise RuntimeError("review profile allowed workspace writes")
         workspace_probe.unlink()
-for required in ["auth.json"]:
+for required in ([] if prompt.startswith("CHECK_ZAI_ROUTE") else ["auth.json"]):
     if not codex_home.joinpath(required).is_file():
         print(f"missing seeded Codex file: {{required}}", file=sys.stderr)
         raise SystemExit(1)

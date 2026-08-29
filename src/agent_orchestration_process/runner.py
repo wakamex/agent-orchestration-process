@@ -232,6 +232,16 @@ class AgentAdapter(Protocol):
     ) -> RunResult: ...
 
 
+def _codex_no_web_config(writable_roots: list[str]) -> dict[str, Any]:
+    return {
+        "web_search": "disabled",
+        "sandbox_workspace_write": {
+            "network_access": False,
+            "writable_roots": writable_roots,
+        },
+    }
+
+
 class CodexAdapter:
     provider = "codex"
     modes = frozenset({"agent"})
@@ -572,14 +582,7 @@ class CodexAdapter:
                     if request.model:
                         thread_params["model"] = request.model
                 if request.no_web:
-                    thread_params["config"] = {
-                        "web_search": "disabled",
-                        "tools": {"web_search": None},
-                        "sandbox_workspace_write": {
-                            "network_access": False,
-                            "writable_roots": writable_roots,
-                        },
-                    }
+                    thread_params["config"] = _codex_no_web_config(writable_roots)
                 send(thread_method, 2, thread_params)
                 if not wait_for(lambda: 2 in responses, deadline) or not response_ok(2):
                     timed_out = deadline is not None and time.monotonic() >= deadline

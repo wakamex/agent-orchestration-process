@@ -1669,7 +1669,7 @@ def test_no_web_enforcement_is_recorded_for_supported_harnesses(
             )
             config = start["params"]["config"]
             assert config["web_search"] == "disabled"
-            assert config["tools"] == {"web_search": None}
+            assert "tools" not in config
             assert config["sandbox_workspace_write"]["network_access"] is False
             assert start["params"]["sandbox"] == "workspace-write"
 
@@ -1757,7 +1757,7 @@ def test_no_web_is_inherited_by_resume_with_the_same_private_state(
     resume = next(event for event in events if event.get("method") == "thread/resume")
     config = resume["params"]["config"]
     assert config["web_search"] == "disabled"
-    assert config["tools"] == {"web_search": None}
+    assert "tools" not in config
     assert config["sandbox_workspace_write"]["network_access"] is False
     assert resume["params"]["sandbox"] == "workspace-write"
     first_request = json.loads(

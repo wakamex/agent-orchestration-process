@@ -4,7 +4,10 @@ import hashlib
 import json
 import os
 import re
+import selectors
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,7 @@ from agent_orchestration_process.runner import (
     AgentRunner,
     CodexAdapter,
     CursorAdapter,
+    _codex_no_web_config,
     _filtered_environment,
     _provider_runtime,
 )
@@ -24,6 +28,105 @@ from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
+
+
+def test_installed_codex_accepts_no_web_thread_config_without_a_turn(
+    tmp_path: Path,
+) -> None:
+    binary = shutil.which("codex")
+    if binary is None:
+        pytest.skip("Codex is not installed")
+
+    codex_home = tmp_path / "codex-home"
+    worktree = tmp_path / "worktree"
+    codex_home.mkdir()
+    worktree.mkdir()
+    codex_home.joinpath("config.toml").write_text(
+        'model_provider = "contract-check"\n'
+        "[model_providers.contract-check]\n"
+        'name = "Contract check"\n'
+        'base_url = "http://127.0.0.1:9/v1"\n'
+        'wire_api = "responses"\n'
+        "requires_openai_auth = false\n"
+    )
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.endswith("_API_KEY")
+    }
+    environment["CODEX_HOME"] = os.fspath(codex_home)
+    process = subprocess.Popen(
+        [binary, "app-server", "--stdio"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=environment,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    buffered = b""
+
+    def send(value: dict[str, object]) -> None:
+        process.stdin.write(json.dumps(value).encode() + b"\n")
+        process.stdin.flush()
+
+    def response(response_id: int) -> dict[str, object]:
+        nonlocal buffered
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            for _key, _events in selector.select(deadline - time.monotonic()):
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    pytest.fail("Codex app-server exited before responding")
+                buffered += chunk
+                while b"\n" in buffered:
+                    line, buffered = buffered.split(b"\n", 1)
+                    value = json.loads(line)
+                    if value.get("id") == response_id:
+                        return value
+        pytest.fail(f"Codex app-server did not respond to request {response_id}")
+
+    try:
+        send(
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "aop-contract-check",
+                        "title": "AOP contract check",
+                        "version": "0",
+                    }
+                },
+            }
+        )
+        assert "error" not in response(1)
+        send({"method": "initialized", "params": {}})
+        send(
+            {
+                "id": 2,
+                "method": "thread/start",
+                "params": {
+                    "cwd": os.fspath(worktree),
+                    "approvalPolicy": "never",
+                    "sandbox": "workspace-write",
+                    "ephemeral": True,
+                    "config": _codex_no_web_config([os.fspath(worktree)]),
+                },
+            }
+        )
+        assert "error" not in response(2)
+    finally:
+        selector.close()
+        process.stdin.close()
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def test_filtered_environment_allows_optional_grok_storage_mode() -> None:

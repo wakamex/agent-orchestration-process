@@ -101,6 +101,8 @@ Use `--no-web` to deny model-controlled external retrieval while retaining the h
 connection. AOP records the effective tool policy and rejects harnesses that cannot enforce the
 boundary. See [CLI guide](docs/cli.md#disable-model-controlled-web-access) for current support.
 
+Codex `--no-web` uses the canonical top-level `web_search = "disabled"` mode introduced in Codex 0.82.0. AOP's current Codex app-server integration targets Codex 0.150.1 or newer.
+
 ## Results and usage
 
 Every adapter records the same result shape, including provider session identity when available,

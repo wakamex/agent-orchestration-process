@@ -405,6 +405,6 @@ def test_codex_route_no_web_keeps_only_generated_provider_config(
     )
     config = thread_start["params"]["config"]
     assert config["web_search"] == "disabled"
-    assert config["tools"] == {"web_search": None}
+    assert "tools" not in config
     assert config["sandbox_workspace_write"]["network_access"] is False
     assert thread_start["params"]["sandbox"] == "workspace-write"

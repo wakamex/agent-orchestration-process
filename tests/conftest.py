@@ -257,13 +257,23 @@ if args == ["app-server", "--stdio"]:
                 marker = pathlib.Path(os.environ["CODEX_HOME"]) / "fake-resume-id"
                 if marker.is_file():
                     session_id = marker.read_text().strip()
-            no_web = params.get("config", {{}}).get("web_search") == "disabled"
+            config_override = params.get("config", {{}})
+            tools = config_override.get("tools")
+            web_search_tool = tools.get("web_search") if isinstance(tools, dict) else None
+            invalid_tools = tools is not None and (
+                not isinstance(tools, dict)
+                or ("web_search" in tools and not isinstance(web_search_tool, (bool, dict)))
+            )
+            if invalid_tools:
+                print(json.dumps({{"id": request["id"], "error": {{"message": "invalid tools.web_search config"}}}}), flush=True)
+                continue
+            no_web = config_override.get("web_search") == "disabled"
             expected_sandbox = "workspace-write" if no_web else "danger-full-access"
             if params.get("approvalPolicy") != "never" or params.get("sandbox") != expected_sandbox:
                 print(json.dumps({{"id": request["id"], "error": {{"message": "unsafe app-server policy"}}}}), flush=True)
                 continue
             if no_web:
-                sandbox = params["config"].get("sandbox_workspace_write", {{}})
+                sandbox = config_override.get("sandbox_workspace_write", {{}})
                 if sandbox.get("network_access") is not False or not sandbox.get("writable_roots"):
                     print(json.dumps({{"id": request["id"], "error": {{"message": "no-web sandbox missing"}}}}), flush=True)
                     continue

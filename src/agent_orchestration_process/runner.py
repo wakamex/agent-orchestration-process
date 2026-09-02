@@ -232,12 +232,36 @@ class AgentAdapter(Protocol):
     ) -> RunResult: ...
 
 
-def _codex_no_web_config(writable_roots: list[str]) -> dict[str, Any]:
+_CODEX_NO_WEB_PERMISSION_PROFILE = "aop-no-web"
+_CODEX_PROTECTED_METADATA_NAMES = (".git", ".agents", ".codex")
+_CODEX_GUEST_WRITABLE_ROOTS = ("/output", "/scratch", "/state", "/cache", "/tmp")
+
+
+def _codex_no_web_config(
+    profile: str, cwd: str, writable_roots: list[str]
+) -> dict[str, Any]:
+    if profile == "host":
+        filesystem = {":root": "write"}
+    else:
+        filesystem = {
+            ":root": "read",
+            cwd: "write" if profile == "edit" else "read",
+        }
+        for root in writable_roots:
+            filesystem[root] = "write"
+            for name in _CODEX_PROTECTED_METADATA_NAMES:
+                filesystem[f"{root.rstrip('/')}/{name}"] = "write"
+        if profile == "edit":
+            for name in _CODEX_PROTECTED_METADATA_NAMES:
+                filesystem[f"{cwd.rstrip('/')}/{name}"] = "write"
+            filesystem[f"{cwd.rstrip('/')}/.git"] = "read"
     return {
         "web_search": "disabled",
-        "sandbox_workspace_write": {
-            "network_access": False,
-            "writable_roots": writable_roots,
+        "permissions": {
+            _CODEX_NO_WEB_PERMISSION_PROFILE: {
+                "filesystem": filesystem,
+                "network": {"enabled": False},
+            }
         },
     }
 
@@ -283,7 +307,7 @@ class CodexAdapter:
                 "/tmp",
             ]
             if request.profile == "host"
-            else ["/output", "/scratch", "/state", "/cache", "/tmp"]
+            else list(_CODEX_GUEST_WRITABLE_ROOTS)
         )
 
         try:
@@ -305,6 +329,7 @@ class CodexAdapter:
             timed_out = False
             first_event_seconds = None
             first_response_seconds = None
+            protocol_error = None
         else:
             try:
                 capture = self._run_app_server(
@@ -323,6 +348,7 @@ class CodexAdapter:
             timed_out = capture.timed_out
             first_event_seconds = capture.first_event_seconds
             first_response_seconds = capture.first_response_seconds
+            protocol_error = capture.protocol_error
 
         duration = time.monotonic() - started
         _atomic_write(run_dir / "events.jsonl", stdout)
@@ -353,6 +379,8 @@ class CodexAdapter:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif event_error:
             error = event_error
+        elif protocol_error:
+            error = protocol_error
         elif exit_code != 0:
             error = stderr.strip() or f"Codex exited with status {exit_code}"
         elif resume_error:
@@ -490,6 +518,7 @@ class CodexAdapter:
         terminal_turn_ids: set[str] = set()
         timed_out = False
         interrupt_completed = False
+        protocol_error = None
 
         def send(method: str, request_id: int | None, params: dict[str, Any]) -> bool:
             value: dict[str, Any] = {"method": method, "params": params}
@@ -560,7 +589,12 @@ class CodexAdapter:
                         "name": "aop",
                         "title": "AOP",
                         "version": "0.1.0",
-                    }
+                    },
+                    **(
+                        {"capabilities": {"experimentalApi": True}}
+                        if request.no_web
+                        else {}
+                    ),
                 },
             )
             if not wait_for(lambda: 1 in responses, deadline) or not response_ok(1):
@@ -570,10 +604,11 @@ class CodexAdapter:
                 thread_params: dict[str, Any] = {
                     "cwd": cwd,
                     "approvalPolicy": "never",
-                    "sandbox": (
-                        "workspace-write" if request.no_web else "danger-full-access"
-                    ),
                 }
+                if request.no_web:
+                    thread_params["permissions"] = _CODEX_NO_WEB_PERMISSION_PROFILE
+                else:
+                    thread_params["sandbox"] = "danger-full-access"
                 if request.session_id:
                     thread_method = "thread/resume"
                     thread_params["threadId"] = request.session_id
@@ -582,11 +617,31 @@ class CodexAdapter:
                     if request.model:
                         thread_params["model"] = request.model
                 if request.no_web:
-                    thread_params["config"] = _codex_no_web_config(writable_roots)
+                    thread_params["config"] = _codex_no_web_config(
+                        request.profile, cwd, writable_roots
+                    )
                 send(thread_method, 2, thread_params)
                 if not wait_for(lambda: 2 in responses, deadline) or not response_ok(2):
                     timed_out = deadline is not None and time.monotonic() >= deadline
-                elif thread_id is not None:
+                else:
+                    if request.no_web:
+                        result = responses[2].get("result")
+                        active_profile = (
+                            result.get("activePermissionProfile")
+                            if isinstance(result, dict)
+                            else None
+                        )
+                        active_profile_id = (
+                            active_profile.get("id")
+                            if isinstance(active_profile, dict)
+                            else None
+                        )
+                        if active_profile_id != _CODEX_NO_WEB_PERMISSION_PROFILE:
+                            protocol_error = (
+                                "Codex did not activate the requested no-web permission "
+                                f"profile {_CODEX_NO_WEB_PERMISSION_PROFILE}"
+                            )
+                if protocol_error is None and thread_id is not None:
                     turn_params: dict[str, Any] = {
                         "threadId": thread_id,
                         "input": [{"type": "text", "text": request.prompt}],
@@ -641,6 +696,7 @@ class CodexAdapter:
             duration_seconds=round(time.monotonic() - started, 6),
             first_event_seconds=_rounded(first_event_seconds),
             first_response_seconds=_rounded(first_response_seconds),
+            protocol_error=protocol_error,
         )
 
     @staticmethod
@@ -798,6 +854,7 @@ class _ProcessCapture:
     duration_seconds: float
     first_event_seconds: float | None
     first_response_seconds: float | None
+    protocol_error: str | None = None
 
 
 def _capture_process(
@@ -5027,6 +5084,21 @@ class AgentRunner:
             )
         effective_policy["controller"] = controller_policy
         effective_policy["provider_runtime"] = provider_runtime_record(self.adapter)
+        if request.provider == "codex" and request.no_web:
+            codex_cwd = (
+                os.fspath(worktree.path) if request.profile == "host" else "/workspace"
+            )
+            codex_writable_roots = (
+                [] if request.profile == "host" else list(_CODEX_GUEST_WRITABLE_ROOTS)
+            )
+            codex_config = _codex_no_web_config(
+                request.profile, codex_cwd, codex_writable_roots
+            )
+            effective_policy["model_capabilities"]["permission_profile"] = {
+                "id": _CODEX_NO_WEB_PERMISSION_PROFILE,
+                **codex_config["permissions"][_CODEX_NO_WEB_PERMISSION_PROFILE],
+                "active_profile_validation": "required",
+            }
         effective_policy["instruction_sources"] = (
             []
             if effective_policy["instructions"]["inherited_local"] == "none"

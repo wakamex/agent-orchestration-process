@@ -235,9 +235,11 @@ if args == ["app-server", "--stdio"]:
     session_id = {SESSION_ID!r}
     turn_id = "019f4da1-342f-7670-8aac-25999973b295"
     prompt = None
+    experimental_api = False
     for line in sys.stdin:
         request = json.loads(line)
         if request.get("id") == 1:
+            experimental_api = request.get("params", {{}}).get("capabilities", {{}}).get("experimentalApi") is True
             print(json.dumps({{"id": 1, "result": {{"codexHome": os.environ.get("CODEX_HOME")}}}}), flush=True)
         elif request.get("method") == "config/read":
             if leaked:
@@ -268,15 +270,30 @@ if args == ["app-server", "--stdio"]:
                 print(json.dumps({{"id": request["id"], "error": {{"message": "invalid tools.web_search config"}}}}), flush=True)
                 continue
             no_web = config_override.get("web_search") == "disabled"
-            expected_sandbox = "workspace-write" if no_web else "danger-full-access"
+            expected_sandbox = None if no_web else "danger-full-access"
             if params.get("approvalPolicy") != "never" or params.get("sandbox") != expected_sandbox:
                 print(json.dumps({{"id": request["id"], "error": {{"message": "unsafe app-server policy"}}}}), flush=True)
                 continue
             if no_web:
-                sandbox = config_override.get("sandbox_workspace_write", {{}})
-                if sandbox.get("network_access") is not False or not sandbox.get("writable_roots"):
-                    print(json.dumps({{"id": request["id"], "error": {{"message": "no-web sandbox missing"}}}}), flush=True)
+                profile_id = params.get("permissions")
+                profile = config_override.get("permissions", {{}}).get(profile_id, {{}})
+                filesystem = profile.get("filesystem", {{}})
+                network = profile.get("network", {{}})
+                if not experimental_api or profile_id != "aop-no-web":
+                    print(json.dumps({{"id": request["id"], "error": {{"message": "no-web permission profile was not selected"}}}}), flush=True)
                     continue
+                if filesystem.get(":root") not in {{"read", "write"}} or network.get("enabled") is not False:
+                    print(json.dumps({{"id": request["id"], "error": {{"message": "no-web permission profile is invalid"}}}}), flush=True)
+                    continue
+                if filesystem.get(":root") == "read":
+                    required_writes = {{"/output", "/scratch", "/state", "/cache", "/tmp"}}
+                    if any(filesystem.get(path) != "write" for path in required_writes):
+                        print(json.dumps({{"id": request["id"], "error": {{"message": "no-web writable roots are incomplete"}}}}), flush=True)
+                        continue
+                    metadata = {{f"{{path}}/{{name}}" for path in required_writes for name in (".git", ".agents", ".codex")}}
+                    if any(filesystem.get(path) != "write" for path in metadata):
+                        print(json.dumps({{"id": request["id"], "error": {{"message": "no-web writable metadata paths are incomplete"}}}}), flush=True)
+                        continue
             print(json.dumps({{
                 "id": request["id"],
                 "result": {{
@@ -287,6 +304,9 @@ if args == ["app-server", "--stdio"]:
                     "approvalPolicy": "never",
                     "approvalsReviewer": "user",
                     "sandbox": {{"type": "dangerFullAccess"}},
+                    "activePermissionProfile": {{
+                        "id": "wrong-profile" if params.get("model") == "wrong-active-profile" else "aop-no-web"
+                    }} if no_web else None,
                 }},
             }}), flush=True)
             print(json.dumps({{

@@ -1670,8 +1670,13 @@ def test_no_web_enforcement_is_recorded_for_supported_harnesses(
             config = start["params"]["config"]
             assert config["web_search"] == "disabled"
             assert "tools" not in config
-            assert config["sandbox_workspace_write"]["network_access"] is False
-            assert start["params"]["sandbox"] == "workspace-write"
+            permission = config["permissions"]["aop-no-web"]
+            assert permission["network"]["enabled"] is False
+            assert start["params"]["permissions"] == "aop-no-web"
+            assert "sandbox" not in start["params"]
+            recorded = capabilities["permission_profile"]
+            assert recorded["id"] == "aop-no-web"
+            assert recorded["active_profile_validation"] == "required"
 
         if provider in {"claude", "hermes"}:
             assert request["effective_policy"]["instructions"]["inherited_local"] == (
@@ -1737,12 +1742,15 @@ def test_no_web_rejects_grok_host_profile_before_creating_a_worktree(
     assert manager.list() == []
 
 
+@pytest.mark.parametrize("profile", ["edit", "review", "sealed", "host"])
 def test_no_web_is_inherited_by_resume_with_the_same_private_state(
-    repository: Path, fake_codex: Path
+    repository: Path, fake_codex: Path, profile: str
 ) -> None:
     manager = WorktreeManager.discover(repository)
     runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
-    first = runner.run(task="no-web-resume", prompt="first", no_web=True)
+    first = runner.run(
+        task="no-web-resume", prompt="first", profile=profile, no_web=True
+    )
     resumed = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).resume(
         run_id=first.run_id, prompt="second"
     )
@@ -1758,8 +1766,13 @@ def test_no_web_is_inherited_by_resume_with_the_same_private_state(
     config = resume["params"]["config"]
     assert config["web_search"] == "disabled"
     assert "tools" not in config
-    assert config["sandbox_workspace_write"]["network_access"] is False
-    assert resume["params"]["sandbox"] == "workspace-write"
+    assert config["permissions"]["aop-no-web"]["network"]["enabled"] is False
+    assert resume["params"]["permissions"] == "aop-no-web"
+    assert "sandbox" not in resume["params"]
+    filesystem = config["permissions"]["aop-no-web"]["filesystem"]
+    assert filesystem[":root"] == ("write" if profile == "host" else "read")
+    if profile != "host":
+        assert filesystem["/workspace"] == ("write" if profile == "edit" else "read")
     first_request = json.loads(
         (manager.state_dir / "runs" / first.run_id / "request.json").read_text()
     )
@@ -1779,8 +1792,9 @@ def test_no_web_is_inherited_by_resume_with_the_same_private_state(
     assert not private_home.joinpath("config.toml").exists()
     assert not private_home.joinpath("rules").exists()
     assert not private_home.joinpath("skills").exists()
-    manager.remove("no-web-resume")
-    assert not provider_state.exists()
+    if profile != "sealed":
+        manager.remove("no-web-resume")
+        assert not provider_state.exists()
 
 
 @pytest.mark.parametrize(

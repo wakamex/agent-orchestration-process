@@ -6,6 +6,7 @@ import os
 import re
 import selectors
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -15,13 +16,15 @@ import pytest
 from agent_orchestration_process import __version__
 from agent_orchestration_process.cli import build_parser, main
 from agent_orchestration_process.locks import exclusive_lock, task_lock_path
-from agent_orchestration_process.models import RunResult
+from agent_orchestration_process.models import RunRequest, RunResult
 from agent_orchestration_process.runner import (
     AgentRunner,
     CodexAdapter,
     CursorAdapter,
     _codex_no_web_config,
     _filtered_environment,
+    _launch_environment,
+    _provider_command,
     _provider_runtime,
 )
 from agent_orchestration_process.worktrees import AOPError, WorktreeManager
@@ -30,7 +33,7 @@ from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
 
 
-def test_installed_codex_accepts_no_web_thread_config_without_a_turn(
+def test_installed_codex_accepts_no_web_permission_profile_without_a_turn(
     tmp_path: Path,
 ) -> None:
     binary = shutil.which("codex")
@@ -98,7 +101,8 @@ def test_installed_codex_accepts_no_web_thread_config_without_a_turn(
                         "name": "aop-contract-check",
                         "title": "AOP contract check",
                         "version": "0",
-                    }
+                    },
+                    "capabilities": {"experimentalApi": True},
                 },
             }
         )
@@ -111,14 +115,253 @@ def test_installed_codex_accepts_no_web_thread_config_without_a_turn(
                 "params": {
                     "cwd": os.fspath(worktree),
                     "approvalPolicy": "never",
-                    "sandbox": "workspace-write",
+                    "permissions": "aop-no-web",
                     "ephemeral": True,
-                    "config": _codex_no_web_config([os.fspath(worktree)]),
+                    "config": _codex_no_web_config(
+                        "edit", os.fspath(worktree), [os.fspath(worktree)]
+                    ),
                 },
             }
         )
-        assert "error" not in response(2)
+        result = response(2)
+        assert "error" not in result
+        assert result["result"]["activePermissionProfile"]["id"] == "aop-no-web"
     finally:
+        selector.close()
+        process.stdin.close()
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("profile", "workspace_access", "root_access"),
+    [
+        ("edit", "write", "read"),
+        ("review", "read", "read"),
+        ("sealed", "read", "read"),
+        ("host", None, "write"),
+    ],
+)
+def test_codex_no_web_permission_profile_matches_aop_filesystem_contract(
+    profile: str, workspace_access: str | None, root_access: str
+) -> None:
+    writable_roots = ["/output", "/scratch", "/state", "/cache", "/tmp"]
+    config = _codex_no_web_config(profile, "/workspace", writable_roots)
+    permission = config["permissions"]["aop-no-web"]
+    filesystem = permission["filesystem"]
+
+    assert config["web_search"] == "disabled"
+    assert permission["network"] == {"enabled": False}
+    assert filesystem[":root"] == root_access
+    if workspace_access is None:
+        assert "/workspace" not in filesystem
+        assert set(filesystem) == {":root"}
+    else:
+        assert filesystem["/workspace"] == workspace_access
+        for root in writable_roots:
+            assert filesystem[root] == "write"
+            for name in (".git", ".agents", ".codex"):
+                assert filesystem[f"{root}/{name}"] == "write"
+    if profile == "edit":
+        assert filesystem["/workspace/.git"] == "read"
+        assert filesystem["/workspace/.agents"] == "write"
+        assert filesystem["/workspace/.codex"] == "write"
+
+
+def test_codex_no_web_fails_closed_for_wrong_active_permission_profile(
+    repository: Path, fake_codex: Path
+) -> None:
+    result = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    ).run(
+        task="wrong-codex-permission-profile",
+        prompt="test",
+        model="wrong-active-profile",
+        no_web=True,
+    )
+
+    assert not result.succeeded
+    assert result.error == (
+        "Codex did not activate the requested no-web permission profile aop-no-web"
+    )
+
+
+@pytest.mark.parametrize("profile", ["edit", "review", "sealed", "host"])
+def test_installed_codex_executes_no_web_profile_inside_aop_filesystem_contract(
+    repository: Path, tmp_path: Path, profile: str
+) -> None:
+    binary = shutil.which("codex")
+    bwrap = shutil.which("bwrap")
+    if binary is None:
+        pytest.skip("Codex is not installed")
+    if profile != "host" and bwrap is None:
+        pytest.skip("bwrap is not installed")
+
+    manager = WorktreeManager.discover(repository)
+    worktree = manager.create(f"codex-{profile}")
+    provider_state = tmp_path / "state"
+    codex_home = provider_state / "codex" / "home"
+    scratch = tmp_path / "scratch"
+    cache = tmp_path / "cache"
+    output = tmp_path / "output"
+    inputs = tmp_path / "inputs"
+    for path in (codex_home, scratch, cache, output, inputs):
+        path.mkdir(parents=True)
+
+    protocol_cwd = os.fspath(worktree.path) if profile == "host" else "/workspace"
+    writable_roots = (
+        [] if profile == "host" else ["/output", "/scratch", "/state", "/cache", "/tmp"]
+    )
+    config = _codex_no_web_config(profile, protocol_cwd, writable_roots)
+    permission = config["permissions"]["aop-no-web"]
+    config_lines = [
+        'default_permissions = "aop-no-web"',
+        'web_search = "disabled"',
+        "",
+        "[permissions.aop-no-web.filesystem]",
+    ]
+    config_lines.extend(
+        f"{json.dumps(path)} = {json.dumps(access)}"
+        for path, access in permission["filesystem"].items()
+    )
+    config_lines.extend(["", "[permissions.aop-no-web.network]", "enabled = false", ""])
+    codex_home.joinpath("config.toml").write_text("\n".join(config_lines))
+
+    request = RunRequest(
+        run_id="019f4da1-342f-7670-8aac-25999973b296",
+        provider="codex",
+        mode="agent",
+        task=f"codex-{profile}",
+        prompt="unused",
+        base="HEAD",
+        model=None,
+        inference_provider=None,
+        inference_route=None,
+        effort=None,
+        profile=profile,
+        no_web=True,
+        effective_policy={},
+        timeout_seconds=10,
+        session_id=None,
+        parent_run_id=None,
+        artifacts=(),
+        inputs=(),
+        created_at="2026-09-02T00:00:00+00:00",
+    )
+    environment = {
+        **os.environ,
+        "AOP_ROOT": os.fspath(repository),
+        "AOP_CACHE_DIR": os.fspath(cache),
+        "AOP_PROVIDER_STATE_DIR": os.fspath(provider_state),
+        "AOP_SCRATCH_DIR": os.fspath(scratch),
+        "AOP_OUTPUT_DIR": os.fspath(output),
+        "AOP_INPUT_DIR": os.fspath(inputs),
+        "AOP_PROFILE": profile,
+        "CODEX_HOME": os.fspath(codex_home),
+    }
+    command = _provider_command(
+        [binary, "app-server", "--stdio"], request, worktree, environment
+    )
+    process = subprocess.Popen(
+        command,
+        cwd=worktree.path,
+        env=_launch_environment(command, environment),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+
+    def send(value: dict[str, object]) -> None:
+        process.stdin.write(json.dumps(value) + "\n")
+        process.stdin.flush()
+
+    def response(response_id: int) -> dict[str, object]:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            for _key, _events in selector.select(deadline - time.monotonic()):
+                line = process.stdout.readline()
+                if not line:
+                    stderr = process.stderr.read() if process.stderr is not None else ""
+                    pytest.fail(f"Codex app-server exited before responding: {stderr}")
+                value = json.loads(line)
+                if value.get("id") == response_id:
+                    return value
+        pytest.fail(f"Codex app-server did not respond to request {response_id}")
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.1)
+    port = listener.getsockname()[1]
+    output_target = (
+        os.fspath(output / "probe") if profile == "host" else "/output/probe"
+    )
+    workspace_target = (
+        os.fspath(worktree.path / "probe") if profile == "host" else "/workspace/probe"
+    )
+    script = (
+        'printf aux > "$1"; '
+        'if printf workspace > "$2"; then workspace=writable; else workspace=readonly; fi; '
+        f"if exec 3<>/dev/tcp/127.0.0.1/{port}; then network=allowed; else network=blocked; fi; "
+        'printf "%s|%s" "$workspace" "$network"'
+    )
+
+    try:
+        send(
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "aop-contract-check",
+                        "title": "AOP contract check",
+                        "version": "0",
+                    },
+                    "capabilities": {"experimentalApi": True},
+                },
+            }
+        )
+        assert "error" not in response(1)
+        send({"method": "initialized", "params": {}})
+        send(
+            {
+                "id": 2,
+                "method": "command/exec",
+                "params": {
+                    "command": [
+                        "/bin/bash",
+                        "-c",
+                        script,
+                        "aop-contract-check",
+                        output_target,
+                        workspace_target,
+                    ],
+                    "cwd": protocol_cwd,
+                    "timeoutMs": 5000,
+                    "permissionProfile": "aop-no-web",
+                },
+            }
+        )
+        result = response(2)
+        assert "error" not in result, result
+        expected_workspace = "writable" if profile in {"edit", "host"} else "readonly"
+        assert result["result"]["exitCode"] == 0
+        assert result["result"]["stdout"] == f"{expected_workspace}|blocked"
+        assert output.joinpath("probe").read_text() == "aux"
+        assert worktree.path.joinpath("probe").exists() is (profile in {"edit", "host"})
+        with pytest.raises(TimeoutError):
+            listener.accept()
+    finally:
+        listener.close()
         selector.close()
         process.stdin.close()
         process.terminate()

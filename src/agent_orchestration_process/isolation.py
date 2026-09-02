@@ -268,7 +268,9 @@ _NO_WEB_POLICIES: dict[str, dict[str, object]] = {
         "allowed_toolsets": ["local shell and file tools"],
         "enforcement": [
             "Codex app-server web search disabled",
-            "Codex workspace sandbox network disabled",
+            "Codex named permission profile filesystem policy",
+            "Codex named permission profile network disabled",
+            "Codex active permission profile validated",
             "AOP authentication-only Codex state",
         ],
     },

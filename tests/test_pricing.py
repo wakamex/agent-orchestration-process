@@ -97,6 +97,55 @@ def test_long_context_multiplier_is_applied_when_documented() -> None:
     assert estimate.amount_usd == 2.145
 
 
+def test_repeated_short_requests_do_not_trigger_long_context_multiplier() -> None:
+    requests = (
+        TokenUsage(
+            input_tokens=150_000, cached_input_tokens=100_000, output_tokens=1_000
+        ),
+        TokenUsage(
+            input_tokens=150_000, cached_input_tokens=100_000, output_tokens=1_000
+        ),
+    )
+    aggregate = TokenUsage(
+        input_tokens=300_000, cached_input_tokens=200_000, output_tokens=2_000
+    )
+
+    estimate = estimate_api_cost("gpt-5.5", aggregate, request_usages=requests)
+
+    assert estimate is not None
+    assert estimate.long_context_pricing is False
+    assert estimate.amount_usd == 0.66
+
+
+def test_mixed_context_tiers_are_priced_per_request() -> None:
+    requests = (
+        TokenUsage(
+            input_tokens=100_000, cached_input_tokens=20_000, output_tokens=1_000
+        ),
+        TokenUsage(
+            input_tokens=300_000, cached_input_tokens=100_000, output_tokens=1_000
+        ),
+    )
+    aggregate = TokenUsage(
+        input_tokens=400_000, cached_input_tokens=120_000, output_tokens=2_000
+    )
+
+    estimate = estimate_api_cost("gpt-5.5", aggregate, request_usages=requests)
+
+    assert estimate is not None
+    assert estimate.long_context_pricing is True
+    assert estimate.amount_usd == 2.585
+
+
+def test_request_usage_must_match_aggregate_usage() -> None:
+    with pytest.raises(ValueError, match="request usage does not match"):
+        estimate_api_cost(
+            "gpt-5.5",
+            TokenUsage(input_tokens=10),
+            request_usages=(TokenUsage(input_tokens=9),),
+        )
+
+
 def test_unknown_or_implicit_model_has_no_cost_estimate() -> None:
     usage = TokenUsage(input_tokens=100, output_tokens=10)
 

@@ -82,6 +82,9 @@ def test_codex_retained_terminal_usage_is_already_normalized() -> None:
     assert parsed["completed"]
     assert parsed["usage_observed"]
     assert _usage_tuple(parsed["usage"]) == (34_709, 13_056, 397, 135)
+    assert [_usage_tuple(usage) for usage in parsed["request_usages"]] == [
+        (34_709, 13_056, 397, 135)
+    ]
 
 
 def test_codex_sums_current_turn_updates_without_resumed_thread_history() -> None:
@@ -137,6 +140,10 @@ def test_codex_sums_current_turn_updates_without_resumed_thread_history() -> Non
 
     assert parsed["usage_observed"]
     assert _usage_tuple(parsed["usage"]) == (30, 0, 5, 0)
+    assert [_usage_tuple(usage) for usage in parsed["request_usages"]] == [
+        (10, 0, 2, 0),
+        (20, 0, 3, 0),
+    ]
 
 
 def test_claude_retained_result_adds_cache_creation_and_read_to_input() -> None:

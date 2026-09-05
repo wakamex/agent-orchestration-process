@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 
 from .model_catalog import ModelCatalog, ensure_catalog_fresh
@@ -92,6 +93,7 @@ def estimate_api_cost(
     *,
     providers: tuple[str, ...] = ("openai",),
     catalog_model: str | None = None,
+    request_usages: Sequence[TokenUsage] | None = None,
 ) -> CalculatedCost | None:
     if model is None:
         return None
@@ -100,6 +102,25 @@ def estimate_api_cost(
     if resolved is None:
         return None
     priced_as, price = resolved
+    usages = tuple(request_usages) if request_usages is not None else (usage,)
+    if request_usages is not None and _sum_usage(usages) != usage:
+        raise ValueError("request usage does not match aggregate usage")
+    priced_usages = [_usage_cost(request_usage, price) for request_usage in usages]
+    amount = sum(request_amount for request_amount, _ in priced_usages)
+    long_context = any(is_long_context for _, is_long_context in priced_usages)
+    return CalculatedCost(
+        amount_usd=round(amount, 8),
+        currency="USD",
+        model=model,
+        priced_as=priced_as,
+        pricing_version=catalog.version,
+        pricing_source=catalog.source,
+        long_context_pricing=long_context,
+        pricing_retrieved_at=catalog.fetched_at,
+    )
+
+
+def _usage_cost(usage: TokenUsage, price: ModelPrice) -> tuple[float, bool]:
     long_context = (
         price.long_context_threshold is not None
         and usage.input_tokens > price.long_context_threshold
@@ -127,15 +148,17 @@ def estimate_api_cost(
     amount = (
         uncached * input_rate + cached * cached_rate + usage.output_tokens * output_rate
     ) / 1_000_000
-    return CalculatedCost(
-        amount_usd=round(amount, 8),
-        currency="USD",
-        model=model,
-        priced_as=priced_as,
-        pricing_version=catalog.version,
-        pricing_source=catalog.source,
-        long_context_pricing=long_context,
-        pricing_retrieved_at=catalog.fetched_at,
+    return amount, long_context
+
+
+def _sum_usage(usages: Sequence[TokenUsage]) -> TokenUsage:
+    return TokenUsage(
+        input_tokens=sum(usage.input_tokens for usage in usages),
+        cached_input_tokens=sum(usage.cached_input_tokens for usage in usages),
+        output_tokens=sum(usage.output_tokens for usage in usages),
+        reasoning_output_tokens=sum(
+            usage.reasoning_output_tokens for usage in usages
+        ),
     )
 
 

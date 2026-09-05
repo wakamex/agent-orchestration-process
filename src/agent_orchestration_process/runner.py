@@ -404,6 +404,7 @@ class CodexAdapter:
                 effective_model,
                 usage,
                 providers=("zai",) if request.inference_route else ("openai",),
+                request_usages=parsed["request_usages"],
             ),
         )
 
@@ -706,6 +707,7 @@ class CodexAdapter:
         model = None
         error = None
         usage = TokenUsage()
+        request_usages = []
         completed = False
         usage_observed = False
         final_message = None
@@ -756,15 +758,22 @@ class CodexAdapter:
                 )
                 if isinstance(last, dict):
                     usage_observed = True
+                    request_usage = TokenUsage(
+                        input_tokens=_token_count(last.get("inputTokens")),
+                        cached_input_tokens=_token_count(last.get("cachedInputTokens")),
+                        output_tokens=_token_count(last.get("outputTokens")),
+                        reasoning_output_tokens=_token_count(
+                            last.get("reasoningOutputTokens")
+                        ),
+                    )
+                    request_usages.append(request_usage)
                     usage = TokenUsage(
-                        input_tokens=usage.input_tokens
-                        + _token_count(last.get("inputTokens")),
+                        input_tokens=usage.input_tokens + request_usage.input_tokens,
                         cached_input_tokens=usage.cached_input_tokens
-                        + _token_count(last.get("cachedInputTokens")),
-                        output_tokens=usage.output_tokens
-                        + _token_count(last.get("outputTokens")),
+                        + request_usage.cached_input_tokens,
+                        output_tokens=usage.output_tokens + request_usage.output_tokens,
                         reasoning_output_tokens=usage.reasoning_output_tokens
-                        + _token_count(last.get("reasoningOutputTokens")),
+                        + request_usage.reasoning_output_tokens,
                     )
             elif method == "item/completed" and params.get("turnId") == turn_id:
                 item = params.get("item")
@@ -803,6 +812,7 @@ class CodexAdapter:
             "model": model,
             "error": error,
             "usage": usage,
+            "request_usages": request_usages,
             "completed": completed,
             "usage_observed": usage_observed,
             "final_message": final_message,

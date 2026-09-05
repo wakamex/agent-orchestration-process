@@ -14,6 +14,7 @@
   native environment overrides instead of introducing an AOP-specific secret store.
 - Keep controller policy outside model control. Isolation, deadlines, evidence, cleanup, and
   integration remain AOP responsibilities even when harness permission prompts are bypassed.
+- Use "AOP sandbox" for AOP's isolation layer and "harness sandbox" for a harness's native isolation layer. Use "outer" and "inner" only when the nesting itself matters.
 - Prefer small native extension points over wrappers and forks. When a harness lacks a bounded
   automation feature, use its documented plugin or protocol surface and keep the added layer narrow.
 - Fail closed and record what ran. Ambiguous identity, stale pricing, invalid credentials,

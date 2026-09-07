@@ -15,7 +15,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .codex_routes import ZAI_CODING_PLAN, resolve_codex_route
+from .codex_routes import (
+    ZAI_CODING_PLAN,
+    ZAI_CODING_PLAN_ENDPOINT,
+    fetch_zai_inventory,
+    resolve_codex_route,
+)
 from .model_catalog import ModelCatalog
 from .models import InferenceRoute
 from .provider_versions import require_supported_agy
@@ -32,6 +37,7 @@ AGENTS = (
     "grok",
     "hermes",
     "dsh",
+    "zcode",
 )
 NOUS_MODELS_URL = "https://inference-api.nousresearch.com/v1/models"
 
@@ -87,6 +93,8 @@ def list_models(
         return _hermes_models(catalog, provider)
     if agent == "grok":
         return _grok_models(catalog)
+    if agent == "zcode":
+        return _zcode_models(catalog)
     if agent == "dsh":
         _binary("dsh", "AOP_DSH_BIN", "dsh")
         return [
@@ -106,6 +114,85 @@ def list_models(
             )
         ]
     raise AOPError(f"unsupported agent: {agent}")
+
+
+def _zcode_models(catalog: ModelCatalog) -> list[AvailableModel]:
+    from .zcode import configured_models, credential_env_names, read_config, source_home
+
+    _require_binary(_binary("zcode", "AOP_ZCODE_BIN", "zcode"))
+    config = read_config(source_home(dict(os.environ)) / "cli" / "config.json")
+    models = configured_models(config)
+    native_model = os.environ.get("ZCODE_MODEL")
+    if native_model:
+        if "/" not in native_model:
+            native_model = "anthropic/" + native_model
+        if native_model not in models:
+            models.append(native_model)
+    records = {
+        model: AvailableModel(
+            agent="zcode",
+            model=model,
+            name=model,
+            availability="configured",
+            price_scope="unavailable",
+        )
+        for model in models
+    }
+    # The official Coding Plan inventory is shared across harnesses. Query it
+    # only for a configured canonical Z.ai route, never for arbitrary endpoints.
+    for provider, definition in config.get("provider", {}).items():
+        options = definition.get("options", {})
+        if (
+            definition.get("kind") != "anthropic"
+            or options.get("baseURL") != "https://api.z.ai/api/anthropic"
+        ):
+            continue
+        for model in models:
+            native_provider, _, model_id = model.partition("/")
+            if native_provider == provider:
+                records[model] = _record(
+                    "zcode",
+                    model,
+                    model,
+                    "configured",
+                    "api-equivalent",
+                    catalog,
+                    "zai",
+                    model_id,
+                    inference_provider=ZAI_CODING_PLAN,
+                )
+        credential = options.get("apiKey") or next(
+            (
+                os.environ[name]
+                for name in credential_env_names(provider, definition)
+                if os.environ.get(name)
+            ),
+            None,
+        )
+        if credential is None:
+            continue
+        if not isinstance(credential, str) or not credential.strip():
+            raise AOPError("Zcode Z.ai API key must be a nonempty string")
+        # Each configured route may select a different account's credentials.
+        inventory = fetch_zai_inventory(ZAI_CODING_PLAN_ENDPOINT, credential)
+        entries, retrieved_at, digest = inventory
+        for entry in entries:
+            model = f"{provider}/{entry['slug']}"
+            records[model] = _record(
+                "zcode",
+                model,
+                entry.get("display_name") or entry["slug"],
+                "authenticated-endpoint",
+                "api-equivalent",
+                catalog,
+                "zai",
+                entry["slug"],
+                inference_provider=ZAI_CODING_PLAN,
+                authenticated=True,
+                inventory_retrieved_at=retrieved_at,
+                inventory_sha256=digest,
+            )
+    return sorted(records.values(), key=lambda record: record.model)
 
 
 def _codex_models(

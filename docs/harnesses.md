@@ -17,6 +17,7 @@ session mechanism while giving every run the same AOP access controls and result
 | [Grok Build](https://github.com/xai-org/grok-build) | `grok` | `grok-build` | Accepts native effort from `none` through `max`. |
 | [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes` | `deepseek/deepseek-v4-flash-0731` | Uses the configured inference provider unless both `--provider` and `--model` override it. |
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | `dsh` | `deepseek-v4-flash` through `deepseek-official` | Also supports `deepseek-v4-pro`; another configured route requires both `--provider` and `--model`. |
+| Zcode | `zcode` | Native configured model | Uses native `provider/model` IDs; the headless interface does not expose an effort override. |
 
 Use `aop models` to inspect installed or configured inventories and see whether each entry came from
 the authenticated harness, an installed default, or AOP's catalog. Exact resume retains the original
@@ -37,6 +38,7 @@ provenance. Harness-native automation surfaces determine the remaining feature d
 | Grok Build | Isolated profiles only | No | Account | No | API-equivalent | When emitted |
 | Hermes | Yes | Experimental | Configured route | Yes | API-equivalent or CLI-calculated | When emitted |
 | DeepSeek Harness | No | No | Bundled defaults | Yes | Known provider routes | No |
+| Zcode | No | No | Authenticated Z.ai route or configured models | Through the model ID | Canonical Z.ai route, API-equivalent | No |
 
 Calculated cost is an API-equivalent comparison unless the table identifies a native CLI
 calculation. Provider-reported cost remains separate and is retained only when the harness exposes
@@ -59,6 +61,7 @@ retrieval. Enforcement differs because the harnesses expose different native con
 | Devin CLI | Unsupported; the run fails before dispatch. |
 | Antigravity | Unsupported; the run fails before dispatch. |
 | DeepSeek Harness | Unsupported; the run fails before dispatch. |
+| Zcode | Unsupported; the run fails before dispatch. |
 
 The complete effective policy and adapter mechanisms are retained in each run's `request.json`.
 Exact resumes inherit the policy. AOP never substitutes a prompt instruction for missing
@@ -207,6 +210,26 @@ supported. Another route must exist under `llm-pi-ai.providers` and be selected 
 
 Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`.
 
+### Zcode
+
+AOP invokes Zcode's native `--prompt --output-format stream-json --mode yolo` interface. The AOP sandbox enforces the selected filesystem profile, and AOP enforces deadlines and validates terminal output. The adapter requires a completed turn, a terminal result, the selected model identity, and an exact session identity on resume. It retains native events and per-turn usage without reading the session database for accounting.
+
+Install and configure the native Zcode CLI first, then run:
+
+```sh
+aop models --agent zcode
+aop run example --agent zcode --model zai/glm-5.3-flash --prompt "Inspect this project"
+aop resume RUN_ID --prompt "Continue the inspection"
+```
+
+Model IDs come from the native `provider` map and `model.main` selection in `~/.zcode/cli/config.json`. For a native Anthropic-format provider configured at `https://api.z.ai/api/anthropic`, AOP queries Z.ai’s authenticated Coding Plan inventory using the selected native API key. Returned models carry `authenticated-endpoint` availability and the inventory timestamp and hash. Model listings map the canonical Z.ai route to the catalog’s `zai` prices and label those rates `api-equivalent`; they describe API token rates, not Coding Plan subscription charges. Models missing from the pricing catalog retain unknown rates. Other configured models remain labeled `configured`. Without an available API key, AOP lists configured entries; a failed authenticated request is reported as an error. `ZCODE_MODEL` can supply the native environment selection, and native API-key discovery and `ZCODE_BASE_URL` remain available. Separate `--provider` and effort overrides are unsupported. An explicit model selection must agree with any project-level `model.main`, because native project configuration takes precedence over user configuration.
+
+All profiles, including `host`, use a task-private Zcode home. AOP projects the selected inference provider and its same-provider lite model, copies only matching Z.AI OAuth entries when needed, and leaves unrelated providers, credentials, sessions, databases, logs, and caches behind. It decodes the native credential envelope during projection so credentials encrypted for the source home work in the private home; Zcode continues to own authentication, refresh, and subsequent credential writes. Exact resume pins the original model and provider configuration in the controller record, verifies the private configuration against that record before dispatch, and rejects conflicting project configuration.
+
+`edit`, `review`, and `host` seed user instructions and extensions; `sealed` disables plugins, skills, memory, and MCP and receives no user instruction files. Zcode's headless interface does not provide a verified no-web boundary, so AOP rejects `--no-web`. Completed request measurements survive timeouts and truncated output as partial accounting. On the canonical Z.ai route, AOP sums catalog costs for each measured model request, including lite-model and compaction calls, when those measurements reconcile with the turn usage. Unknown models or incomplete cost evidence leave calculated cost unavailable. Billing provenance records the native credential source and Coding Plan subscription route; calculated cost represents API-equivalent token rates, not subscription charges. Zcode does not expose provider-reported monetary cost.
+
+Set `AOP_ZCODE_BIN` to a specific executable and `AOP_ZCODE_SOURCE_HOME` to a nonstandard source `.zcode` directory. AOP mounts the resolved CLI bundle and its sibling `packages` directory into isolated profiles, including installations launched through the stable `~/.local/bin/zcode` symlink. The integration is tested against the native 0.16.5 bundle using a local inference server for run and exact resume under all four profiles. Native Bash tool tests verify worktree edits, artifact collection, read-only workspace enforcement in `review`, and workspace invisibility in `sealed`.
+
 ## Current limitations
 
 | Harness | Current limitation |
@@ -220,6 +243,7 @@ Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`.
 | Grok Build | No participant mode. |
 | Hermes | Participant mode is experimental; rotating OAuth credentials serialize Hermes turns. |
 | DeepSeek Harness | Developer-preview CLI; inventory lists bundled defaults rather than the selected provider; no participant mode. |
+| Zcode | Live inventory requires a canonical Z.ai Coding Plan route and API key; other inventories are configuration-based. No effort override, no-web, participant mode, or provider-reported monetary cost. Project model selection must agree with an explicit override. |
 
 Antigravity integration requires Agy 1.1.16 or newer. AOP checks the installed version before
 dispatch and model discovery so an older or unrecognized interface fails before task state is
@@ -243,6 +267,7 @@ AOP_AGY_BIN
 AOP_GROK_BIN
 AOP_HERMES_BIN
 AOP_DSH_BIN
+AOP_ZCODE_BIN
 AOP_BWRAP_BIN
 ```
 

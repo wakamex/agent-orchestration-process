@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterator, Protocol, Sequence
 import yaml
 from yaml.constructor import ConstructorError
 
+from . import zcode
 from .codex_routes import (
     inventory_document,
     projected_codex_config,
@@ -1260,6 +1261,374 @@ class ClaudeAdapter:
             "has_result": has_result,
             "usage_observed": usage_observed,
         }
+
+
+class ZcodeAdapter:
+    provider = "zcode"
+    modes = frozenset({"agent"})
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_ZCODE_BIN", "zcode")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        if effort is not None:
+            raise AOPError(
+                "Zcode headless execution does not expose an effort override"
+            )
+        if model is not None and ("/" not in model or not all(model.split("/", 1))):
+            raise AOPError("Zcode model must be provider/model")
+        return model, None
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        pinned = None
+        if request.session_id:
+            if not request.parent_run_id:
+                raise AOPError("Zcode resume is missing its controller record")
+            parent = RunStore(run_dir.parent).load_request(request.parent_run_id)
+            pinned = parent.effective_policy.get("zcode")
+        model, credential_names = _prepare_zcode_environment(
+            request, worktree, environment, pinned=pinned
+        )
+        config_path = Path(environment["HOME"]) / ".zcode" / "cli" / "config.json"
+        config = zcode.read_config(config_path)
+        provider = model.split("/", 1)[0]
+        definition = config["provider"][provider]
+        canonical_zai = (
+            definition.get("kind") == "anthropic"
+            and definition.get("options", {}).get("baseURL")
+            == "https://api.z.ai/api/anthropic"
+        )
+        inference_provider = "zai-coding-plan" if canonical_zai else provider
+        credential_source = (
+            "native-config"
+            if definition.get("options", {}).get("apiKey")
+            else next(
+                (
+                    name
+                    for name in credential_names
+                    if name != "ZCODE_CREDENTIAL_SECRET"
+                ),
+                None,
+            )
+        )
+        if (
+            credential_source is None
+            and (Path(environment["HOME"]) / ".zcode/v2/credentials.json").is_file()
+        ):
+            credential_source = "native-zai-oauth"
+        billing = BillingProvenance(
+            route="subscription" if canonical_zai and credential_source else "unknown",
+            credential_source=credential_source,
+            detected_by="zcode-native-provider-config",
+        )
+        request = replace(request, model=model, inference_provider=inference_provider)
+        request.effective_policy["zcode"] = {
+            "selection_sha256": zcode.selection_fingerprint(config),
+            "model": model,
+            "permission_mode": "yolo",
+            "output_format": "stream-json",
+            "state": "task-private",
+            "credential_environment_names": credential_names,
+            "config_sha256": hashlib.sha256(
+                (
+                    Path(environment["HOME"]) / ".zcode" / "cli" / "config.json"
+                ).read_bytes()
+            ).hexdigest(),
+        }
+        if request.profile != "host":
+            request.effective_policy["environment"]["credential_names"] = (
+                credential_names
+            )
+        command = [
+            self.binary,
+            "--cwd",
+            os.fspath(worktree.path),
+            "--mode",
+            "yolo",
+            "--output-format",
+            "stream-json",
+            "--prompt",
+            request.prompt,
+        ]
+        if request.session_id:
+            command.extend(["--resume", request.session_id])
+        command = _provider_command(command, request, worktree, environment)
+        if request.profile != "host":
+            names = {
+                command[index + 1]
+                for index, argument in enumerate(command[:-2])
+                if argument == "--setenv"
+            }
+            request.effective_policy["environment"]["allowed_names"] = sorted(names)
+            inherited = set(request.effective_policy["environment"]["inherited_names"])
+            request.effective_policy["environment"]["inherited_names"] = sorted(
+                inherited & names
+            )
+        _atomic_write(
+            run_dir / "request.json", json.dumps(request.to_dict(), indent=2) + "\n"
+        )
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=None,
+            timeout_seconds=request.timeout_seconds,
+            is_response=self._is_response,
+        )
+        _atomic_write(run_dir / "events.jsonl", capture.stdout)
+        _atomic_write(run_dir / "stderr.log", capture.stderr)
+        parsed = zcode.parse_stream(capture.stdout)
+        session_id = parsed["session_id"]
+        error = parsed["error"]
+        if request.session_id and session_id != request.session_id:
+            session_id = None
+            error = "Zcode did not resume the requested session ID"
+        if parsed["model"] != model:
+            error = error or "Zcode did not confirm the selected model identity"
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif capture.exit_code:
+            error = error or f"Zcode exited with status {capture.exit_code}"
+        final_message = parsed["final_message"]
+        if final_message is not None:
+            _atomic_write(run_dir / "last-message.txt", final_message)
+        usage = parsed["usage"]
+        return RunResult(
+            run_id=request.run_id,
+            provider=self.provider,
+            mode=request.mode,
+            task=request.task,
+            model=parsed["model"] or model,
+            effort=None,
+            session_id=session_id,
+            command=_recorded_command(command, secret_names=set(credential_names)),
+            started_at=started_at,
+            finished_at=_now(),
+            duration_seconds=capture.duration_seconds,
+            time_to_first_event_seconds=capture.first_event_seconds,
+            time_to_first_response_seconds=capture.first_response_seconds,
+            exit_code=capture.exit_code,
+            timed_out=capture.timed_out,
+            error=error,
+            final_message=final_message,
+            usage=usage,
+            calculated_cost=(
+                zcode.calculate_cost(model, usage, parsed["requests"])
+                if canonical_zai
+                and all(
+                    name.split("/", 1)[0] == provider for name, _ in parsed["requests"]
+                )
+                else None
+            ),
+            accounting_status="partial"
+            if capture.timed_out and usage is not None
+            else parsed["accounting_status"],
+            billing=billing,
+            inference_provider=inference_provider,
+            provider_duration_seconds=parsed["duration_seconds"],
+            provider_error=parsed["provider_error"],
+            provider_status=parsed["status"],
+        )
+
+    @staticmethod
+    def _is_response(line: str) -> bool:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return False
+        return isinstance(event, dict) and (
+            event.get("type") == "result"
+            or (
+                event.get("type") == "model.streaming"
+                and isinstance(event.get("payload"), dict)
+                and event["payload"].get("kind") == "text_delta"
+                and bool(event["payload"].get("delta"))
+            )
+        )
+
+
+def _prepare_zcode_environment(
+    request: RunRequest,
+    worktree: Worktree,
+    environment: dict[str, str],
+    *,
+    pinned: dict[str, Any] | None = None,
+) -> tuple[str, list[str]]:
+    source = zcode.source_home(environment)
+    home = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "zcode" / "home"
+    config_path = home / ".zcode" / "cli" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if request.session_id:
+        if not config_path.is_file():
+            raise AOPError("Zcode resume is missing its private configuration")
+        config = zcode.read_config(config_path)
+        if not isinstance(pinned, dict) or not isinstance(pinned.get("model"), str):
+            raise AOPError("Zcode resume is missing its pinned model and configuration")
+        if config.get("model", {}).get("main") != pinned["model"] or (
+            request.model is not None and request.model != pinned["model"]
+        ):
+            raise AOPError("Zcode resume model differs from the pinned selection")
+        if "selection_sha256" in pinned:
+            unchanged = (
+                zcode.selection_fingerprint(config) == pinned["selection_sha256"]
+            )
+        else:
+            unchanged = hashlib.sha256(
+                config_path.read_bytes()
+            ).hexdigest() == pinned.get("config_sha256")
+        if not unchanged:
+            raise AOPError(
+                "Zcode resume provider configuration differs from the pinned selection"
+            )
+        projected, model, candidates = zcode.project_config(
+            config, None, sealed=request.profile == "sealed"
+        )
+    else:
+        config = zcode.read_config(source / "cli" / "config.json")
+        # Native project configuration merges provider and model maps. Other
+        # project customizations remain visible through the workspace mount.
+        if request.profile != "sealed":
+            for path in (
+                worktree.path / "zcode.json",
+                worktree.path / ".zcode" / "config.json",
+            ):
+                local = zcode.read_config(path)
+                for key in ("provider", "model"):
+                    if key in local:
+                        config[key] = {**config.get(key, {}), **local[key]}
+        native_model = environment.get("ZCODE_MODEL")
+        if native_model:
+            if "/" not in native_model:
+                native_model = "anthropic/" + native_model
+            native_provider, native_id = native_model.split("/", 1)
+            if native_provider not in config.get("provider", {}):
+                options = {}
+                if environment.get("ZCODE_BASE_URL"):
+                    options["baseURL"] = environment["ZCODE_BASE_URL"]
+                config.setdefault("provider", {})[native_provider] = {
+                    "kind": "anthropic",
+                    "options": options,
+                    "models": {native_id: {}},
+                }
+        projected, model, candidates = zcode.project_config(
+            config, request.model or native_model, sealed=request.profile == "sealed"
+        )
+        # Persist selected configuration once; exact resumes retain it.
+        projected["storage"] = {
+            "dir": "~/.zcode",
+            "sessionDbPath": "~/.zcode/cli/db/db.sqlite",
+        }
+        _atomic_write_private(config_path, json.dumps(projected) + "\n")
+        if request.profile != "sealed":
+            for name in ("AGENTS.md", "skills", "commands", "plugins", "workflows"):
+                entry, target = source / name, home / ".zcode" / name
+                if entry.is_dir() and not target.exists():
+                    shutil.copytree(entry, target, symlinks=True)
+                elif entry.is_file() and not target.exists():
+                    shutil.copy2(entry, target)
+    provider = model.split("/", 1)[0]
+    definition = projected["provider"][provider]
+    configured_key = definition.get("options", {}).get("apiKey")
+    selected_credential = (
+        None
+        if configured_key
+        else next((key for key in candidates if environment.get(key)), None)
+    )
+    allowed = [selected_credential] if selected_credential else []
+    # Native OAuth uses a shared multi-service store. Retain only Z.AI entries.
+    if provider == "zai" and not configured_key and not selected_credential:
+        credentials_source = (
+            Path(environment.get("ZCODE_DATA_BASE_DIR", str(source.parent)))
+            / ".zcode"
+            / "v2"
+            / "credentials.json"
+        )
+        credentials_path = home / ".zcode" / "v2" / "credentials.json"
+        if not credentials_path.exists():
+            credentials = zcode.read_config(credentials_source)
+            credentials = {
+                key: value
+                for key, value in credentials.items()
+                if key
+                in {
+                    "oauth:active_provider",
+                    "oauth:zai:access_token",
+                    "oauth:zai:refresh_token",
+                    "oauth:zai:user_info",
+                    "zcodejwttoken",
+                }
+            }
+            if credentials:
+                try:
+                    decoded = subprocess.run(
+                        [
+                            "node",
+                            os.fspath(
+                                Path(__file__).with_name("zcode_credentials.cjs")
+                            ),
+                        ],
+                        input=json.dumps(credentials),
+                        text=True,
+                        capture_output=True,
+                        env=environment,
+                        timeout=5,
+                        check=True,
+                    )
+                    credentials = json.loads(decoded.stdout)
+                except (OSError, subprocess.SubprocessError, ValueError) as error:
+                    raise AOPError(
+                        "could not decode selected native Zcode credentials"
+                    ) from error
+            if credentials:
+                credentials_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                _atomic_write_private(credentials_path, json.dumps(credentials) + "\n")
+        if environment.get("ZCODE_CREDENTIAL_SECRET"):
+            allowed.append("ZCODE_CREDENTIAL_SECRET")
+    environment["AOP_ZCODE_ALLOWED_AUTH_ENV"] = ",".join(allowed)
+    environment["HOME"] = os.fspath(home)
+    environment["ZCODE_STORAGE_DIR"] = os.fspath(home / ".zcode")
+    environment["ZCODE_DATA_BASE_DIR"] = os.fspath(home)
+    environment["ZCODE_SESSION_DB_PATH"] = os.fspath(
+        home / ".zcode" / "cli" / "db" / "db.sqlite"
+    )
+    environment["ZCODE_MODEL_TELEMETRY_ENABLED"] = "0"
+    # Native ZCODE_MODEL replaces the entire provider definition, including
+    # its credential and wire format. Select through the private native config.
+    environment.pop("ZCODE_MODEL", None)
+    if request.profile != "sealed":
+        for path in (
+            worktree.path / "zcode.json",
+            worktree.path / ".zcode" / "config.json",
+        ):
+            local = zcode.read_config(path)
+            project_model = local.get("model", {}).get("main")
+            if project_model is not None and project_model != model:
+                raise AOPError(
+                    "Zcode project model conflicts with the pinned selection; update native project configuration"
+                )
+            project_lite = local.get("model", {}).get("lite")
+            if (
+                project_lite is not None
+                and project_lite != projected["model"].get("lite")
+            ):
+                raise AOPError(
+                    "Zcode project lite model conflicts with the pinned selection"
+                )
+            project_provider = local.get("provider", {}).get(provider)
+            if project_provider is not None and project_provider != definition:
+                raise AOPError(
+                    "Zcode project provider differs from the pinned configuration"
+                )
+    return model, allowed
 
 
 class GrokAdapter:
@@ -3315,6 +3684,7 @@ def _provider_command(
         "grok",
         "hermes",
         "opencode",
+        "zcode",
     }:
         wrapped.extend(["--bind", os.fspath(provider_state), "/state"])
     if request.provider == "cursor":
@@ -3460,6 +3830,11 @@ def _provider_runtime(
         mounts = [(os.fspath(resolved.parent), os.fspath(guest))]
     else:
         mounts = [(os.fspath(resolved), os.fspath(provider_guest))]
+    if provider == "zcode":
+        for name in ("packages", ".node-bundle-meta.json"):
+            sibling = resolved.parent / name
+            if sibling.exists():
+                mounts.append((os.fspath(sibling), os.fspath(guest / name)))
     try:
         first_line = resolved.open("rb").readline(4096).decode(errors="ignore").strip()
     except OSError:
@@ -3561,6 +3936,15 @@ def _guest_environment(
     environment: dict[str, str], mappings: tuple[tuple[Path, Path], ...]
 ) -> dict[str, str]:
     selected = _filtered_environment(environment)
+    if "AOP_ZCODE_ALLOWED_AUTH_ENV" in environment:
+        for name in _AUTH_ENV_NAMES:
+            selected.pop(name, None)
+        for name in filter(None, environment["AOP_ZCODE_ALLOWED_AUTH_ENV"].split(",")):
+            if name in environment:
+                selected[name] = environment[name]
+        for name in ("ZCODE_MODEL", "ZCODE_MODEL_TELEMETRY_ENABLED", "ZCODE_BASE_URL"):
+            if name in environment:
+                selected[name] = environment[name]
     codex_credential_ref = environment.get("AOP_CODEX_CREDENTIAL_REF")
     if codex_credential_ref is not None:
         for name in _AUTH_ENV_NAMES:
@@ -3583,6 +3967,9 @@ def _guest_environment(
         "AOP_SCRATCH_DIR",
         "AOP_INPUT_DIR",
         "AOP_OUTPUT_DIR",
+        "ZCODE_STORAGE_DIR",
+        "ZCODE_DATA_BASE_DIR",
+        "ZCODE_SESSION_DB_PATH",
         "CODEX_HOME",
         "DSH_HOME",
         "GROK_HOME",
@@ -4770,6 +5157,8 @@ def adapter_for(agent: str) -> AgentAdapter:
         return DevinAdapter()
     if agent == "dsh":
         return DeepSeekHarnessAdapter()
+    if agent == "zcode":
+        return ZcodeAdapter()
     if agent == "grok":
         return GrokAdapter()
     if agent == "opencode":
@@ -5217,7 +5606,7 @@ class AgentRunner:
                 shutil.rmtree(input_projection)
         result = replace(
             result,
-            inference_provider=request.inference_provider,
+            inference_provider=request.inference_provider or result.inference_provider,
             inference_route=request.inference_route,
             inputs=request.inputs,
         )
@@ -5386,6 +5775,10 @@ def _instruction_sources(
                     "workflows",
                 )
             )
+    elif request.provider == "zcode":
+        source = zcode.source_home(environment)
+        candidates.extend(source / name for name in ("AGENTS.md", "skills", "commands", "plugins", "workflows"))
+        candidates.extend(worktree.path / name for name in ("zcode.json", ".zcode/config.json"))
     elif request.provider == "hermes":
         home = _hermes_source_home(environment)
         candidates.extend(home / name for name in sorted(_HERMES_SEED_DIRECTORIES))

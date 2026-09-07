@@ -11,9 +11,8 @@ schema, runtime state, or resume behavior:
   [OpenCode](https://github.com/anomalyco/opencode),
   [Antigravity (`agy`)](https://github.com/google-antigravity/antigravity-cli),
   [Grok Build](https://github.com/xai-org/grok-build),
-  [Hermes](https://github.com/NousResearch/hermes-agent), and
-  [DeepSeek Harness (`dsh`)](https://github.com/deepseek-ai/deepseek-harness) through the same
-  `run` and `resume` commands. See [Harness adapters](docs/harnesses.md) for current model support
+  [Hermes](https://github.com/NousResearch/hermes-agent),
+  [DeepSeek Harness (`dsh`)](https://github.com/deepseek-ai/deepseek-harness), and Zcode through the same `run` and `resume` commands. See [Harness adapters](docs/harnesses.md) for current model support
   and limitations.
 - Reuse each harness's existing authentication, model execution, tools, and conversations instead
   of maintaining a separate AOP credential store.

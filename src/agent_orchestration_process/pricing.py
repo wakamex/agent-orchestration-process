@@ -169,11 +169,34 @@ def _sum_usage(usages: Sequence[TokenUsage]) -> TokenUsage:
 DEEPSEEK_PRICE_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing/"
 DEEPSEEK_PRICE_VERIFIED_AT = datetime(2026, 9, 10, tzinfo=UTC).timestamp()
 DEEPSEEK_PRICE_EXPIRES_AT = datetime(2026, 9, 17, tzinfo=UTC).timestamp()
+ZAI_FLASH_PRICE_SOURCE = "https://docs.z.ai/guides/overview/pricing"
+ZAI_FLASH_PRICE_VERIFIED_AT = datetime(2026, 9, 10, tzinfo=UTC).timestamp()
+ZAI_FLASH_PRICE_EXPIRES_AT = datetime(2026, 9, 17, tzinfo=UTC).timestamp()
 
 
 def pricing_metadata(catalog: ModelCatalog, provider: str, model: str) -> dict | None:
-    """Prefer catalog rates; use a dated official fallback for missing rates."""
+    """Resolve catalog rates with bounded, sourced corrections and fallbacks."""
     metadata = catalog.model(provider, model)
+    # Correct only the observed stale Z.ai tariff, without masking future updates
+    # or applying the international API rate to resellers or Chinese endpoints.
+    if provider == "zai" and model == "glm-5.3-flash" and metadata is not None:
+        cost = metadata.get("cost")
+        if isinstance(cost, dict) and tuple(
+            cost.get(key) for key in ("input", "cache_read", "output")
+        ) == (0.075, 0.015, 0.25):
+            if not (
+                ZAI_FLASH_PRICE_VERIFIED_AT <= time.time() < ZAI_FLASH_PRICE_EXPIRES_AT
+            ):
+                return {**metadata, "cost": {}}
+            return {
+                **metadata,
+                "cost": {"input": 0.15, "cache_read": 0.03, "output": 0.50},
+                "aop_pricing": {
+                    "source": ZAI_FLASH_PRICE_SOURCE,
+                    "verified_at": ZAI_FLASH_PRICE_VERIFIED_AT,
+                    "version": "zai-official-2026-09-10",
+                },
+            }
     if metadata is not None and _model_price(metadata.get("cost")) is not None:
         return metadata
     if (

@@ -273,9 +273,7 @@ def test_dsh_run_persists_official_fallback(repository, fake_dsh, monkeypatch):
         SimpleNamespace(time=lambda: pricing.DEEPSEEK_PRICE_VERIFIED_AT),
     )
     fake_dsh.write_text(
-        fake_dsh.read_text().replace(
-            '"deepseek-v4-flash"', '"deepseek-flash"'
-        )
+        fake_dsh.read_text().replace('"deepseek-v4-flash"', '"deepseek-flash"')
     )
     runner = AgentRunner(
         WorktreeManager.discover(repository), DeepSeekHarnessAdapter(str(fake_dsh))
@@ -291,3 +289,79 @@ def test_dsh_run_persists_official_fallback(repository, fake_dsh, monkeypatch):
         assert cost.pricing_basis == "peak"
         assert cost.pricing_source == pricing.DEEPSEEK_PRICE_SOURCE
         assert cost.pricing_retrieved_at == pricing.DEEPSEEK_PRICE_VERIFIED_AT
+
+
+def test_zai_flash_stale_rate_correction(monkeypatch):
+    from dataclasses import replace
+    from agent_orchestration_process import pricing, model_listing
+    from agent_orchestration_process.model_catalog import ensure_catalog_fresh
+
+    monkeypatch.setattr(
+        pricing.time, "time", lambda: pricing.ZAI_FLASH_PRICE_VERIFIED_AT
+    )
+    stale = {
+        "name": "GLM-5.3-Flash",
+        "cost": {
+            "input": 0.075,
+            "cache_read": 0.015,
+            "output": 0.25,
+            "cache_write": 0,
+        },
+    }
+    catalog = replace(
+        ensure_catalog_fresh(),
+        providers={
+            provider: {"models": {"glm-5.3-flash": stale}}
+            for provider in ("zai", "zhipuai", "opencode", "opencode-go")
+        },
+    )
+    cost = estimate_api_cost(
+        "glm-5.3-flash", TokenUsage(1000, 100, 200), catalog, providers=("zai",)
+    )
+    assert cost.amount_usd == 0.000238
+    assert cost.pricing_source == pricing.ZAI_FLASH_PRICE_SOURCE
+    assert cost.pricing_retrieved_at == pricing.ZAI_FLASH_PRICE_VERIFIED_AT
+    assert cost.pricing_version == "zai-official-2026-09-10"
+    row = model_listing._record(
+        "zcode",
+        "zai/glm-5.3-flash",
+        "Flash",
+        "account",
+        "api-equivalent",
+        catalog,
+        "zai",
+        "glm-5.3-flash",
+    )
+    assert (
+        row.input_per_million_usd,
+        row.cached_input_per_million_usd,
+        row.output_per_million_usd,
+    ) == (0.15, 0.03, 0.5)
+    assert row.pricing_source == cost.pricing_source
+    assert catalog.model("zai", "glm-5.3-flash") == stale
+    for provider in ("zhipuai", "opencode", "opencode-go"):
+        assert pricing.pricing_metadata(catalog, provider, "glm-5.3-flash") == stale
+    monkeypatch.setattr(
+        pricing.time, "time", lambda: pricing.ZAI_FLASH_PRICE_EXPIRES_AT
+    )
+    assert (
+        estimate_api_cost(
+            "glm-5.3-flash", TokenUsage(1000), catalog, providers=("zai",)
+        )
+        is None
+    )
+    assert (
+        pricing.pricing_metadata(catalog, "zai", "glm-5.3-flash")["name"]
+        == "GLM-5.3-Flash"
+    )
+    for new_cost in (
+        {"input": 0.15, "cache_read": 0.03, "output": 0.5},
+        {"input": 0.2, "output": 0.6},
+    ):
+        updated = replace(
+            catalog,
+            providers={"zai": {"models": {"glm-5.3-flash": {"cost": new_cost}}}},
+        )
+        assert pricing.pricing_metadata(updated, "zai", "glm-5.3-flash") == {
+            "cost": new_cost
+        }

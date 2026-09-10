@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+import time
 
 from .model_catalog import ModelCatalog, ensure_catalog_fresh
 
@@ -73,6 +75,7 @@ class CalculatedCost:
     pricing_source: str
     long_context_pricing: bool
     pricing_retrieved_at: float | None = None
+    pricing_basis: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -101,7 +104,7 @@ def estimate_api_cost(
     resolved = _catalog_price(catalog, catalog_model or model, providers)
     if resolved is None:
         return None
-    priced_as, price = resolved
+    priced_as, price, provenance = resolved
     usages = tuple(request_usages) if request_usages is not None else (usage,)
     if request_usages is not None and _sum_usage(usages) != usage:
         raise ValueError("request usage does not match aggregate usage")
@@ -113,10 +116,11 @@ def estimate_api_cost(
         currency="USD",
         model=model,
         priced_as=priced_as,
-        pricing_version=catalog.version,
-        pricing_source=catalog.source,
+        pricing_version=provenance.get("version", catalog.version),
+        pricing_source=provenance.get("source", catalog.source),
         long_context_pricing=long_context,
-        pricing_retrieved_at=catalog.fetched_at,
+        pricing_retrieved_at=provenance.get("verified_at", catalog.fetched_at),
+        pricing_basis=provenance.get("basis"),
     )
 
 
@@ -156,15 +160,42 @@ def _sum_usage(usages: Sequence[TokenUsage]) -> TokenUsage:
         input_tokens=sum(usage.input_tokens for usage in usages),
         cached_input_tokens=sum(usage.cached_input_tokens for usage in usages),
         output_tokens=sum(usage.output_tokens for usage in usages),
-        reasoning_output_tokens=sum(
-            usage.reasoning_output_tokens for usage in usages
-        ),
+        reasoning_output_tokens=sum(usage.reasoning_output_tokens for usage in usages),
     )
+
+
+# Temporary official fallback while models.dev lacks the canonical Flash price.
+# Reverify or remove after this window; a catalog refresh must not renew it.
+DEEPSEEK_PRICE_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing/"
+DEEPSEEK_PRICE_VERIFIED_AT = datetime(2026, 9, 10, tzinfo=UTC).timestamp()
+DEEPSEEK_PRICE_EXPIRES_AT = datetime(2026, 9, 17, tzinfo=UTC).timestamp()
+
+
+def pricing_metadata(catalog: ModelCatalog, provider: str, model: str) -> dict | None:
+    """Prefer catalog rates; use a dated official fallback for missing rates."""
+    metadata = catalog.model(provider, model)
+    if metadata is not None and _model_price(metadata.get("cost")) is not None:
+        return metadata
+    if (
+        provider == "deepseek"
+        and model == "deepseek-flash"
+        and DEEPSEEK_PRICE_VERIFIED_AT <= time.time() < DEEPSEEK_PRICE_EXPIRES_AT
+    ):
+        return {
+            "cost": {"input": 0.30, "cache_read": 0.006, "output": 1.20},
+            "aop_pricing": {
+                "source": DEEPSEEK_PRICE_SOURCE,
+                "verified_at": DEEPSEEK_PRICE_VERIFIED_AT,
+                "version": "deepseek-official-2026-09-10-peak",
+                "basis": "peak",
+            },
+        }
+    return metadata
 
 
 def _catalog_price(
     catalog: ModelCatalog, model: str, providers: tuple[str, ...]
-) -> tuple[str, ModelPrice] | None:
+) -> tuple[str, ModelPrice, dict] | None:
     unqualified = model.partition("/")[2] or model
     aliases = {"gpt-5.6": "gpt-5.6-sol"}
     requested = aliases.get(unqualified, unqualified)
@@ -179,12 +210,12 @@ def _catalog_price(
             if isinstance(candidate, str) and requested.startswith(f"{candidate}-20")
         )
         for candidate in sorted(set(candidates), key=len, reverse=True):
-            metadata = models.get(candidate)
+            metadata = pricing_metadata(catalog, provider, candidate)
             if not isinstance(metadata, dict):
                 continue
             price = _model_price(metadata.get("cost"))
             if price is not None:
-                return candidate, price
+                return candidate, price, metadata.get("aop_pricing", {})
     return None
 
 

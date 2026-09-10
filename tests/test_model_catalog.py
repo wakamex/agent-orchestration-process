@@ -87,6 +87,14 @@ def test_non_dispatch_cli_commands_skip_the_catalog_preflight(
 def test_native_model_parsers_and_pricing(
     fresh_model_catalog: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from types import SimpleNamespace
+    from agent_orchestration_process import pricing
+
+    monkeypatch.setattr(
+        pricing,
+        "time",
+        SimpleNamespace(time=lambda: pricing.DEEPSEEK_PRICE_VERIFIED_AT),
+    )
     catalog = ensure_catalog_fresh()
     commands = []
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
@@ -192,7 +200,8 @@ def test_native_model_parsers_and_pricing(
         "deepseek-v4-pro",
     ]
     assert dsh[0].availability == "installed-default"
-    assert dsh[0].input_per_million_usd is None
+    assert dsh[0].input_per_million_usd == 0.3
+    assert dsh[0].price_scope == "api-equivalent-peak"
     assert dsh[1].input_per_million_usd == 0.3
 
 

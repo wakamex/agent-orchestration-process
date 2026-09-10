@@ -23,6 +23,7 @@ from .codex_routes import (
 )
 from .model_catalog import ModelCatalog
 from .models import InferenceRoute
+from .pricing import pricing_metadata
 from .provider_versions import require_supported_agy
 from .worktrees import AOPError
 
@@ -58,6 +59,7 @@ class AvailableModel:
     cache_write_per_million_usd: float | None = None
     output_per_million_usd: float | None = None
     pricing_source: str | None = None
+    pricing_retrieved_at: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -633,16 +635,23 @@ def _record(
     authenticated: bool = False,
 ) -> AvailableModel:
     metadata = (
-        catalog.model(provider, priced_model) if provider and priced_model else None
+        pricing_metadata(catalog, provider, priced_model)
+        if provider and priced_model
+        else None
     )
     cost = metadata.get("cost") if isinstance(metadata, dict) else None
+    provenance = metadata.get("aop_pricing", {}) if isinstance(metadata, dict) else {}
     cost = cost if isinstance(cost, dict) else {}
     return AvailableModel(
         agent=agent,
         model=model,
         name=name,
         availability=availability,
-        price_scope=price_scope if cost else "unknown",
+        price_scope=(
+            "api-equivalent-peak" if provenance.get("basis") == "peak" else price_scope
+        )
+        if cost
+        else "unknown",
         inference_provider=inference_provider,
         inventory_retrieved_at=inventory_retrieved_at,
         inventory_sha256=inventory_sha256,
@@ -651,7 +660,10 @@ def _record(
         cached_input_per_million_usd=_number(cost.get("cache_read")),
         cache_write_per_million_usd=_number(cost.get("cache_write")),
         output_per_million_usd=_number(cost.get("output")),
-        pricing_source=catalog.source if cost else None,
+        pricing_source=provenance.get("source", catalog.source) if cost else None,
+        pricing_retrieved_at=provenance.get("verified_at", catalog.fetched_at)
+        if cost
+        else None,
     )
 
 

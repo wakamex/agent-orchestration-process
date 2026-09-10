@@ -86,6 +86,10 @@ not use expired prices. Set `AOP_MODEL_CATALOG_CACHE` to relocate the cache, or 
 `aop models --refresh` to refresh it immediately. Every calculated cost retains its pricing source,
 retrieval time when applicable, and price version.
 
+For `deepseek/deepseek-flash`, missing catalog prices fall back to the [official DeepSeek peak rates](https://api-docs.deepseek.com/quick_start/pricing/): $0.30 uncached input, $0.006 cached input, and $1.20 output per million tokens. These rates were verified on September 10, 2026. Listings use `api-equivalent-peak`; calculated costs record `pricing_basis: peak`, the official source URL, verification timestamp, and `deepseek-official-2026-09-10-peak` version. A valid catalog price takes precedence. The fallback expires at September 17, 2026, 00:00 UTC and must then be reverified or removed; refreshing the catalog does not extend that date. It applies only to the canonical model under the DeepSeek pricing provider and does not alter the cached catalog.
+
+DeepSeek peak hours are Monday through Friday, 01:00–04:00 and 06:00–10:00 UTC; all other hours are off-peak at half price. AOP's fallback consistently reports a peak-rate comparison. Applying the discount accurately requires timestamps and usage for each inference request, including runs crossing a rate boundary, plus the provider's boundary billing rule. The current dsh driver retains aggregate invocation usage, so it does not infer a discount from run start, run finish, or the machine's local timezone.
+
 Provider inventories and cost evidence differ. Claude can supply its own CLI-calculated comparison;
 OpenCode can report billed per-step cost; Grok can report terminal cost; and Hermes can report cost
 through its selected inference provider. Cursor and Devin do not currently expose enough

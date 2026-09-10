@@ -151,3 +151,143 @@ def test_unknown_or_implicit_model_has_no_cost_estimate() -> None:
 
     assert estimate_api_cost(None, usage) is None
     assert estimate_api_cost("future-model", usage) is None
+
+
+@pytest.mark.parametrize(
+    "metadata", [None, {"name": "Flash"}, {"cost": {"input": 0.3}}]
+)
+def test_deepseek_official_fallback_prices_and_provenance(monkeypatch, metadata):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from agent_orchestration_process import pricing, model_listing
+    from agent_orchestration_process.model_catalog import ensure_catalog_fresh
+
+    monkeypatch.setattr(
+        pricing,
+        "time",
+        SimpleNamespace(time=lambda: pricing.DEEPSEEK_PRICE_VERIFIED_AT),
+    )
+    catalog = ensure_catalog_fresh()
+    models = {} if metadata is None else {"deepseek-flash": metadata}
+    catalog = replace(catalog, providers={"deepseek": {"models": models}})
+    usage = TokenUsage(1000, 100, 200)
+    cost = estimate_api_cost("deepseek-flash", usage, catalog, providers=("deepseek",))
+    assert cost.amount_usd == 0.0005106
+    assert cost.pricing_basis == "peak"
+    assert cost.pricing_source == pricing.DEEPSEEK_PRICE_SOURCE
+    assert cost.pricing_retrieved_at == pricing.DEEPSEEK_PRICE_VERIFIED_AT
+    assert cost.pricing_version == "deepseek-official-2026-09-10-peak"
+    assert pricing.CalculatedCost.from_dict(cost.to_dict()) == cost
+    row = model_listing._record(
+        "dsh",
+        "deepseek-flash",
+        "Flash",
+        "installed-default",
+        "api-equivalent",
+        catalog,
+        "deepseek",
+        "deepseek-flash",
+    )
+    assert (
+        row.input_per_million_usd,
+        row.cached_input_per_million_usd,
+        row.output_per_million_usd,
+    ) == (0.3, 0.006, 1.2)
+    assert row.price_scope == "api-equivalent-peak"
+    assert row.pricing_source == cost.pricing_source
+    assert row.pricing_retrieved_at == cost.pricing_retrieved_at
+    assert catalog.providers["deepseek"]["models"] == models
+    assert (
+        estimate_api_cost("deepseek-flash", usage, catalog, providers=("openai",))
+        is None
+    )
+    assert (
+        estimate_api_cost("deepseek-v4-flash", usage, catalog, providers=("deepseek",))
+        is None
+    )
+
+
+def test_deepseek_catalog_prices_take_precedence(monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from agent_orchestration_process import pricing
+    from agent_orchestration_process.model_catalog import ensure_catalog_fresh
+
+    monkeypatch.setattr(
+        pricing,
+        "time",
+        SimpleNamespace(time=lambda: pricing.DEEPSEEK_PRICE_VERIFIED_AT),
+    )
+    catalog = replace(
+        ensure_catalog_fresh(),
+        providers={
+            "deepseek": {
+                "models": {
+                    "deepseek-flash": {
+                        "cost": {"input": 2, "output": 3, "cache_read": 1}
+                    }
+                }
+            }
+        },
+    )
+    cost = estimate_api_cost(
+        "deepseek-flash", TokenUsage(1000, 100, 200), catalog, providers=("deepseek",)
+    )
+    assert cost.amount_usd == 0.0025
+    assert cost.pricing_source == catalog.source
+    assert cost.pricing_basis is None
+
+
+@pytest.mark.parametrize("offset", [-1, 7 * 24 * 3600])
+def test_deepseek_fallback_does_not_claim_unverified_or_expired_prices(
+    monkeypatch, offset
+):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from agent_orchestration_process import pricing
+    from agent_orchestration_process.model_catalog import ensure_catalog_fresh
+
+    monkeypatch.setattr(
+        pricing,
+        "time",
+        SimpleNamespace(time=lambda: pricing.DEEPSEEK_PRICE_VERIFIED_AT + offset),
+    )
+    catalog = replace(ensure_catalog_fresh(), providers={"deepseek": {"models": {}}})
+    assert (
+        estimate_api_cost(
+            "deepseek-flash", TokenUsage(1000), catalog, providers=("deepseek",)
+        )
+        is None
+    )
+
+
+def test_dsh_run_persists_official_fallback(repository, fake_dsh, monkeypatch):
+    from types import SimpleNamespace
+    from agent_orchestration_process import pricing
+    from agent_orchestration_process.runner import AgentRunner, DeepSeekHarnessAdapter
+    from agent_orchestration_process.worktrees import WorktreeManager
+
+    monkeypatch.setattr(
+        pricing,
+        "time",
+        SimpleNamespace(time=lambda: pricing.DEEPSEEK_PRICE_VERIFIED_AT),
+    )
+    fake_dsh.write_text(
+        fake_dsh.read_text().replace(
+            '"deepseek-v4-flash"', '"deepseek-flash"'
+        )
+    )
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), DeepSeekHarnessAdapter(str(fake_dsh))
+    )
+    result = runner.run(task="flash-pricing", prompt="test")
+    assert result.succeeded, result.error
+    assert result.model == "deepseek-flash"
+    for cost in (
+        result.calculated_cost,
+        runner.store.load_result(result.run_id).calculated_cost,
+    ):
+        assert cost.amount_usd == 0.00005118
+        assert cost.pricing_basis == "peak"
+        assert cost.pricing_source == pricing.DEEPSEEK_PRICE_SOURCE
+        assert cost.pricing_retrieved_at == pricing.DEEPSEEK_PRICE_VERIFIED_AT

@@ -16,7 +16,7 @@ session mechanism while giving every run the same AOP access controls and result
 | [Antigravity](https://github.com/google-antigravity/antigravity-cli) | `agy` | Native default | Accepts exact names printed by `agy models`; effort is `low`, `medium`, or `high`. |
 | [Grok Build](https://github.com/xai-org/grok-build) | `grok` | `grok-build` | Accepts native effort from `none` through `max`. |
 | [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes` | `deepseek/deepseek-v4-flash-0731` | Uses the configured inference provider unless both `--provider` and `--model` override it. |
-| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | `dsh` | `deepseek-v4-flash` through `deepseek-official` | Also supports `deepseek-v4-pro`; another configured route requires both `--provider` and `--model`. |
+| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | `dsh` | `deepseek-flash` through `deepseek-official` | Also supports `deepseek-v4-pro`; another configured route requires both `--provider` and `--model`. |
 | Zcode | `zcode` | Native configured model | Uses native `provider/model` IDs; the headless interface does not expose an effort override. |
 
 Use `aop models` to inspect installed or configured inventories and see whether each entry came from
@@ -203,12 +203,13 @@ profiles, sessions, plugins, credentials, and user-level `.env` files behind. If
 does not name a credential environment variable, its native ambient authentication discovery still
 applies. AOP disables dsh telemetry for every run.
 
-The default route is `deepseek-official` with `deepseek-v4-flash`; `deepseek-v4-pro` is also
-supported. Another route must exist under `llm-pi-ai.providers` and be selected with both
-`--provider` and `--model`. The dsh headless interface cannot list models by provider, so
-`aop models --agent dsh` reports its bundled DeepSeek defaults.
+The default route is `deepseek-official` with `deepseek-flash` (DeepSeek-V4.1-Flash). The native DeepSeek route accepts `--effort none`, `low`, `high`, and `max`; AOP maps `none` to native `off`. Another route must exist under `llm-pi-ai.providers` and be selected with both `--provider` and `--model`. The dsh headless interface cannot list models by provider, so `aop models --agent dsh` reports the canonical Flash model and legacy Flash/Pro defaults. Rates remain unavailable when the pricing catalog has no matching model; AOP does not substitute legacy Flash rates for the new model.
 
-Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`.
+The adapter targets dsh `0.1.5-rc.1` and uses its public `Session.snapshotEvents()` interface and native user-message constructor. It sets the harness sandbox to `danger-full-access` with approval policy `never`, because dsh's workspace-only write policy excludes AOP's separate artifact directory. The AOP sandbox continues to enforce `edit`, `review`, and `sealed`; `host` retains host access. The effective harness policy is recorded in `request.json`. The optional DeepSeek plugin-package inventory is disabled: its new default-on collector rejects the generated profile's unversioned manifest when AOP installs its loose runner. Session-log upload remains at the native disabled default.
+
+Use Node.js 22.19 or newer within 22.x, or Node.js 24 or newer. The `host` profile inherits PATH; AOP rejects an unsupported Node version before dispatch. On this host, NVM's Node 22.14 failed to start the driver, while `/usr/bin/node` 22.22.2 passed. Set `PATH="/usr/bin:$PATH"` when running `host` with the system Node, or select a supported Node through your runtime manager. Isolated profiles use the Node visible inside the AOP sandbox.
+
+Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`. Run native integration checks with `AOP_TEST_DSH_BIN=/path/to/dsh uv run --locked pytest tests/test_dsh_native.py`. These use a local inference server and test authentication projection, tools, artifacts, usage, and exact resume under all four profiles without real API credentials. Historical session-format migration remains owned by dsh; these tests exercise sessions created by the installed version.
 
 ### Zcode
 

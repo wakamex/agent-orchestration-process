@@ -1,20 +1,12 @@
 /** AOP's bounded automation driver for the DeepSeek Harness headless profile. */
 
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 export const name = 'aop-headless-runner'
 export const inject = ['agentDefaultModel', 'agents', 'sessions', 'headlessStartup']
 
-function userMessage(text) {
-  return Object.freeze({
-    role: 'user',
-    content: Object.freeze([Object.freeze({ type: 'text', text })]),
-    source: Object.freeze({ kind: 'user' }),
-    id: crypto.randomUUID(),
-  })
-}
-
-function summarize(events, firstSeq) {
+function summarize(events) {
   let text = ''
   let reason
   const usage = {
@@ -24,8 +16,11 @@ function summarize(events, firstSeq) {
     output_tokens: 0,
     reasoning_output_tokens: 0,
   }
+  let observedUsage = false
+  let started = false
   for (const event of events) {
-    if (event.seq < firstSeq) continue
+    if (event.type === 'turn/start') started = true
+    if (!started) continue
     if (event.type === 'assistant/message') {
       const current = event.data.message.content
         .filter(block => block.type === 'text')
@@ -33,6 +28,7 @@ function summarize(events, firstSeq) {
         .join('')
       if (current !== '') text = current
       const reported = event.data.usage ?? {}
+      if (reported.inputTokens !== undefined || reported.outputTokens !== undefined) observedUsage = true
       usage.input_tokens += reported.inputTokens ?? 0
       usage.cached_input_tokens += reported.cacheReadTokens ?? 0
       usage.cache_write_input_tokens += reported.cacheWriteTokens ?? 0
@@ -41,7 +37,7 @@ function summarize(events, firstSeq) {
     }
     if (event.type === 'turn/end') reason = event.data.reason
   }
-  return { text, reason, usage }
+  return { text, reason, usage: observedUsage ? usage : null }
 }
 
 function errorText(reason) {
@@ -73,10 +69,13 @@ async function run(ctx, task, sessionId, resume, exit) {
   await agent.whenIdle()
   const firstSeq = agent.session.seq
   write({ type: 'aop.dsh.started', session_id: agent.session.id })
-  agent.followup(userMessage(task))
+  agent.followup(createUserMessage({
+    content: [{ type: 'text', text: task }],
+    source: { kind: 'user' },
+  }))
   await agent.whenIdle()
   await sessions.flush(agent.session)
-  const outcome = summarize(agent.session.events, firstSeq)
+  const outcome = summarize(agent.session.snapshotEvents(firstSeq))
   const error = errorText(outcome.reason)
   write({
     type: 'aop.dsh.result',
@@ -103,7 +102,7 @@ export function apply(ctx) {
         type: 'aop.dsh.result',
         session_id: sessionId,
         final_message: null,
-        usage: {},
+        usage: null,
         completed: false,
         error: error instanceof Error ? error.message : String(error),
       })

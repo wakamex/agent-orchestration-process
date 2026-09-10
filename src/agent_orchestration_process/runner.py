@@ -3411,7 +3411,7 @@ class HermesAdapter:
 class DeepSeekHarnessAdapter:
     provider = "dsh"
     modes = frozenset({"agent"})
-    DEFAULT_MODEL = "deepseek-v4-flash"
+    DEFAULT_MODEL = "deepseek-flash"
     EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
     def __init__(self, binary: str | None = None):
@@ -3433,7 +3433,46 @@ class DeepSeekHarnessAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
+        executable = shutil.which(self.binary)
+        if (
+            request.profile == "host"
+            and executable
+            and Path(executable).resolve().suffix == ".js"
+        ):
+            node = shutil.which("node", path=environment.get("PATH"))
+            if node is None:
+                raise AOPError("dsh requires Node.js on PATH")
+            version = subprocess.run(
+                [node, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout.strip()
+            match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", version)
+            if not match or not (
+                int(match[1]) >= 24 or (int(match[1]) == 22 and int(match[2]) >= 19)
+            ):
+                raise AOPError(
+                    f"dsh requires Node.js 22.19+ (22.x) or 24+; PATH selects {node} ({version}). "
+                    "Select a supported Node.js before using the host profile."
+                )
+        if request.inference_provider in {
+            None,
+            "deepseek-official",
+        } and request.effort not in {None, "none", "low", "high", "max"}:
+            raise AOPError("DeepSeek effort must be one of: none, low, high, max")
         patch = _prepare_dsh_environment(request, environment)
+        request.effective_policy["dsh"] = {
+            "harness_sandbox": "danger-full-access",
+            "approval_policy": "never",
+            "filesystem_enforcement": "host" if request.profile == "host" else "aop",
+            "plugin_package_inventory": False,
+        }
+        _atomic_write(
+            run_dir / "request.json", json.dumps(request.to_dict(), indent=2) + "\n"
+        )
+
         command = _provider_command(
             [
                 self.binary,
@@ -3498,8 +3537,19 @@ class DeepSeekHarnessAdapter:
             timed_out=capture.timed_out,
             usage=usage,
             usage_observed=parsed["usage_observed"],
-            calculated_cost=self._estimate_cost(request, model, usage),
+            calculated_cost=(
+                self._estimate_cost(request, model, usage)
+                if parsed["usage_observed"]
+                else None
+            ),
         )
+        if not parsed["usage_observed"]:
+            accounting = _Accounting(
+                usage=None,
+                calculated_cost=None,
+                provider_reported_cost=None,
+                status="unavailable",
+            )
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
@@ -3586,7 +3636,7 @@ class DeepSeekHarnessAdapter:
                 "error": None,
             }
         raw_usage = result.get("usage")
-        usage_observed = isinstance(raw_usage, dict)
+        usage_observed = isinstance(raw_usage, dict) and bool(raw_usage)
         raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
         uncached_input = _token_count(raw_usage.get("input_tokens"))
         cached_input = _token_count(raw_usage.get("cached_input_tokens"))
@@ -4335,6 +4385,20 @@ def _prepare_dsh_environment(request: RunRequest, environment: dict[str, str]) -
         rows.append(f"    reasoningEffort: {json.dumps(effort)}")
     rows.extend(
         [
+            # AOP owns filesystem enforcement. Native workspace-write excludes
+            # AOP's separate artifact directory and cannot express our profiles.
+            "- id: sandbox-policy",
+            "  config:",
+            "    mode: danger-full-access",
+            "- id: approval",
+            "  config:",
+            "    policy: never",
+            # dsh 0.1.5's default-on package inventory treats our loose runner
+            # as its generated profile package, which has no version, and fails
+            # before inference. It is optional request metadata, not execution.
+            "- id: plugin-package-inventory-deepseek",
+            "  config:",
+            "    enabled: false",
             "- id: session-title-llm",
             "  disabled: true",
             "- id: headless-runner",

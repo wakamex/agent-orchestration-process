@@ -187,11 +187,13 @@ def test_native_model_parsers_and_pricing(
     assert grok[1].input_per_million_usd == 2
     assert grok[1].output_per_million_usd == 6
     assert [item.model for item in dsh] == [
+        "deepseek-flash",
         "deepseek-v4-flash",
         "deepseek-v4-pro",
     ]
     assert dsh[0].availability == "installed-default"
-    assert dsh[0].input_per_million_usd == 0.3
+    assert dsh[0].input_per_million_usd is None
+    assert dsh[1].input_per_million_usd == 0.3
 
 
 def test_agy_model_inventory_rejects_an_invalid_structured_response(

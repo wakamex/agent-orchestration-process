@@ -109,6 +109,7 @@ def list_models(
                 model,
             )
             for model, name in (
+                ("deepseek-flash", "DeepSeek-V4.1-Flash"),
                 ("deepseek-v4-flash", "DeepSeek-V4-Flash"),
                 ("deepseek-v4-pro", "DeepSeek-V4-Pro"),
             )

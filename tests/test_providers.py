@@ -2154,3 +2154,47 @@ def test_hermes_migrates_freshest_rotated_credentials_and_serializes_tasks(
 
     manager.remove("rotate-a", force=True)
     assert shared_auth.is_file()
+
+
+@pytest.mark.parametrize("effort", ["minimal", "medium", "xhigh"])
+def test_dsh_rejects_unsupported_official_effort(repository, fake_dsh, effort):
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), DeepSeekHarnessAdapter(str(fake_dsh))
+    )
+    with pytest.raises(AOPError, match="DeepSeek effort must be one of"):
+        runner.run(task="bad-effort", prompt="test", effort=effort)
+
+
+def test_dsh_missing_usage_is_unavailable(repository, fake_dsh, monkeypatch):
+    def unexpected_pricing(*args):
+        raise AssertionError("missing usage must not trigger a pricing lookup")
+
+    monkeypatch.setattr(DeepSeekHarnessAdapter, "_estimate_cost", unexpected_pricing)
+    script = fake_dsh.read_text()
+    # Simulate the driver's error path before an assistant usage event.
+    fake_dsh.write_text(
+        script
+        + "\nprint(json.dumps({'type': 'aop.dsh.result', 'session_id': session_id, 'usage': None, 'completed': False, 'error': 'early failure'}))\n"
+    )
+    result = AgentRunner(
+        WorktreeManager.discover(repository), DeepSeekHarnessAdapter(str(fake_dsh))
+    ).run(task="no-usage", prompt="test")
+    assert not result.succeeded
+    assert result.usage is None
+    assert result.calculated_cost is None
+    assert result.accounting_status == "unavailable"
+
+
+def test_dsh_host_rejects_old_node(repository, tmp_path, monkeypatch):
+    native = tmp_path / "dsh.js"
+    native.write_text("#!/usr/bin/env node\n")
+    native.chmod(0o755)
+    node = tmp_path / "node"
+    node.write_text("#!/bin/sh\necho v22.14.0\n")
+    node.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), DeepSeekHarnessAdapter(str(native))
+    )
+    with pytest.raises(AOPError, match="PATH selects.*v22.14.0"):
+        runner.run(task="old-node", prompt="test", profile="host")

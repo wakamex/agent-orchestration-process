@@ -127,6 +127,22 @@ def test_sealed_runtime_falls_back_when_user_runtime_is_read_only(
     assert runtime.parent == Path("/tmp") / f"aop-sealed-{os.getuid()}"
 
 
+def test_configured_sealed_runtime_is_private(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "disk-runtime"
+    monkeypatch.setenv("AOP_SEALED_RUNTIME_ROOT", str(base))
+    runtime = WorktreeManager(repository).sealed_runtime_dir
+    assert runtime.parent.parent == base.resolve()
+    assert base.stat().st_mode & 0o077 == 0
+    base.chmod(0o755)
+    with pytest.raises(AOPError, match="private"):
+        WorktreeManager(repository).sealed_runtime_dir
+    monkeypatch.setenv("AOP_SEALED_RUNTIME_ROOT", "relative")
+    with pytest.raises(AOPError, match="absolute"):
+        WorktreeManager(repository).sealed_runtime_dir
+
+
 @pytest.mark.skipif(
     not Path("/dev/fuse").exists()
     or shutil.which("fuse-overlayfs") is None

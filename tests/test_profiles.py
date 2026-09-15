@@ -140,12 +140,16 @@ def test_sealed_run_needs_no_git_and_exposes_only_snapshotted_input(
         )
 
 
+@pytest.mark.parametrize("disk_runtime", [False, True])
 def test_cli_sealed_run_and_profile_explain_work_outside_git(
+    disk_runtime: bool,
     tmp_path: Path,
     fake_codex: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    if disk_runtime:
+        monkeypatch.setenv("AOP_SEALED_RUNTIME_ROOT", str(tmp_path / "disk-runtime"))
     neutral = tmp_path / "not-a-repository"
     neutral.mkdir()
     monkeypatch.chdir(neutral)
@@ -162,6 +166,13 @@ def test_cli_sealed_run_and_profile_explain_work_outside_git(
         (neutral / ".aop" / "runs" / result["run_id"] / "request.json").read_text()
     )
     assert request["profile"] == "sealed"
+    if disk_runtime:
+        runtime = Path(request["effective_policy"]["workspace"]["controller_path"])
+        assert runtime.is_relative_to(tmp_path / "disk-runtime")
+        assert main(["resume", result["run_id"], "--prompt", "followup", "--json"]) == 0
+        resumed = json.loads(capsys.readouterr().out)
+        assert resumed["succeeded"]
+        assert resumed["session_id"] == result["session_id"]
 
     assert main(["cleanup", result["run_id"]]) == 0
     capsys.readouterr()

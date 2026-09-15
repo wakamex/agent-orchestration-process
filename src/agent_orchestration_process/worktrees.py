@@ -73,6 +73,18 @@ class WorktreeManager:
     @property
     def sealed_runtime_dir(self) -> Path:
         identity = hashlib.sha256(os.fsencode(self.root)).hexdigest()[:24]
+        configured = os.environ.get("AOP_SEALED_RUNTIME_ROOT")
+        if configured:
+            base = Path(configured)
+            if not base.is_absolute():
+                raise AOPError("AOP_SEALED_RUNTIME_ROOT must be absolute")
+            base.mkdir(parents=True, exist_ok=True, mode=0o700)
+            stat = base.stat()
+            if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+                raise AOPError(
+                    "AOP_SEALED_RUNTIME_ROOT must be private and owned by the current user"
+                )
+            return base.resolve() / f"aop-sealed-{os.getuid()}" / identity
         user_runtime = _user_runtime_dir()
         base = (
             user_runtime

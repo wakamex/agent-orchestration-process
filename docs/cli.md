@@ -74,6 +74,10 @@ manifests, set `no_web = true` on a task.
 
 Codex runs use app-server for new turns and exact resumes. When `--timeout` expires, AOP requests native turn interruption and allows up to five additional seconds only for terminal accounting and process teardown. That grace does not extend the requested work budget, and the result remains timed out.
 
+## Sealed runtime storage
+
+For long-running sealed workloads that would exhaust `/run/user` tmpfs, set `AOP_SEALED_RUNTIME_ROOT` to an absolute disk-backed directory. AOP creates it with mode 0700 and requires current-user ownership with no group or other permissions. Keep the same setting when resuming or cleaning up those runs. `aop cleanup RUN_ID` removes the finished run's disposable runtime while retaining its archived run records.
+
 ## Machine-readable results
 
 Add `--json` to `run` or `resume` for the stable machine interface. Stdout then contains only the

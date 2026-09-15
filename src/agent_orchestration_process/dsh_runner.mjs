@@ -2,6 +2,7 @@
 
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { readFileSync } from 'node:fs'
 
 export const name = 'aop-headless-runner'
 export const inject = ['agentDefaultModel', 'agents', 'sessions', 'headlessStartup']
@@ -94,7 +95,7 @@ export function apply(ctx) {
   if (exit === undefined) throw new Error('aop-headless-runner requires the dsh launcher')
   const sessionId = process.env.AOP_DSH_SESSION_ID
   if (!sessionId) throw new Error('AOP_DSH_SESSION_ID is required')
-  const task = ctx.get('headlessStartup')?.task
+  const task = readFileSync(ctx.get('headlessStartup')?.task, 'utf8')
   if (!task) throw new Error('aop-headless-runner requires a task')
   void run(ctx, task, sessionId, process.env.AOP_DSH_RESUME === '1', exit)
     .catch((error) => {

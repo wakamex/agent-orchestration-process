@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterator, Protocol, Sequence
 import yaml
 from yaml.constructor import ConstructorError
 
-from . import zcode
+from . import zcode, prompt_transport
 from .codex_routes import (
     inventory_document,
     projected_codex_config,
@@ -882,17 +882,18 @@ def _capture_process(
     first_event_seconds = None
     first_response_seconds = None
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=_launch_environment(command, environment),
-            stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            errors="replace",
-            start_new_session=True,
-        )
+        with prompt_transport.prompt_stream(prompt) as input_stream:
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                env=_launch_environment(command, environment),
+                stdin=input_stream if input_stream is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                start_new_session=True,
+            )
     except FileNotFoundError:
         return _ProcessCapture(
             stdout="",
@@ -927,15 +928,6 @@ def _capture_process(
     stdout_reader.start()
     stderr_reader.start()
     try:
-        if prompt is not None:
-            assert process.stdin is not None
-            try:
-                process.stdin.write(prompt)
-                process.stdin.flush()
-            except BrokenPipeError:
-                pass
-            finally:
-                process.stdin.close()
         process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
@@ -1014,7 +1006,7 @@ class ClaudeAdapter:
             command,
             cwd=worktree.path,
             environment=environment,
-            prompt=request.prompt,
+            prompt=prompt_transport.stdin_prompt(self.provider, request.prompt),
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
         )
@@ -1657,10 +1649,9 @@ class GrokAdapter:
         environment: dict[str, str],
     ) -> RunResult:
         _prepare_grok_environment(environment, no_web=request.no_web)
-        prompt_path = (
-            Path(environment["AOP_SCRATCH_DIR"]) / f".grok-prompt-{request.run_id}.txt"
+        prompt_path = prompt_transport.stage_prompt(
+            Path(environment["AOP_SCRATCH_DIR"]), request.run_id, request.prompt
         )
-        _atomic_write_private(prompt_path, request.prompt)
         command = _provider_command(
             self._command(request, worktree, prompt_path),
             request,
@@ -1998,7 +1989,7 @@ class CursorAdapter:
             command,
             cwd=worktree.path,
             environment=environment,
-            prompt=None,
+            prompt=prompt_transport.stdin_prompt(self.provider, request.prompt),
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
         )
@@ -2461,7 +2452,7 @@ class OpenCodeAdapter:
             command,
             cwd=worktree.path,
             environment=environment,
-            prompt=None,
+            prompt=prompt_transport.stdin_prompt(self.provider, request.prompt),
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
         )
@@ -2616,7 +2607,6 @@ class OpenCodeAdapter:
             command.extend(["--variant", request.effort])
         if request.session_id:
             command.extend(["--session", request.session_id])
-        command.extend(["--", request.prompt])
         return command
 
     @staticmethod
@@ -2793,7 +2783,7 @@ class AgyAdapter:
             command,
             cwd=worktree.path,
             environment=environment,
-            prompt=None,
+            prompt=prompt_transport.stdin_prompt(self.provider, request.prompt),
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
         )
@@ -3208,6 +3198,7 @@ class HermesAdapter:
                 request,
                 worktree,
                 environment,
+                transport_prompt=False,
             )
             exported = subprocess.run(
                 command,
@@ -3480,7 +3471,7 @@ class DeepSeekHarnessAdapter:
                 "headless",
                 "--patch",
                 os.fspath(patch),
-                request.prompt,
+                "AOP task",
             ],
             request,
             worktree,
@@ -3677,9 +3668,31 @@ def _provider_command(
     request: RunRequest,
     worktree: Worktree,
     environment: dict[str, str],
+    *,
+    transport_prompt: bool = True,
 ) -> list[str]:
+    if transport_prompt:
+        if request.provider == "cursor":
+            command = command[:-2]  # native stdin, no positional prompt
+        elif request.provider == "agy":
+            command = [*command[:-2], "--input-format", "stream-json", "-p", ""]
+        elif request.provider in {"devin", "dsh", "hermes", "zcode"}:
+            path = prompt_transport.stage_prompt(
+                Path(environment["AOP_SCRATCH_DIR"]), request.run_id, request.prompt
+            )
+            if request.provider == "devin":
+                command = [*command[:-2], "-p", "--prompt-file", os.fspath(path)]
+            elif request.provider == "dsh":
+                command[-1] = os.fspath(path)
+            else:
+                flag = "--prompt" if request.provider == "zcode" else "-q"
+                command[command.index(flag) + 1] = os.fspath(path)
     if request.profile == "host":
-        return command
+        return (
+            _prompt_runtime_command(command, request, environment)
+            if transport_prompt
+            else command
+        )
     root = Path(environment["AOP_ROOT"])
     cache = Path(environment["AOP_CACHE_DIR"])
     provider_state = Path(environment["AOP_PROVIDER_STATE_DIR"])
@@ -3791,7 +3804,10 @@ def _provider_command(
         (root, Path("/repository")),
     )
     command = [_guest_path(argument, mappings) for argument in command]
+    native_command = command.copy()
     command, runtime_mounts = _provider_runtime(command, provider=request.provider)
+    if transport_prompt:
+        command = _prompt_runtime_command(command, request, environment, native_command)
     for source, destination in runtime_mounts:
         _add_guest_parent_directories(wrapped, Path(destination))
         wrapped.extend(["--ro-bind", source, destination])
@@ -3799,6 +3815,56 @@ def _provider_command(
         wrapped.extend(["--setenv", key, value])
     wrapped.extend(["--chdir", "/workspace", "--", *command])
     return wrapped
+
+
+def _prompt_runtime_command(
+    command: list[str],
+    request: RunRequest,
+    environment: dict[str, str],
+    native_command: list[str] | None = None,
+) -> list[str]:
+    if prompt_transport.TRANSPORTS[request.provider] != "runtime-file":
+        return command
+    native = native_command or command
+    executable = shutil.which(native[0])
+    if executable is None:
+        return command
+    resolved = Path(executable).resolve()
+    header = resolved.open("rb").readline(4096).decode(errors="replace").strip()
+    if request.provider == "hermes" and request.profile == "host":
+        runtime = _hermes_wrapper_runtime(resolved, command[1:])
+        if runtime is not None:
+            command = runtime[0]
+            environment.pop("PYTHONPATH", None)
+            environment.pop("PYTHONHOME", None)
+    if "python" in Path(command[0]).name:
+        return [command[0], "-c", prompt_transport.PYTHON_ARGV_LOADER, *command[1:]]
+    if header.startswith("#!") and "python" in header:
+        parts = header[2:].split()
+        interpreter = parts[0]
+        if Path(interpreter).name == "env":
+            interpreter = (
+                shutil.which(parts[1])
+                if request.profile == "host"
+                else f"/usr/bin/{parts[1]}"
+            )
+        if interpreter:
+            return [interpreter, "-c", prompt_transport.PYTHON_ARGV_LOADER, *command]
+    if header.startswith("#!") and "node" in header:
+        scratch = Path(environment["AOP_SCRATCH_DIR"])
+        loader = scratch / ".aop-prompt-loader.cjs"
+        _atomic_write_private(loader, prompt_transport.NODE_ARGV_LOADER)
+        guest_loader = (
+            loader if request.profile == "host" else Path("/scratch") / loader.name
+        )
+        node = shutil.which("node") if request.profile == "host" else "/usr/bin/node"
+        if "node" == Path(command[0]).name:
+            return [command[0], "--require", os.fspath(guest_loader), *command[1:]]
+        if node:
+            return [node, "--require", os.fspath(guest_loader), *command]
+    raise AOPError(
+        f"{request.provider} prompt transport requires its native Python or Node entrypoint"
+    )
 
 
 def _isolated_root_command(bwrap: str) -> list[str]:
@@ -5637,6 +5703,9 @@ class AgentRunner:
                 provider_state / "agy" / "gemini",
                 sealed=request.profile == "sealed",
             )
+        request.effective_policy["prompt_transport"] = prompt_transport.TRANSPORTS[
+            request.provider
+        ]
         run_dir = self.store.create(request)
         if request.inputs:
             input_manifest = input_dir / "manifest.json"

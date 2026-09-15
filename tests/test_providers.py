@@ -780,6 +780,14 @@ def test_devin_uses_private_runtime_state_with_read_only_global_profile(
     assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
 
 
+def test_opencode_long_prompt_uses_stdin(repository: Path, fake_opencode: Path) -> None:
+    prompt = "x" * 140_000
+    result = AgentRunner(WorktreeManager.discover(repository), OpenCodeAdapter(os.fspath(fake_opencode))).run(task="long-opencode", prompt=prompt, timeout_seconds=5)
+    assert result.succeeded
+    assert result.final_message == "answer:" + prompt
+    assert prompt not in result.command
+
+
 def test_opencode_defaults_to_zen_model_and_resumes_exact_session(
     repository: Path, fake_opencode: Path
 ) -> None:

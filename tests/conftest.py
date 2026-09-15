@@ -761,7 +761,7 @@ import pathlib
 import sys
 
 args = sys.argv[1:]
-prompt = args[args.index("--") + 1]
+prompt = sys.stdin.read()
 {SEALED_PROVIDER_PROBE}
 cursor_home = pathlib.Path(os.environ["HOME"])
 cursor_config = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "cursor"
@@ -892,7 +892,7 @@ for directory in [data_dir / "cli", state_dir, cache_dir]:
     directory.mkdir(parents=True, exist_ok=True)
 state_path = data_dir / "cli" / "fake-session.json"
 export_path = pathlib.Path(args[args.index("--export") + 1])
-prompt = args[args.index("-p") + 1]
+prompt = pathlib.Path(args[args.index("--prompt-file") + 1]).read_text()
 {SEALED_PROVIDER_PROBE}
 concurrent_export = prompt.startswith("DEVIN_CONCURRENT_")
 if concurrent_export:
@@ -1002,7 +1002,7 @@ import time
 args = sys.argv[1:]
 if args[0] != "run" or "--format" not in args or "--auto" not in args:
     raise RuntimeError(f"unexpected invocation: {{args}}")
-prompt = args[args.index("--") + 1]
+prompt = sys.stdin.read()
 {SEALED_PROVIDER_PROBE}
 config_dir = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
 data_dir = pathlib.Path(os.environ["XDG_DATA_HOME"]) / "opencode"
@@ -1164,7 +1164,10 @@ if args == ["--version"]:
 gemini_dir = pathlib.Path(args[args.index("--gemini_dir") + 1])
 runtime_dir = gemini_dir / "antigravity-cli"
 runtime_dir.mkdir(parents=True, exist_ok=True)
-prompt = args[args.index("-p") + 1]
+message = json.loads(sys.stdin.readline())
+assert message["event"] == "user"
+assert message["message"]["role"] == "user"
+prompt = message["message"]["content"]
 settings_path = runtime_dir / "settings.json"
 settings = json.loads(settings_path.read_text()) if settings_path.is_file() else {{}}
 direct_gemini = settings.get("modelProvider") == "gemini"
@@ -1452,7 +1455,7 @@ session = sessions / session_id
 if os.environ.get("AOP_DSH_RESUME") == "1" and not session.is_file():
     print("dsh resume state is missing", file=sys.stderr)
     raise SystemExit(1)
-prompt = args[-1]
+prompt = pathlib.Path(args[-1]).read_text()
 {SEALED_PROVIDER_PROBE}
 if prompt == "CHECK_ENV_OVERRIDE" and os.environ.get("DEEPSEEK_API_KEY") != "environment-override":
     print("dsh environment credential did not take precedence", file=sys.stderr)

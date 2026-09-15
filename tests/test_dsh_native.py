@@ -135,10 +135,29 @@ def test_native_dsh_run_and_resume(
     runner = AgentRunner(
         WorktreeManager.discover(repository), DeepSeekHarnessAdapter(binary)
     )
+    # Exceed Linux's per-argument limit with synthetic UTF-8 text. Verify exact
+    # delivery for both turns, including punctuation and leading option syntax.
+    first_prompt = "--first\n" + "synthetic café 'quoted' $value\n" * 24000
+    resume_prompt = "--resume\n" + "different résumé `literal`\n" * 25000
+
+    def contains_prompt(payload, prompt):
+        return any(
+            prompt
+            in (
+                message["content"]
+                if isinstance(message.get("content"), str)
+                else "".join(
+                    part.get("text", "") for part in message.get("content", [])
+                )
+            )
+            for message in payload["messages"]
+            if message.get("role") == "user"
+        )
+
     try:
         first = runner.run(
             task="native-dsh",
-            prompt="Say native answer",
+            prompt=first_prompt,
             effort="none",
             profile=profile,
             timeout_seconds=30,
@@ -146,6 +165,7 @@ def test_native_dsh_run_and_resume(
         )
         assert first.succeeded, first.error
         assert first.final_message == "native answer"
+        assert contains_prompt(calls[0], first_prompt)
         first_calls = 2 if exercise_tools else 1
         assert first.usage.input_tokens == 12 * first_calls
         assert first.usage.cached_input_tokens == 2 * first_calls
@@ -174,9 +194,10 @@ def test_native_dsh_run_and_resume(
                 m.get("role") == "tool" and m.get("tool_call_id") == "native-tool"
                 for m in calls[1]["messages"]
             )
-        resumed = runner.resume(run_id=first.run_id, prompt="Say native answer again")
+        resumed = runner.resume(run_id=first.run_id, prompt=resume_prompt)
         assert resumed.succeeded, resumed.error
         assert resumed.session_id == first.session_id
+        assert contains_prompt(calls[-1], resume_prompt)
         assert resumed.usage.input_tokens == 12
         assert len(calls) == first_calls + 1
         assert len(calls[-1]["messages"]) > len(calls[0]["messages"])

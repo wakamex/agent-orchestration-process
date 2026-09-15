@@ -276,3 +276,9 @@ In isolated profiles, overrides should normally point to an installed harness. A
 and Homebrew installations, self-contained executables, dsh installed through npm, and Hermes
 installed for development from a local source directory. A custom launcher may not work if it needs
 other files that are not visible inside the isolated run.
+
+## Prompt transport
+
+AOP carries prompt text through stdin, a private prompt file, or the harness protocol, so large `--prompt` and `--prompt-file` inputs avoid the operating system's argument-size limit on both run and resume. The selected transport is recorded in `request.json` under `effective_policy.prompt_transport`.
+
+Codex uses its protocol; Claude, OpenCode, and Cursor use stdin; Agy uses structured stdin; Grok, Devin, and the dsh driver read a prompt file. The installed Hermes and ZCode one-shot CLIs accept only argument text, so AOP loads the private file inside their native Python or Node process before CLI parsing. Prompts never cross an OS process-launch boundary as large arguments. Model context and provider request-size limits still apply.

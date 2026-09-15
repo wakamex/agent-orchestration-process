@@ -379,6 +379,15 @@ def test_filtered_environment_allows_optional_grok_storage_mode() -> None:
     assert _filtered_environment({"AOP_INTERNAL_SECRET": "hidden"}) == {}
 
 
+def test_filtered_environment_preserves_native_opencode_output_limit() -> None:
+    assert _filtered_environment(
+        {
+            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "64000",
+            "UNRELATED_SECRET": "hidden",
+        }
+    ) == {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "64000"}
+
+
 def test_dsh_runtime_preserves_a_user_npm_installation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

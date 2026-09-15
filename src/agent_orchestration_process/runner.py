@@ -4194,6 +4194,7 @@ def _filtered_environment(environment: dict[str, str]) -> dict[str, str]:
         "OPENAI_BASE_URL",
         "OPENCODE_API_KEY",
         "PATH",
+        "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX",
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",
         "TERM",

@@ -30,6 +30,8 @@ Use `--prompt-file` for a prompt stored on disk and `--timeout` to set a wall-cl
 effort, inference-provider, and resume behavior vary by harness. See
 [Harness adapters](harnesses.md).
 
+AOP preserves OpenCode's native `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` environment setting in sealed runs. OpenCode owns validation and the model-capacity bound. This can raise its default output ceiling for reasoning-heavy tasks without changing reasoning effort; record the selected value alongside experiment inputs. For example, prefix an invocation with `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=64000`.
+
 ## Execution profiles
 
 Select the access boundary with `--profile`:

@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence, TextIO
@@ -697,13 +698,20 @@ def _report_models(
 ) -> int:
     models: list[AvailableModel] = []
     errors: dict[str, str] = {}
-    for agent in agents:
-        try:
-            models.extend(
-                list_models(agent, catalog, inference_provider, refresh=refresh)
+    # Native startup and network waits are independent across harnesses.
+    # Submit once per harness so repeated --agent flags cannot race its state.
+    with ThreadPoolExecutor(max_workers=min(len(AGENTS), len(agents) or 1)) as executor:
+        discoveries = {
+            agent: executor.submit(
+                list_models, agent, catalog, inference_provider, refresh=refresh
             )
-        except AOPError as error:
-            errors[agent] = str(error)
+            for agent in dict.fromkeys(agents)
+        }
+        for agent, discovery in discoveries.items():
+            try:
+                models.extend(discovery.result())
+            except AOPError as error:
+                errors[agent] = str(error)
     models.sort(key=lambda item: (item.agent, item.model))
     warnings = {"catalog": catalog_error} if catalog_error else {}
     warnings.update(

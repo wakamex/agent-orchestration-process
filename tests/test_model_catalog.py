@@ -421,3 +421,44 @@ def test_opencode_refresh_reaches_native_inventory(
     output = json.loads(capsys.readouterr().out)
     assert output["models"][0]["model"] == "opencode/claude-launch"
     assert output["models"][0]["price_scope"] == "unknown"
+
+
+def test_model_discovery_overlaps_harnesses_and_preserves_results(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from threading import Barrier
+
+    ready = Barrier(3, timeout=5)
+    calls = []
+
+    def discover(agent, catalog, provider=None, *, refresh=False):
+        calls.append(agent)
+        assert refresh is True
+        # Every query must start before any can complete. Serial dispatch breaks
+        # this contract without relying on wall-clock speed assertions.
+        ready.wait()
+        if agent == "cursor":
+            raise AOPError("native inventory unavailable")
+        return [
+            model_listing.AvailableModel(
+                agent=agent,
+                model="new-model",
+                name="New model",
+                availability="native-advertised",
+                price_scope="unknown",
+            )
+        ]
+
+    monkeypatch.setattr(cli, "list_models", discover)
+    result = cli._report_models(
+        ["codex", "cursor", "claude", "codex"],
+        ensure_catalog_fresh(),
+        json_output=True,
+        refresh=True,
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert sorted(calls) == ["claude", "codex", "cursor"]
+    assert [row["agent"] for row in output["models"]] == ["claude", "codex"]
+    assert output["errors"] == {"cursor": "native inventory unavailable"}

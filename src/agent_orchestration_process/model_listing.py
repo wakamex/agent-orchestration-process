@@ -73,6 +73,8 @@ def list_models(
     agent: str,
     catalog: ModelCatalog,
     inference_provider: str | None = None,
+    *,
+    refresh: bool = False,
 ) -> list[AvailableModel]:
     if agent == "codex":
         return _codex_models(catalog, inference_provider)
@@ -89,7 +91,7 @@ def list_models(
     if agent == "devin":
         return _devin_models()
     if agent == "opencode":
-        return _opencode_models(catalog)
+        return _opencode_models(catalog, refresh=refresh)
     if agent == "claude":
         return _claude_models(catalog)
     if agent == "hermes":
@@ -589,9 +591,11 @@ def _agy_models(catalog: ModelCatalog) -> list[AvailableModel]:
     return records
 
 
-def _opencode_models(catalog: ModelCatalog) -> list[AvailableModel]:
+def _opencode_models(
+    catalog: ModelCatalog, *, refresh: bool = False
+) -> list[AvailableModel]:
     binary = _binary("opencode", "AOP_OPENCODE_BIN", "opencode")
-    output = _run([binary, "models"])
+    output = _run([binary, "models", *(["--refresh"] if refresh else [])])
     records = []
     for line in output.splitlines():
         model = line.strip()

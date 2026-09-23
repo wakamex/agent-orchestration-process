@@ -222,7 +222,7 @@ def test_models_json_reports_catalog_provenance(
     monkeypatch.setattr(
         cli,
         "list_models",
-        lambda agent, catalog, provider=None: [
+        lambda agent, catalog, provider=None, **options: [
             model_listing.AvailableModel(
                 agent=agent,
                 model="example",
@@ -390,3 +390,34 @@ def test_hermes_rejects_malformed_native_model_configuration(
     monkeypatch.setattr(model_listing, "_run", lambda command: json.dumps(config))
     with pytest.raises(AOPError, match="Hermes model configuration"):
         model_listing.list_models("hermes", ensure_catalog_fresh())
+
+
+@pytest.mark.parametrize("refresh", [True, False])
+def test_opencode_refresh_reaches_native_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    refresh: bool,
+) -> None:
+    monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
+    commands = []
+
+    def run(command: list[str], **options: object) -> str:
+        commands.append(command)
+        return "opencode/claude-launch\n"
+
+    monkeypatch.setattr(model_listing, "_run", run)
+    catalog = ensure_catalog_fresh()
+
+    def fresh(**options: object) -> ModelCatalog:
+        assert options == {"force": refresh}
+        return catalog
+
+    monkeypatch.setattr(cli, "ensure_catalog_fresh", fresh)
+    args = ["models", "--agent", "opencode", "--json"] + (
+        ["--refresh"] if refresh else []
+    )
+    assert cli.main(args) == 0
+    assert commands == [["opencode", "models"] + (["--refresh"] if refresh else [])]
+    output = json.loads(capsys.readouterr().out)
+    assert output["models"][0]["model"] == "opencode/claude-launch"
+    assert output["models"][0]["price_scope"] == "unknown"

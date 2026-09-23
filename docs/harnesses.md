@@ -139,6 +139,8 @@ Trajectory Interchange Format (ATIF) export containing its terminal response and
 
 ### OpenCode
 
+`aop models --agent opencode --refresh` refreshes both AOP's pricing catalog and OpenCode's native models.dev cache. Regular listings use OpenCode's native cache policy.
+
 For `edit` and `review`, AOP seeds configuration, authentication, and existing generated plugin
 dependencies while keeping sessions, logs, model state, refreshed tokens, generated metadata, and
 downloads private. `sealed` omits user configuration and instructions, while `host` uses native

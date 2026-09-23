@@ -43,7 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="limit results to an agent; may be repeated",
     )
     models.add_argument(
-        "--refresh", action="store_true", help="refresh the shared model catalog now"
+        "--refresh",
+        action="store_true",
+        help="refresh the shared catalog and supported native model caches",
     )
     models.add_argument(
         "--provider",
@@ -214,6 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 inference_provider=args.provider,
                 json_output=args.json,
                 catalog_error=catalog_error,
+                refresh=args.refresh,
             )
 
         if args.command == "profile":
@@ -690,12 +693,15 @@ def _report_models(
     inference_provider: str | None = None,
     json_output: bool,
     catalog_error: str | None = None,
+    refresh: bool = False,
 ) -> int:
     models: list[AvailableModel] = []
     errors: dict[str, str] = {}
     for agent in agents:
         try:
-            models.extend(list_models(agent, catalog, inference_provider))
+            models.extend(
+                list_models(agent, catalog, inference_provider, refresh=refresh)
+            )
         except AOPError as error:
             errors[agent] = str(error)
     models.sort(key=lambda item: (item.agent, item.model))

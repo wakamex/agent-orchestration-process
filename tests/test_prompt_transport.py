@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import shutil
 import subprocess
 import sys
 
@@ -48,36 +47,23 @@ def test_large_prompt_run_and_resume(provider, request, repository, monkeypatch)
         assert all(len(arg.encode()) < 100000 for arg in result.command)
 
 
-@pytest.mark.parametrize("runtime", ["python", "node"])
-def test_runtime_loader_preserves_exact_utf8(runtime, tmp_path):
+def test_runtime_loader_preserves_exact_utf8(tmp_path):
     text = "synthetic\n" + "café '$value' `literal`\r\n" * 30000
     path = prompt_transport.stage_prompt(tmp_path, "test", text)
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.read_bytes() == text.encode()
-    if runtime == "python":
-        entry = tmp_path / "cli.py"
-        entry.write_text(
-            "import hashlib, sys\nprint(hashlib.sha256(sys.argv[2].encode()).hexdigest())\n"
-        )
-        command = [
-            sys.executable,
-            "-c",
-            prompt_transport.PYTHON_ARGV_LOADER,
-            str(entry),
-            "-q",
-            str(path),
-        ]
-    else:
-        node = shutil.which("node")
-        if not node:
-            pytest.skip("Node.js is not installed")
-        loader = tmp_path / "loader.cjs"
-        loader.write_text(prompt_transport.NODE_ARGV_LOADER)
-        entry = tmp_path / "cli.cjs"
-        entry.write_text(
-            "console.log(require('node:crypto').createHash('sha256').update(process.argv[3]).digest('hex'))\n"
-        )
-        command = [node, "--require", str(loader), str(entry), "--prompt", str(path)]
+    entry = tmp_path / "cli.py"
+    entry.write_text(
+        "import hashlib, sys\nprint(hashlib.sha256(sys.argv[2].encode()).hexdigest())\n"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        prompt_transport.PYTHON_ARGV_LOADER,
+        str(entry),
+        "-q",
+        str(path),
+    ]
     result = subprocess.run(command, capture_output=True, text=True, check=True)
     assert result.stdout.strip() == hashlib.sha256(text.encode()).hexdigest()
 

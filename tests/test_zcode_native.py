@@ -11,7 +11,6 @@ import os
 import re
 import shlex
 from pathlib import Path
-import subprocess
 import threading
 
 import pytest
@@ -28,10 +27,17 @@ def native_zcode():
     return Path(configured).resolve()
 
 
-@pytest.mark.parametrize("exercise_tools", [False, True])
-@pytest.mark.parametrize("profile", ["edit", "review", "sealed", "host"])
+@pytest.mark.parametrize(
+    "profile,exercise_tools,effort",
+    [
+        (profile, tools, "high")
+        for profile in ("edit", "review", "sealed", "host")
+        for tools in (False, True)
+    ]
+    + [("host", False, effort) for effort in (None, "low", "max", "medium")],
+)
 def test_native_run_and_resume(
-    native_zcode, repository, tmp_path, monkeypatch, profile, exercise_tools
+    native_zcode, repository, tmp_path, monkeypatch, profile, exercise_tools, effort
 ):
     calls = []
 
@@ -49,8 +55,10 @@ def test_native_run_and_resume(
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             calls.append(payload)
             assert self.path == "/v1/messages"
-            assert payload["model"] == "test-model"
+            assert payload["model"] == "glm-5.3-flash"
+            assert self.headers.get("x-api-key") == "local-test-key"
             assert payload["stream"] is True
+            assert payload["output_config"]["effort"] == (effort or "max")
             assert isinstance(payload["messages"], list)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -62,7 +70,7 @@ def test_native_run_and_resume(
                         "id": "msg_test",
                         "type": "message",
                         "role": "assistant",
-                        "model": "test-model",
+                        "model": "glm-5.3-flash",
                         "content": [],
                         "stop_reason": None,
                         "stop_sequence": None,
@@ -164,10 +172,10 @@ def test_native_run_and_resume(
             "test": {
                 "kind": "anthropic",
                 "options": {"baseURL": base_url, "apiKey": "local-test-key"},
-                "models": {"test-model": {}},
+                "models": {"glm-5.3-flash": {"contextWindow": 1000000}},
             }
         },
-        "model": {"main": "test/test-model", "lite": "test/test-model"},
+        "model": {"main": "test/glm-5.3-flash", "lite": "test/glm-5.3-flash"},
         "plugins": {"enabled": False},
         "features": {"mcp": False},
     }
@@ -181,13 +189,21 @@ def test_native_run_and_resume(
     try:
         first = runner.run(
             task="native-zcode",
-            prompt="Reply with native test answer",
+            prompt="Reply with native test answer"
+            + (" café synthetic\n" * 50000 if effort is None else ""),
             profile=profile,
+            effort=effort,
             timeout_seconds=30,
             artifacts=["proof.json"] if exercise_tools else [],
         )
+        if effort == "medium":
+            assert not first.succeeded
+            assert "effort" in first.error.lower() or "reasoning" in first.error.lower()
+            assert calls == []
+            return
         assert first.succeeded, first.error
-        assert first.model == "test/test-model"
+        assert first.effort == (effort or "max")
+        assert first.model == "test/glm-5.3-flash"
         assert first.final_message == "native test answer"
         turns = 2 if exercise_tools else 1
         assert first.usage.input_tokens == 12 * turns
@@ -222,7 +238,11 @@ def test_native_run_and_resume(
             )
 
         first_call_count = len(calls)
-        resumed = runner.resume(run_id=first.run_id, prompt="Reply again")
+        followup = "Reply again" + (
+            " résumé followup\n" * 50000 if effort is None else ""
+        )
+        resumed = runner.resume(run_id=first.run_id, prompt=followup)
+        assert resumed.effort == (effort or "max")
         assert resumed.succeeded, resumed.error
         assert resumed.session_id == first.session_id
         # Native automatic compaction can add an inference call on resume.
@@ -236,49 +256,3 @@ def test_native_run_and_resume(
         server.shutdown()
         server.server_close()
         worker.join()
-
-
-def test_native_credential_cipher(native_zcode, tmp_path):
-    # Invoke the upstream cipher without invoking its CLI entrypoint. No bundle
-    # bytes are copied into the repository, and no login or network call occurs.
-    probe = tmp_path / "cipher.cjs"
-    probe.write_text("""
-const fs = require('node:fs');
-const Module = require('node:module');
-const bundle = process.argv[2];
-const original = fs.readFileSync(bundle, 'utf8');
-const marker = 'q9i();async function q9i()';
-if (!original.includes(marker)) throw new Error('Update the native cipher probe for this bundle');
-const source = original.replace(marker, 'Ait();process.stdout.write(JSON.stringify({"oauth:zai:access_token":X2r().encrypt("native-test-token")}));async function q9i()');
-const loaded = new Module(bundle);
-loaded.filename = bundle;
-loaded.paths = Module._nodeModulePaths(require('node:path').dirname(bundle));
-loaded._compile(source, bundle);
-""")
-    for secret in (None, "explicit-native-secret"):
-        environment = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
-        if secret:
-            environment["ZCODE_CREDENTIAL_SECRET"] = secret
-        encrypted = subprocess.run(
-            ["node", str(probe), str(native_zcode)],
-            env=environment,
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=True,
-        ).stdout
-        from agent_orchestration_process import runner
-
-        helper = Path(runner.__file__).with_name("zcode_credentials.cjs")
-        decoded = subprocess.run(
-            ["node", str(helper)],
-            input=encrypted,
-            env=environment,
-            text=True,
-            capture_output=True,
-            timeout=5,
-            check=True,
-        )
-        assert json.loads(decoded.stdout) == {
-            "oauth:zai:access_token": "native-test-token"
-        }

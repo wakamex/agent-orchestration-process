@@ -18,7 +18,7 @@ TRANSPORTS = {
     "devin": "file",
     "grok": "file",
     "dsh": "file",
-    "zcode": "runtime-file",
+    "zcode": "protocol",
     "hermes": "runtime-file",
 }
 
@@ -68,9 +68,4 @@ i = sys.argv.index(flag) + 1
 sys.argv[i] = pathlib.Path(sys.argv[i]).read_bytes().decode('utf-8')
 sys.path.insert(0, str(pathlib.Path(sys.argv[0]).resolve().parent))
 runpy.run_path(sys.argv[0], run_name='__main__')
-"""
-NODE_ARGV_LOADER = """const fs = require('node:fs');
-const i = process.argv.indexOf('--prompt') + 1;
-if (!i) throw new Error('AOP prompt argument missing');
-process.argv[i] = fs.readFileSync(process.argv[i], 'utf8');
 """

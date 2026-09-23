@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -42,37 +43,7 @@ def zcode_config(tmp_path, monkeypatch):
 @pytest.fixture
 def fake_zcode(tmp_path):
     binary = tmp_path / "zcode"
-    binary.write_text("""#!/usr/bin/python3
-import argparse, json, os, pathlib, time
-p = argparse.ArgumentParser()
-p.add_argument('--cwd', required=True)
-p.add_argument('--mode', choices=['yolo'], required=True)
-p.add_argument('--output-format', choices=['stream-json'], required=True)
-p.add_argument('--prompt', required=True)
-p.add_argument('--resume')
-a = p.parse_args()
-assert pathlib.Path.cwd() == pathlib.Path(a.cwd)
-assert 'ZCODE_MODEL' not in os.environ
-config = json.loads((pathlib.Path.home() / '.zcode/cli/config.json').read_text())
-assert set(config['provider']) == {'test'}
-assert 'other' not in json.dumps(config)
-assert not (pathlib.Path.home() / '.zcode/cli/history.json').exists()
-session = a.resume or 'sess_test'
-state = pathlib.Path(os.environ['ZCODE_STORAGE_DIR']) / 'test-session'
-if a.resume:
-    assert state.read_text() == a.resume
-state.write_text(session)
-if a.prompt == 'timeout':
-    time.sleep(10)
-if a.prompt == 'wrong-session':
-    session = 'sess_wrong'
-provider, model = config['model']['main'].split('/', 1)
-print(json.dumps({'type':'session.updated', 'sessionId':session, 'payload':{'modelRef':{'providerId':provider,'modelId':model}}}), flush=True)
-if a.prompt == 'truncated':
-    raise SystemExit(0)
-print(json.dumps({'type':'turn.completed', 'sessionId':session,'payload':{'resultType':'success'}}))
-print(json.dumps({'type':'result','sessionId':session,'response':'answer:'+a.prompt,'usage':{'source':'provider','inputTokens':120,'cacheReadTokens':30,'outputTokens':20,'reasoningTokens':7},'projection':{'status':'idle'}}))
-""")
+    binary.write_text((Path(__file__).parent / "fixtures/fake_zcode.py").read_text())
     binary.chmod(0o755)
     return binary
 
@@ -140,7 +111,6 @@ def test_capabilities_and_inventory(
     for kwargs in (
         {"no_web": True},
         {"mode": "participant"},
-        {"effort": "high"},
         {"inference_provider": "test", "model": "test/test-model"},
     ):
         with pytest.raises(AOPError):
@@ -408,13 +378,17 @@ def test_run_retains_partial_usage_and_cost(
     config["provider"]["test"]["options"]["baseURL"] = "https://api.z.ai/api/anthropic"
     config["provider"]["test"]["models"]["glm-5.3-flash"] = {}
     (source / "cli/config.json").write_text(json.dumps(config))
-    measured = request_event(model="test/glm-5.3-flash")
     script = fake_zcode.read_text()
-    start = script.index("if a.prompt == 'timeout':")
+    marker = "            event('turn.completed'"
+    position = script.index(marker)
     script = (
-        script[:start]
-        + f"print({json.dumps(measured)!r}, flush=True)\n"
-        + ("time.sleep(10)\n" if ending == "timeout" else "")
+        script[:position]
+        + (
+            "            time.sleep(10)\n"
+            if ending == "timeout"
+            else "            raise SystemExit(0)\n"
+        )
+        + script[position:]
     )
     fake_zcode.write_text(script)
     result = AgentRunner(
@@ -436,15 +410,6 @@ def test_successful_run_cost_and_billing(repository, zcode_config, fake_zcode):
     config["provider"]["test"]["options"]["baseURL"] = "https://api.z.ai/api/anthropic"
     config["provider"]["test"]["models"]["glm-5.3-flash"] = {}
     (source / "cli/config.json").write_text(json.dumps(config))
-    script = fake_zcode.read_text()
-    marker = "print(json.dumps({'type':'turn.completed'"
-    position = script.index(marker)
-    script = (
-        script[:position]
-        + f"print({json.dumps(request_event(model='test/glm-5.3-flash'))!r})\n"
-        + script[position:]
-    )
-    fake_zcode.write_text(script)
     runner = AgentRunner(
         WorktreeManager.discover(repository), ZcodeAdapter(str(fake_zcode))
     )
@@ -505,4 +470,129 @@ def test_resume_rejects_changed_project_lite_model(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"model": {"lite": "test/second-model"}}))
     with pytest.raises(AOPError, match="project lite model conflicts"):
+        runner.resume(run_id=first.run_id, prompt="second")
+
+
+@pytest.mark.parametrize("effort", [None, "low", "high", "max"])
+def test_effort_is_verified_recorded_and_resumed(
+    repository, zcode_config, fake_zcode, effort
+):
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ZcodeAdapter(str(fake_zcode))
+    )
+    first = runner.run(task="effort", prompt="first", effort=effort, timeout_seconds=5)
+    assert first.succeeded, first.error
+    assert first.effort == (effort or "max")
+    request = runner.store.load_request(first.run_id)
+    assert request.effort == first.effort
+    assert request.effective_policy["zcode"]["effective_effort"] == first.effort
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+    assert resumed.succeeded, resumed.error
+    assert resumed.effort == first.effort
+
+
+def test_unsupported_effort_fails_before_prompt(repository, zcode_config, fake_zcode):
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ZcodeAdapter(str(fake_zcode))
+    )
+    result = runner.run(
+        task="unsupported-effort",
+        prompt="must not run",
+        effort="medium",
+        timeout_seconds=5,
+    )
+    assert not result.succeeded
+    assert "supported levels: low, high, max" in result.error
+    events = (runner.store.root / result.run_id / "events.jsonl").read_text()
+    assert '"method": "session/event"' not in events
+    assert result.usage is None
+
+
+def test_resume_rejects_changed_native_config(repository, zcode_config, fake_zcode):
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ZcodeAdapter(str(fake_zcode))
+    )
+    first = runner.run(task="native-pinned", prompt="first", timeout_seconds=5)
+    assert first.succeeded, first.error
+    request = runner.store.load_request(first.run_id)
+    path = (
+        Path(request.effective_policy["controller"]["provider_state"])
+        / "zcode/home/.zcode/v2/provider_config.json"
+    )
+    value = json.loads(path.read_text())
+    value["config"]["providerConfigRules"]["providerRules"][0]["config"]["access"][
+        "apiKey"
+    ] = "different-account"
+    path.write_text(json.dumps(value))
+    with pytest.raises(AOPError, match="differs from the pinned selection"):
+        runner.resume(run_id=first.run_id, prompt="second")
+
+
+def test_protocol_prompt_write_obeys_deadline(repository, zcode_config, fake_zcode):
+    script = fake_zcode.read_text()
+    marker = "    elif method == 'session/subscribe':"
+    start = script.index(marker)
+    # The server acknowledges subscription but never reads the large command.
+    stop = script.index("    else:\n", start)
+    fake_zcode.write_text(script[:stop] + "        time.sleep(10)\n" + script[stop:])
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ZcodeAdapter(str(fake_zcode))
+    )
+    result = runner.run(task="blocked-input", prompt="x" * 700000, timeout_seconds=0.3)
+    assert result.timed_out
+    assert result.duration_seconds < 5
+    assert result.usage is None
+
+
+def test_protocol_requires_selected_key_without_reading_other_credentials(zcode_config):
+    _, config = zcode_config
+    projected, _, _ = zcode.project_config(config, None, sealed=True)
+    del projected["provider"]["test"]["options"]["apiKey"]
+    with pytest.raises(AOPError, match="selected provider's native API key"):
+        zcode.protocol_config(projected, {"UNRELATED_API_KEY": "unrelated-secret"})
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"],
+)
+def test_provider_file_override_cannot_bypass_projection(
+    repository, zcode_config, fake_zcode, monkeypatch, variable
+):
+    monkeypatch.setenv(variable, "/outside-provider-config.json")
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ZcodeAdapter(str(fake_zcode))
+    )
+    with pytest.raises(AOPError, match="provider-file overrides"):
+        runner.run(task="external-config", prompt="test")
+
+
+@pytest.mark.parametrize("mutation", ["missing", "different-account"])
+def test_resume_pins_environment_credential(
+    repository, zcode_config, fake_zcode, monkeypatch, mutation
+):
+    source, config = zcode_config
+    del config["provider"]["test"]["options"]["apiKey"]
+    (source / "cli/config.json").write_text(json.dumps(config))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "first-account")
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ZcodeAdapter(str(fake_zcode))
+    )
+    first = runner.run(task="account-pinned", prompt="first", timeout_seconds=5)
+    assert first.succeeded, first.error
+    request = runner.store.load_request(first.run_id)
+    path = (
+        Path(request.effective_policy["controller"]["provider_state"])
+        / "zcode/home/.zcode/v2/provider_config.json"
+    )
+    if mutation == "missing":
+        path.unlink()
+    else:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "second-account")
+        value = json.loads(path.read_text())
+        value["config"]["providerConfigRules"]["providerRules"][0]["config"]["access"][
+            "apiKey"
+        ] = "second-account"
+        path.write_text(json.dumps(value))
+    with pytest.raises(AOPError, match="differs from the pinned selection"):
         runner.resume(run_id=first.run_id, prompt="second")

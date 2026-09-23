@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterator, Protocol, Sequence
 import yaml
 from yaml.constructor import ConstructorError
 
-from . import zcode, prompt_transport
+from . import zcode, zcode_protocol, prompt_transport
 from .codex_routes import (
     inventory_document,
     projected_codex_config,
@@ -1268,13 +1268,9 @@ class ZcodeAdapter:
     def normalize_options(
         self, model: str | None, effort: str | None
     ) -> tuple[str | None, str | None]:
-        if effort is not None:
-            raise AOPError(
-                "Zcode headless execution does not expose an effort override"
-            )
         if model is not None and ("/" not in model or not all(model.split("/", 1))):
             raise AOPError("Zcode model must be provider/model")
-        return model, None
+        return model, effort
 
     def execute(
         self,
@@ -1294,6 +1290,23 @@ class ZcodeAdapter:
         )
         config_path = Path(environment["HOME"]) / ".zcode" / "cli" / "config.json"
         config = zcode.read_config(config_path)
+        native_config = zcode.protocol_config(config, environment)
+        provider_path = Path(environment["HOME"]) / ".zcode/v2/provider_config.json"
+        provider_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        encoded = json.dumps(native_config) + "\n"
+        provider_hash = hashlib.sha256(
+            json.dumps(native_config, sort_keys=True).encode()
+        ).hexdigest()
+        if request.session_id:
+            if (
+                not provider_path.is_file()
+                or zcode.read_config(provider_path) != native_config
+                or pinned.get("provider_config_sha256") != provider_hash
+            ):
+                raise AOPError(
+                    "Zcode resume provider configuration differs from the pinned selection"
+                )
+        _atomic_write_private(provider_path, encoded)
         provider = model.split("/", 1)[0]
         definition = config["provider"][provider]
         canonical_zai = (
@@ -1305,20 +1318,8 @@ class ZcodeAdapter:
         credential_source = (
             "native-config"
             if definition.get("options", {}).get("apiKey")
-            else next(
-                (
-                    name
-                    for name in credential_names
-                    if name != "ZCODE_CREDENTIAL_SECRET"
-                ),
-                None,
-            )
+            else next(iter(credential_names), None)
         )
-        if (
-            credential_source is None
-            and (Path(environment["HOME"]) / ".zcode/v2/credentials.json").is_file()
-        ):
-            credential_source = "native-zai-oauth"
         billing = BillingProvenance(
             route="subscription" if canonical_zai and credential_source else "unknown",
             credential_source=credential_source,
@@ -1329,7 +1330,9 @@ class ZcodeAdapter:
             "selection_sha256": zcode.selection_fingerprint(config),
             "model": model,
             "permission_mode": "yolo",
-            "output_format": "stream-json",
+            "transport": "app-server-v4",
+            "provider_config_sha256": provider_hash,
+            "requested_effort": request.effort,
             "state": "task-private",
             "credential_environment_names": credential_names,
             "config_sha256": hashlib.sha256(
@@ -1342,19 +1345,7 @@ class ZcodeAdapter:
             request.effective_policy["environment"]["credential_names"] = (
                 credential_names
             )
-        command = [
-            self.binary,
-            "--cwd",
-            os.fspath(worktree.path),
-            "--mode",
-            "yolo",
-            "--output-format",
-            "stream-json",
-            "--prompt",
-            request.prompt,
-        ]
-        if request.session_id:
-            command.extend(["--resume", request.session_id])
+        command = [self.binary, "app-server", "--cwd", os.fspath(worktree.path)]
         command = _provider_command(command, request, worktree, environment)
         if request.profile != "host":
             names = {
@@ -1370,20 +1361,33 @@ class ZcodeAdapter:
         _atomic_write(
             run_dir / "request.json", json.dumps(request.to_dict(), indent=2) + "\n"
         )
+
+        def record_selection(effective_effort: str | None) -> None:
+            nonlocal request
+            request = replace(request, effort=effective_effort)
+            request.effective_policy["zcode"]["effective_effort"] = effective_effort
+            _atomic_write(
+                run_dir / "request.json", json.dumps(request.to_dict(), indent=2) + "\n"
+            )
+
         started_at = _now()
-        capture = _capture_process(
+        capture = zcode_protocol.run(
             command,
             cwd=worktree.path,
             environment=environment,
-            prompt=None,
+            workspace=command[-1],
+            prompt=request.prompt,
+            model=model,
+            effort=request.effort,
+            session_id=request.session_id,
             timeout_seconds=request.timeout_seconds,
-            is_response=self._is_response,
+            on_selection=record_selection,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
-        parsed = zcode.parse_stream(capture.stdout)
+        parsed = zcode.parse_protocol(capture.stdout)
         session_id = parsed["session_id"]
-        error = parsed["error"]
+        error = capture.error or parsed["error"]
         if request.session_id and session_id != request.session_id:
             session_id = None
             error = "Zcode did not resume the requested session ID"
@@ -1403,7 +1407,7 @@ class ZcodeAdapter:
             mode=request.mode,
             task=request.task,
             model=parsed["model"] or model,
-            effort=None,
+            effort=capture.effort,
             session_id=session_id,
             command=_recorded_command(command, secret_names=set(credential_names)),
             started_at=started_at,
@@ -1434,22 +1438,6 @@ class ZcodeAdapter:
             provider_status=parsed["status"],
         )
 
-    @staticmethod
-    def _is_response(line: str) -> bool:
-        try:
-            event = json.loads(line)
-        except ValueError:
-            return False
-        return isinstance(event, dict) and (
-            event.get("type") == "result"
-            or (
-                event.get("type") == "model.streaming"
-                and isinstance(event.get("payload"), dict)
-                and event["payload"].get("kind") == "text_delta"
-                and bool(event["payload"].get("delta"))
-            )
-        )
-
 
 def _prepare_zcode_environment(
     request: RunRequest,
@@ -1458,6 +1446,15 @@ def _prepare_zcode_environment(
     *,
     pinned: dict[str, Any] | None = None,
 ) -> tuple[str, list[str]]:
+    if any(
+        environment.get(name)
+        for name in (
+            "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"
+        )
+    ):
+        raise AOPError(
+            "Zcode provider-file overrides cannot bypass task-private provider projection"
+        )
     source = zcode.source_home(environment)
     home = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "zcode" / "home"
     config_path = home / ".zcode" / "cli" / "config.json"
@@ -1539,55 +1536,6 @@ def _prepare_zcode_environment(
         else next((key for key in candidates if environment.get(key)), None)
     )
     allowed = [selected_credential] if selected_credential else []
-    # Native OAuth uses a shared multi-service store. Retain only Z.AI entries.
-    if provider == "zai" and not configured_key and not selected_credential:
-        credentials_source = (
-            Path(environment.get("ZCODE_DATA_BASE_DIR", str(source.parent)))
-            / ".zcode"
-            / "v2"
-            / "credentials.json"
-        )
-        credentials_path = home / ".zcode" / "v2" / "credentials.json"
-        if not credentials_path.exists():
-            credentials = zcode.read_config(credentials_source)
-            credentials = {
-                key: value
-                for key, value in credentials.items()
-                if key
-                in {
-                    "oauth:active_provider",
-                    "oauth:zai:access_token",
-                    "oauth:zai:refresh_token",
-                    "oauth:zai:user_info",
-                    "zcodejwttoken",
-                }
-            }
-            if credentials:
-                try:
-                    decoded = subprocess.run(
-                        [
-                            "node",
-                            os.fspath(
-                                Path(__file__).with_name("zcode_credentials.cjs")
-                            ),
-                        ],
-                        input=json.dumps(credentials),
-                        text=True,
-                        capture_output=True,
-                        env=environment,
-                        timeout=5,
-                        check=True,
-                    )
-                    credentials = json.loads(decoded.stdout)
-                except (OSError, subprocess.SubprocessError, ValueError) as error:
-                    raise AOPError(
-                        "could not decode selected native Zcode credentials"
-                    ) from error
-            if credentials:
-                credentials_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                _atomic_write_private(credentials_path, json.dumps(credentials) + "\n")
-        if environment.get("ZCODE_CREDENTIAL_SECRET"):
-            allowed.append("ZCODE_CREDENTIAL_SECRET")
     environment["AOP_ZCODE_ALLOWED_AUTH_ENV"] = ",".join(allowed)
     environment["HOME"] = os.fspath(home)
     environment["ZCODE_STORAGE_DIR"] = os.fspath(home / ".zcode")
@@ -3679,7 +3627,7 @@ def _provider_command(
             command = command[:-2]  # native stdin, no positional prompt
         elif request.provider == "agy":
             command = [*command[:-2], "--input-format", "stream-json", "-p", ""]
-        elif request.provider in {"devin", "dsh", "hermes", "zcode"}:
+        elif request.provider in {"devin", "dsh", "hermes"}:
             path = prompt_transport.stage_prompt(
                 Path(environment["AOP_SCRATCH_DIR"]), request.run_id, request.prompt
             )
@@ -3688,7 +3636,7 @@ def _provider_command(
             elif request.provider == "dsh":
                 command[-1] = os.fspath(path)
             else:
-                flag = "--prompt" if request.provider == "zcode" else "-q"
+                flag = "-q"
                 command[command.index(flag) + 1] = os.fspath(path)
     if request.profile == "host":
         return (
@@ -3853,20 +3801,8 @@ def _prompt_runtime_command(
             )
         if interpreter:
             return [interpreter, "-c", prompt_transport.PYTHON_ARGV_LOADER, *command]
-    if header.startswith("#!") and "node" in header:
-        scratch = Path(environment["AOP_SCRATCH_DIR"])
-        loader = scratch / ".aop-prompt-loader.cjs"
-        _atomic_write_private(loader, prompt_transport.NODE_ARGV_LOADER)
-        guest_loader = (
-            loader if request.profile == "host" else Path("/scratch") / loader.name
-        )
-        node = shutil.which("node") if request.profile == "host" else "/usr/bin/node"
-        if "node" == Path(command[0]).name:
-            return [command[0], "--require", os.fspath(guest_loader), *command[1:]]
-        if node:
-            return [node, "--require", os.fspath(guest_loader), *command]
     raise AOPError(
-        f"{request.provider} prompt transport requires its native Python or Node entrypoint"
+        f"{request.provider} prompt transport requires its native Python entrypoint"
     )
 
 

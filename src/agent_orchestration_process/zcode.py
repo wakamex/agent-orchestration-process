@@ -338,3 +338,153 @@ def parse_stream(stdout: str) -> dict[str, Any]:
         "duration_seconds": duration,
         "status": status,
     }
+
+
+def protocol_config(
+    config: dict[str, Any], environment: dict[str, str]
+) -> dict[str, Any]:
+    """Project the selected legacy native provider into the app-server schema."""
+    model = config["model"]["main"]
+    provider, model_id = model.split("/", 1)
+    definition = config["provider"][provider]
+    options = definition.get("options", {})
+    unsupported = set(options) - {"apiKey", "baseURL", "headers"}
+    if unsupported:
+        raise AOPError(
+            "Zcode app-server cannot project provider options: "
+            + ", ".join(sorted(unsupported))
+        )
+    key = options.get("apiKey") or next(
+        (
+            environment[name]
+            for name in credential_env_names(provider, definition)
+            if environment.get(name)
+        ),
+        None,
+    )
+    if not key:
+        raise AOPError(
+            "Zcode app-server requires the selected provider's native API key; its client protocol does not load standalone OAuth credentials"
+        )
+    kinds = {
+        "anthropic": "anthropic-messages",
+        "openai": "openai-responses",
+        "openai-compatible": "openai-chat-completions",
+    }
+    kind = definition.get("kind", "openai-compatible")
+    if kind not in kinds:
+        raise AOPError(f"Unsupported Zcode provider kind: {kind}")
+    api = {"type": kinds[kind]}
+    if options.get("baseURL"):
+        api["baseUrl"] = options["baseURL"]
+    headers = {**definition.get("headers", {}), **options.get("headers", {})}
+    if headers:
+        api["headers"] = headers
+    model_rules = []
+    for member_id, member in definition.get("models", {}).items():
+        context_window = member.get(
+            "contextWindow", member.get("limit", {}).get("context")
+        )
+        if context_window is not None:
+            model_rules.append(
+                {
+                    "providerId": provider,
+                    "modelId": member_id,
+                    "config": {"properties": {"contextWindow": context_window}},
+                }
+            )
+    return {
+        "schemaVersion": 1,
+        "config": {
+            "providerConfigRules": {
+                "providerRules": [
+                    {
+                        "providerId": provider,
+                        "config": {
+                            "group": "standard-personal",
+                            "access": {"type": "api-key", "apiKey": key},
+                            "api": api,
+                            "personalModelIds": list(
+                                dict.fromkeys([model_id, *definition.get("models", {})])
+                            ),
+                        },
+                    }
+                ]
+            },
+            "modelConfigRules": {
+                "providerModelRules": model_rules,
+                "manualProviderModelRules": [],
+            },
+            "defaultModelSelection": {"providerId": provider, "modelId": model_id},
+        },
+    }
+
+
+def parse_protocol(stdout: str) -> dict[str, Any]:
+    """Read native snapshots and subscribed events without counting replayed history."""
+    events = []
+    terminal = None
+    snapshot = None
+    for line in stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            events.append(line)
+            continue
+        if not isinstance(message, dict):
+            events.append(line)
+            continue
+        if message.get("method") == "session/event":
+            event = message.get("params")
+            if not isinstance(event, dict) or not isinstance(
+                event.get("payload", {}), dict
+            ):
+                events.append("null")
+                continue
+            payload = event.get("payload", {})
+            if (
+                payload.get("type") == "model_request_completed"
+                and "model" not in payload
+            ):
+                event = {
+                    **event,
+                    "payload": {
+                        **payload,
+                        "model": {
+                            "providerId": payload.get("providerId"),
+                            "modelId": payload.get("modelId"),
+                            "role": "main"
+                            if payload.get("modelRequestSessionType", "main") == "main"
+                            else "auxiliary",
+                        },
+                    },
+                }
+            events.append(json.dumps(event))
+            if event.get("type") == "turn.completed":
+                terminal = event
+        result = message.get("result")
+        if isinstance(result, dict) and isinstance(result.get("session"), dict):
+            snapshot = result
+            events.append(
+                json.dumps(
+                    {
+                        "type": "session.updated",
+                        "sessionId": result["session"].get("sessionId"),
+                        "payload": {"modelRef": result["session"].get("model")},
+                    }
+                )
+            )
+    if terminal and snapshot:
+        payload = terminal.get("payload", {})
+        events.append(
+            json.dumps(
+                {
+                    "type": "result",
+                    "sessionId": snapshot["session"].get("sessionId"),
+                    "response": payload.get("response"),
+                    "usage": payload.get("usage"),
+                    "projection": snapshot.get("projection"),
+                }
+            )
+        )
+    return parse_stream("\n".join(events))

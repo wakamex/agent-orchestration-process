@@ -33,8 +33,10 @@ from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
 
 
+@pytest.mark.parametrize("explicit_selection", [True, False])
 def test_installed_codex_accepts_no_web_permission_profile_without_a_turn(
     tmp_path: Path,
+    explicit_selection: bool,
 ) -> None:
     binary = shutil.which("codex")
     if binary is None:
@@ -115,7 +117,9 @@ def test_installed_codex_accepts_no_web_permission_profile_without_a_turn(
                 "params": {
                     "cwd": os.fspath(worktree),
                     "approvalPolicy": "never",
-                    "permissions": "aop-no-web",
+                    # Workspace routing rebuilds retained config without this
+                    # thread-only override. The config must select its profile too.
+                    **({"permissions": "aop-no-web"} if explicit_selection else {}),
                     "ephemeral": True,
                     "config": _codex_no_web_config(
                         "edit", os.fspath(worktree), [os.fspath(worktree)]
@@ -151,6 +155,7 @@ def test_codex_no_web_permission_profile_matches_aop_filesystem_contract(
 ) -> None:
     writable_roots = ["/output", "/scratch", "/state", "/cache", "/tmp"]
     config = _codex_no_web_config(profile, "/workspace", writable_roots)
+    assert config["default_permissions"] == "aop-no-web"
     permission = config["permissions"]["aop-no-web"]
     filesystem = permission["filesystem"]
 

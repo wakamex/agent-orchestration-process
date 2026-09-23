@@ -258,6 +258,9 @@ def _codex_no_web_config(
             filesystem[f"{cwd.rstrip('/')}/.git"] = "read"
     return {
         "web_search": "disabled",
+        # Codex rebuilds retained config during workspace routing without the
+        # thread's permissions override, so the config must select its profile.
+        "default_permissions": _CODEX_NO_WEB_PERMISSION_PROFILE,
         "permissions": {
             _CODEX_NO_WEB_PERMISSION_PROFILE: {
                 "filesystem": filesystem,

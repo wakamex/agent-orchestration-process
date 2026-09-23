@@ -176,6 +176,8 @@ source is not `${GROK_HOME:-~/.grok}`.
 
 ### Hermes
 
+For providers other than Nous, `aop models --agent hermes` supplements the provider's models.dev entries with the default model returned by `hermes config get model --json`. That entry is labeled `configured`, including when it is absent from the catalog or prices are unavailable. Configuration is not proof of provider entitlement. Nous continues to use its existing endpoint inventory and provider prices.
+
 For `edit` and `review`, AOP seeds configuration, skills, hooks, and memories while keeping sessions,
 logs, databases, and caches private. `sealed` receives credentials without extensions or other user
 instruction sources.

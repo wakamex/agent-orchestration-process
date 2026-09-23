@@ -289,7 +289,9 @@ def test_hermes_uses_live_provider_prices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
-    monkeypatch.setattr(model_listing, "_run", lambda command, **options: "nous\n")
+    monkeypatch.setattr(
+        model_listing, "_run", lambda command, **options: '{"provider":"nous"}\n'
+    )
     monkeypatch.setattr(
         model_listing,
         "_fetch_nous_models",
@@ -319,7 +321,9 @@ def test_hermes_catalog_follows_the_configured_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
-    monkeypatch.setattr(model_listing, "_run", lambda command, **options: "xai-oauth\n")
+    monkeypatch.setattr(
+        model_listing, "_run", lambda command, **options: '{"provider":"xai-oauth"}\n'
+    )
 
     model = model_listing.list_models("hermes", ensure_catalog_fresh())[0]
 
@@ -328,3 +332,61 @@ def test_hermes_catalog_follows_the_configured_provider(
     assert model.price_scope == "api-equivalent"
     assert model.input_per_million_usd == 2
     assert model.output_per_million_usd == 6
+
+
+@pytest.mark.parametrize("with_catalog", [True, False])
+def test_hermes_lists_configured_model_missing_from_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    with_catalog: bool,
+) -> None:
+    monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
+
+    def run(command: list[str], **options: object) -> str:
+        assert command == ["hermes", "config", "get", "model", "--json"]
+        return json.dumps({"provider": "xai-oauth", "default": "grok-launch"})
+
+    monkeypatch.setattr(model_listing, "_run", run)
+    catalog = ensure_catalog_fresh() if with_catalog else ModelCatalog({}, 0, "", "")
+    rows = {row.model: row for row in model_listing.list_models("hermes", catalog)}
+    selected = rows["grok-launch"]
+    assert selected.availability == "configured"
+    assert selected.inference_provider == "xai-oauth"
+    assert selected.inventory_source == "hermes config get model --json"
+    assert selected.inventory_retrieved_at
+    assert selected.authenticated is False
+    assert selected.price_scope == "unknown"
+    assert selected.input_per_million_usd is None
+    if with_catalog:
+        assert rows["grok-4.5"].availability == "catalog"
+
+
+def test_hermes_configured_model_uses_exact_provider_prices_without_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
+    monkeypatch.setattr(
+        model_listing,
+        "_run",
+        lambda command: json.dumps(
+            {
+                "provider": "xai-oauth",
+                "default": "grok-4.5",
+            }
+        ),
+    )
+    rows = model_listing.list_models("hermes", ensure_catalog_fresh())
+    selected = [row for row in rows if row.model == "grok-4.5"]
+    assert len(selected) == 1
+    assert selected[0].availability == "configured"
+    assert selected[0].input_per_million_usd == 2
+
+
+@pytest.mark.parametrize("config", [[], {"provider": "xai-oauth", "default": 123}])
+def test_hermes_rejects_malformed_native_model_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    config: object,
+) -> None:
+    monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
+    monkeypatch.setattr(model_listing, "_run", lambda command: json.dumps(config))
+    with pytest.raises(AOPError, match="Hermes model configuration"):
+        model_listing.list_models("hermes", ensure_catalog_fresh())

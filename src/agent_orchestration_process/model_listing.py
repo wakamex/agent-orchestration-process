@@ -94,8 +94,16 @@ def list_models(
         return _claude_models(catalog)
     if agent == "hermes":
         binary = _binary("hermes", "AOP_HERMES_BIN", "hermes")
-        provider = _run([binary, "config", "get", "model.provider"]).strip()
-        return _hermes_models(catalog, provider)
+        try:
+            config = json.loads(_run([binary, "config", "get", "model", "--json"]))
+        except json.JSONDecodeError as error:
+            raise AOPError("Hermes returned invalid model configuration") from error
+        if not isinstance(config, dict) or not isinstance(config.get("provider"), str):
+            raise AOPError("Hermes model configuration has no provider")
+        model = config.get("default") or config.get("name")
+        if model is not None and not isinstance(model, str):
+            raise AOPError("Hermes model configuration has an invalid model ID")
+        return _hermes_models(catalog, config["provider"], model)
     if agent == "grok":
         return _grok_models(catalog)
     if agent == "zcode":
@@ -714,7 +722,9 @@ def _catalog_models(
     ]
 
 
-def _hermes_models(catalog: ModelCatalog, provider: str) -> list[AvailableModel]:
+def _hermes_models(
+    catalog: ModelCatalog, provider: str, configured_model: str | None = None
+) -> list[AvailableModel]:
     catalog_provider = {
         "gemini": "google",
         "openai-codex": "openai",
@@ -722,11 +732,30 @@ def _hermes_models(catalog: ModelCatalog, provider: str) -> list[AvailableModel]
     }.get(provider, provider)
     if catalog_provider != "nous":
         records = _catalog_models("hermes", catalog_provider, catalog)
+        if configured_model:
+            records = [row for row in records if row.model != configured_model]
+            records.append(
+                replace(
+                    _record(
+                        "hermes",
+                        configured_model,
+                        configured_model,
+                        "configured",
+                        "api-equivalent",
+                        catalog,
+                        catalog_provider,
+                        configured_model,
+                        inference_provider=provider,
+                        inventory_retrieved_at=datetime.now(UTC).isoformat(),
+                    ),
+                    inventory_source="hermes config get model --json",
+                )
+            )
         if not records:
             raise AOPError(
                 f"the model catalog has no entries for Hermes provider {provider}"
             )
-        return records
+        return sorted(records, key=lambda row: row.model)
     values = _fetch_nous_models()
     records = []
     for value in values:

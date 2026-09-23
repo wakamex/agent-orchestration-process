@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import selectors
@@ -11,7 +12,8 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +56,8 @@ class AvailableModel:
     inventory_retrieved_at: str | None = None
     inventory_sha256: str | None = None
     authenticated: bool = False
+    inventory_source: str | None = None
+    discovery_error: str | None = None
     input_per_million_usd: float | None = None
     cached_input_per_million_usd: float | None = None
     cache_write_per_million_usd: float | None = None
@@ -87,8 +91,7 @@ def list_models(
     if agent == "opencode":
         return _opencode_models(catalog)
     if agent == "claude":
-        _require_binary(_binary("claude", "AOP_CLAUDE_BIN", "claude"))
-        return _catalog_models(agent, "anthropic", catalog)
+        return _claude_models(catalog)
     if agent == "hermes":
         binary = _binary("hermes", "AOP_HERMES_BIN", "hermes")
         provider = _run([binary, "config", "get", "model.provider"]).strip()
@@ -117,6 +120,158 @@ def list_models(
             )
         ]
     raise AOPError(f"unsupported agent: {agent}")
+
+
+def _claude_models(catalog: ModelCatalog) -> list[AvailableModel]:
+    binary = _binary("claude", "AOP_CLAUDE_BIN", "claude")
+    records = {
+        row.model: replace(
+            row,
+            inventory_source=catalog.source,
+            inventory_retrieved_at=datetime.fromtimestamp(
+                catalog.fetched_at, UTC
+            ).isoformat(),
+            inventory_sha256=catalog.sha256,
+        )
+        for row in _catalog_models("claude", "anthropic", catalog)
+    }
+    try:
+        entries = _claude_model_response(binary)
+    except AOPError as error:
+        if not records:
+            raise
+        return [replace(row, discovery_error=str(error)) for row in records.values()]
+    retrieved_at = datetime.now(UTC).isoformat()
+    digest = hashlib.sha256(
+        json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    for entry in entries:
+        # New CLIs resolve aliases using native account/provider configuration.
+        # Older CLIs may advertise only aliases; leave their prices unknown.
+        model = entry.get("resolvedModel") or entry["value"]
+        records[model] = replace(
+            _record(
+                "claude",
+                model,
+                entry.get("displayName") or model,
+                "native-advertised",
+                "api-equivalent",
+                catalog,
+                "anthropic",
+                model,
+                inventory_retrieved_at=retrieved_at,
+                inventory_sha256=digest,
+            ),
+            inventory_source="claude-sdk-initialize",
+        )
+    return sorted(records.values(), key=lambda row: row.model)
+
+
+def _claude_model_response(binary: str) -> list[dict[str, Any]]:
+    """Read the native SDK inventory without submitting a user turn or extracting auth."""
+    try:
+        process = subprocess.Popen(
+            [
+                binary,
+                "--print",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--settings",
+                '{"disableAllHooks":true}',
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise AOPError("could not start Claude model discovery") from error
+    assert process.stdin is not None and process.stdout is not None
+    selector = selectors.DefaultSelector()
+    try:
+        process.stdin.write(
+            json.dumps(
+                {
+                    "type": "control_request",
+                    "request_id": "aop-models",
+                    "request": {"subtype": "initialize"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        process.stdin.flush()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + 20
+        buffered = b""
+        size = 0
+        while time.monotonic() < deadline:
+            if not selector.select(max(0, deadline - time.monotonic())):
+                break
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > 4_000_000:
+                raise AOPError("Claude model discovery response exceeded 4 MB")
+            buffered += chunk
+            while b"\n" in buffered:
+                line, buffered = buffered.split(b"\n", 1)
+                value = json.loads(line)
+                if (
+                    not isinstance(value, dict)
+                    or value.get("type") != "control_response"
+                ):
+                    continue
+                response = value.get("response")
+                if (
+                    not isinstance(response, dict)
+                    or response.get("request_id") != "aop-models"
+                ):
+                    continue
+                body = response.get("response")
+                entries = body.get("models") if isinstance(body, dict) else None
+                if (
+                    response.get("subtype") != "success"
+                    or not isinstance(entries, list)
+                    or not entries
+                ):
+                    raise AOPError("Claude did not return a native model inventory")
+                for entry in entries:
+                    if (
+                        not isinstance(entry, dict)
+                        or not isinstance(entry.get("value"), str)
+                        or not entry["value"]
+                        or (
+                            "resolvedModel" in entry
+                            and (
+                                not isinstance(entry["resolvedModel"], str)
+                                or not entry["resolvedModel"]
+                            )
+                        )
+                        or (
+                            "displayName" in entry
+                            and not isinstance(entry["displayName"], str)
+                        )
+                    ):
+                        raise AOPError("Claude returned an invalid model inventory")
+                return entries
+        raise AOPError("Claude model discovery ended or timed out without an inventory")
+    except (OSError, ValueError) as error:
+        raise AOPError("could not read Claude model inventory") from error
+    finally:
+        selector.close()
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        process.stdin.close()
+        process.stdout.close()
 
 
 def _zcode_models(catalog: ModelCatalog) -> list[AvailableModel]:

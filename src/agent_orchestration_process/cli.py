@@ -200,12 +200,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             agents = args.agent or AGENTS
             if args.provider is not None and agents != ["codex"]:
                 raise AOPError("models --provider requires exactly --agent codex")
-            catalog = ensure_catalog_fresh(force=args.refresh)
+            catalog_error = None
+            try:
+                catalog = ensure_catalog_fresh(force=args.refresh)
+            except (AOPError, OSError) as error:
+                # Native inventories remain useful without prices. Dispatch
+                # keeps its separate fail-closed catalog preflight below.
+                catalog_error = str(error)
+                catalog = ModelCatalog({}, 0, "", "")
             return _report_models(
                 agents,
                 catalog,
                 inference_provider=args.provider,
                 json_output=args.json,
+                catalog_error=catalog_error,
             )
 
         if args.command == "profile":
@@ -681,6 +689,7 @@ def _report_models(
     *,
     inference_provider: str | None = None,
     json_output: bool,
+    catalog_error: str | None = None,
 ) -> int:
     models: list[AvailableModel] = []
     errors: dict[str, str] = {}
@@ -690,7 +699,19 @@ def _report_models(
         except AOPError as error:
             errors[agent] = str(error)
     models.sort(key=lambda item: (item.agent, item.model))
-    fetched_at = datetime.fromtimestamp(catalog.fetched_at, UTC).isoformat()
+    warnings = {"catalog": catalog_error} if catalog_error else {}
+    warnings.update(
+        {
+            model.agent: model.discovery_error
+            for model in models
+            if model.discovery_error
+        }
+    )
+    fetched_at = (
+        datetime.fromtimestamp(catalog.fetched_at, UTC).isoformat()
+        if catalog.source
+        else None
+    )
     if json_output:
         print(
             json.dumps(
@@ -699,8 +720,11 @@ def _report_models(
                         "fetched_at": fetched_at,
                         "sha256": catalog.sha256,
                         "source": catalog.source,
-                    },
+                    }
+                    if catalog.source
+                    else None,
                     "errors": errors,
+                    "warnings": warnings,
                     "models": [model.to_dict() for model in models],
                 },
                 sort_keys=True,
@@ -730,6 +754,8 @@ def _report_models(
         )
         for agent, error in errors.items():
             print(f"aop: {agent}: {error}", file=sys.stderr)
+        for source, warning in warnings.items():
+            print(f"aop: warning: {source}: {warning}", file=sys.stderr)
     return 0 if models and not errors else 1
 
 

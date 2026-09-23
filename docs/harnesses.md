@@ -30,7 +30,7 @@ provenance. Harness-native automation surfaces determine the remaining feature d
 | Harness | Enforced no-web | Participant | Model inventory | Provider override | Calculated cost | Provider-reported cost |
 | --- | --- | --- | --- | --- | --- | --- |
 | Codex | Yes | No | Account or authenticated route | Z.AI Coding Plan | API-equivalent | No |
-| Claude Code | Yes | No | Catalog | No | CLI-calculated | No |
+| Claude Code | Yes | No | Native SDK inventory plus catalog | No | CLI-calculated | No |
 | Cursor Agent | No | No | Account | No | No | No |
 | Devin CLI | No | No | Account | No | No | No |
 | OpenCode | Yes | No | Account | No | API-equivalent | When emitted |
@@ -109,6 +109,10 @@ Set `AOP_CODEX_SOURCE_HOME` when the authenticated source is not
 `${CODEX_HOME:-~/.codex}`.
 
 ### Claude Code
+
+`aop models --agent claude` asks the installed CLI for its SDK initialization inventory without submitting a prompt. Native authentication, provider environment overrides, and model configuration stay with Claude. Hooks and MCP startup are disabled for discovery. Native entries are labeled `native-advertised`; they describe what the harness advertises, not verified inference or subscription entitlement. Newer CLIs supply resolved model IDs; older CLIs may supply only aliases. Discovery runs on each listing, including `--refresh`, but Claude may maintain its own cached inventory.
+
+The models.dev catalog supplements this list with entries labeled `catalog` and supplies API-equivalent prices on exact model-ID matches. Missing prices remain `unknown` with null JSON values or `n/a` text values. JSON records include inventory source, retrieval time, and hash. Native discovery failures produce an explicit warning and catalog fallback when available. Pricing-catalog failures also produce a warning while allowing native inventories to be listed without catalog prices. Explicit model selections remain accepted independently of discovery; dispatch retains its existing fresh-pricing preflight.
 
 For `edit` and `review`, AOP seeds Claude authentication and configuration into a private home while
 leaving runtime history, project state, logs, and caches behind. `sealed` receives authentication
@@ -236,7 +240,7 @@ Set `AOP_ZCODE_BIN` to a specific executable and `AOP_ZCODE_SOURCE_HOME` to a no
 | Harness | Current limitation |
 | --- | --- |
 | Codex | No participant mode. |
-| Claude Code | Model inventory is catalog-only; no participant mode. |
+| Claude Code | Native inventory advertises models without proving entitlement; no participant mode. |
 | Cursor Agent | Effort is part of the model ID; no participant mode. |
 | Devin CLI | Effort is part of the model ID; successful runs require a valid ATIF export; no participant mode. |
 | OpenCode | No participant mode. |

@@ -208,6 +208,7 @@ def calculate_cost(
 def parse_stream(stdout: str) -> dict[str, Any]:
     result = None
     session = None
+    session_conflict = False
     model = None
     error = None
     malformed = False
@@ -233,6 +234,7 @@ def parse_stream(stdout: str) -> dict[str, Any]:
         if isinstance(reported_session, str):
             if session is not None and session != reported_session:
                 error = "Zcode stream contains conflicting session identities"
+                session_conflict = True
             session = reported_session
         payload = event.get("payload")
         if isinstance(payload, dict):
@@ -305,7 +307,11 @@ def parse_stream(stdout: str) -> dict[str, Any]:
     if not isinstance(response, str) or not response.strip():
         response = None
         error = error or "Zcode did not emit a final response"
-    if not isinstance(session, str) or not session.startswith("sess_"):
+    if (
+        session_conflict
+        or not isinstance(session, str)
+        or not session.startswith("sess_")
+    ):
         session = None
         error = error or "Zcode did not report a valid session ID"
     raw_usage = result.get("usage")

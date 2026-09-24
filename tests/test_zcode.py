@@ -596,3 +596,30 @@ def test_resume_pins_environment_credential(
         path.write_text(json.dumps(value))
     with pytest.raises(AOPError, match="differs from the pinned selection"):
         runner.resume(run_id=first.run_id, prompt="second")
+
+
+def test_conflicting_protocol_session_cannot_be_restored_by_snapshot():
+    snapshot = {
+        "session": {
+            "sessionId": "sess_expected",
+            "model": {"providerId": "test", "modelId": "model"},
+        },
+        "projection": {"status": "idle"},
+    }
+    # A completed event can arrive in the same pipe read as the first event
+    # from a conflicting session. The terminal snapshot must not restore trust.
+    messages = [
+        {"id": 1, "result": snapshot},
+        {
+            "method": "session/event",
+            "params": {
+                "type": "turn.completed",
+                "sessionId": "sess_wrong",
+                "payload": {"resultType": "success", "response": "wrong session"},
+            },
+        },
+        {"id": 2, "result": snapshot},
+    ]
+    parsed = zcode.parse_protocol("\n".join(map(json.dumps, messages)))
+    assert parsed["session_id"] is None
+    assert "conflicting session identities" in parsed["error"]

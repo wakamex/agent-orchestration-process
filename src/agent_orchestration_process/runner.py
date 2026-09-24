@@ -3735,16 +3735,6 @@ def _provider_command(
         environment["XDG_STATE_HOME"] = os.fspath(isolated_state / "state")
         environment["XDG_CACHE_HOME"] = os.fspath(cache)
         environment["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
-        dependencies = source_config / "node_modules" if source_config else None
-        private_dependencies = isolated_state / "config" / "opencode" / "node_modules"
-        if dependencies is not None and dependencies.is_dir():
-            shutil.copytree(
-                dependencies,
-                private_dependencies,
-                symlinks=True,
-                dirs_exist_ok=True,
-            )
-            _make_tree_user_writable(private_dependencies)
     mappings = (
         (output, Path("/output")),
         (input_root, Path("/inputs")),
@@ -4885,7 +4875,15 @@ def _prepare_opencode_state(
                 source = source_data / name
                 if source.is_file():
                     shutil.copy2(source, private_data / name)
-        (private_config / "node_modules").mkdir()
+        # Seed dependencies together with the native config, once per task.
+        # Merging them on each launch overwrites task-local updates and cannot
+        # replace existing package-manager symlinks with copytree.
+        dependencies = source_config / "node_modules" if source_config else None
+        private_dependencies = private_config / "node_modules"
+        if dependencies is not None and dependencies.is_dir():
+            shutil.copytree(dependencies, private_dependencies, symlinks=True)
+        else:
+            private_dependencies.mkdir()
         _make_tree_user_writable(temporary)
         os.replace(temporary, destination)
     except OSError as error:

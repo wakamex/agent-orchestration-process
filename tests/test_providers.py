@@ -2206,3 +2206,33 @@ def test_dsh_host_rejects_old_node(repository, tmp_path, monkeypatch):
     )
     with pytest.raises(AOPError, match="PATH selects.*v22.14.0"):
         runner.run(task="old-node", prompt="test", profile="host")
+
+
+@pytest.mark.parametrize("profile", ["edit", "review", "sealed"])
+def test_opencode_reuses_private_dependencies_on_run_and_resume(
+    repository: Path, fake_opencode: Path, profile: str
+) -> None:
+    source = Path(os.environ["AOP_OPENCODE_CONFIG_DIR"]) / "node_modules"
+    (source / ".bin").mkdir()
+    (source / ".bin" / "plugin").symlink_to("../@opencode-ai/plugin/package.json")
+    manager = WorktreeManager.discover(repository)
+    runner = AgentRunner(manager, OpenCodeAdapter(os.fspath(fake_opencode)))
+    first = runner.run(task="dependency-links", prompt="first", profile=profile)
+    assert first.succeeded, first.error
+    request = runner.store.load_request(first.run_id)
+    private = (
+        Path(request.effective_policy["controller"]["provider_state"])
+        / "opencode/config/opencode/node_modules"
+    )
+    assert (private / ".bin/plugin").is_symlink()
+    assert (private / ".bin/plugin").read_text() == '{"version": "test"}\n'
+    # Dependencies become task-owned state, just like the rest of the native
+    # config. Neither a resume nor another run should overwrite native updates.
+    (private / "@opencode-ai/plugin/package.json").write_text('{"version": "task-local"}\n')
+    for result in (
+        runner.resume(run_id=first.run_id, prompt="resume"),
+        runner.run(task="dependency-links", prompt="again", profile=profile),
+    ):
+        assert result.succeeded, result.error
+    assert (private / ".bin/plugin").read_text() == '{"version": "task-local"}\n'
+    assert (source / ".bin/plugin").read_text() == '{"version": "test"}\n'

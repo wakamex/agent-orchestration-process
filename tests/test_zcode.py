@@ -544,12 +544,61 @@ def test_protocol_prompt_write_obeys_deadline(repository, zcode_config, fake_zco
     assert result.usage is None
 
 
-def test_protocol_requires_selected_key_without_reading_other_credentials(zcode_config):
+@pytest.mark.parametrize("required", [None, True])
+def test_protocol_requires_selected_key_without_reading_other_credentials(
+    zcode_config, required
+):
     _, config = zcode_config
     projected, _, _ = zcode.project_config(config, None, sealed=True)
     del projected["provider"]["test"]["options"]["apiKey"]
+    if required is not None:
+        projected["provider"]["test"]["options"]["apiKeyRequired"] = required
     with pytest.raises(AOPError, match="selected provider's native API key"):
         zcode.protocol_config(projected, {"UNRELATED_API_KEY": "unrelated-secret"})
+
+
+def test_protocol_projects_required_zai_environment_key(zcode_config):
+    _, config = zcode_config
+    provider = config["provider"].pop("test")
+    provider["options"].pop("apiKey")
+    provider["options"]["apiKeyRequired"] = True
+    config["provider"]["zai"] = provider
+    config["model"]["main"] = "zai/test-model"
+    projected = zcode.protocol_config(config, {"ZAI_API_KEY": "synthetic-zai-key"})
+    rule = projected["config"]["providerConfigRules"]["providerRules"][0]
+    assert rule["providerId"] == "zai"
+    assert rule["config"]["access"] == {
+        "type": "api-key",
+        "apiKey": "synthetic-zai-key",
+    }
+    assert "apiKeyRequired" not in json.dumps(projected)
+
+
+def test_required_environment_key_run_and_resume(
+    repository, zcode_config, fake_zcode, monkeypatch
+):
+    source, config = zcode_config
+    options = config["provider"]["test"]["options"]
+    options.pop("apiKey")
+    options["apiKeyRequired"] = True
+    (source / "cli/config.json").write_text(json.dumps(config))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-test-key")
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ZcodeAdapter(str(fake_zcode))
+    )
+    first = runner.run(task="required-key", prompt="first", profile="sealed")
+    assert first.succeeded, first.error
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+    assert resumed.succeeded, resumed.error
+    assert resumed.session_id == first.session_id
+
+
+@pytest.mark.parametrize("required", [False, "true", 1, None])
+def test_protocol_rejects_unsupported_key_requirement(zcode_config, required):
+    _, config = zcode_config
+    config["provider"]["test"]["options"]["apiKeyRequired"] = required
+    with pytest.raises(AOPError, match="apiKeyRequired"):
+        zcode.protocol_config(config, {})
 
 
 @pytest.mark.parametrize(

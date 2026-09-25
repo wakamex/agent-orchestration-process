@@ -179,6 +179,10 @@ def test_native_run_and_resume(
         "plugins": {"enabled": False},
         "features": {"mcp": False},
     }
+    if profile == "sealed" and not exercise_tools:
+        config["provider"]["test"]["options"].pop("apiKey")
+        config["provider"]["test"]["options"]["apiKeyRequired"] = True
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "local-test-key")
     (source / "cli/config.json").write_text(json.dumps(config))
     monkeypatch.setenv("AOP_ZCODE_SOURCE_HOME", str(source))
     monkeypatch.setenv("ZCODE_BASE_URL", base_url)

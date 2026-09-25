@@ -355,6 +355,10 @@ def protocol_config(
     definition = config["provider"][provider]
     options = definition.get("options", {})
     unsupported = set(options) - {"apiKey", "baseURL", "headers"}
+    # Native legacy import maps a required key to the api-key access below.
+    # No-authentication providers remain unsupported by this projection.
+    if options.get("apiKeyRequired") is True:
+        unsupported.discard("apiKeyRequired")
     if unsupported:
         raise AOPError(
             "Zcode app-server cannot project provider options: "

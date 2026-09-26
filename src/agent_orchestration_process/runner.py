@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterator, Protocol, Sequence
 import yaml
 from yaml.constructor import ConstructorError
 
-from . import zcode, zcode_protocol, prompt_transport
+from . import codex_auth, zcode, zcode_protocol, prompt_transport
 from .codex_routes import (
     inventory_document,
     projected_codex_config,
@@ -290,15 +290,86 @@ class CodexAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        _prepare_codex_environment(request, environment)
+        started_at = _now()
+        started = time.monotonic()
+        auth_source = None
+        access_token = None
+        source = _codex_source_home(environment)
+        binding = (
+            codex_auth.source_binding(source)
+            if request.inference_route is None
+            and not (
+                request.profile == "host"
+                and environment.get("CODEX_ACCESS_TOKEN")
+            )
+            else None
+        )
+        if request.parent_run_id:
+            parent = RunStore(run_dir.parent).load_request(request.parent_run_id)
+            expected = parent.effective_policy.get("codex_auth", {}).get(
+                "account_binding"
+            )
+            if expected is not None and expected != binding:
+                raise AOPError("Codex resume requires the original source account")
+            if binding and expected is None:
+                # Legacy runs recorded no binding. Check their original account,
+                # but never adopt access or refresh tokens from task state.
+                legacy_home = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "codex/home"
+                if codex_auth.source_binding(legacy_home) != binding:
+                    raise AOPError("Cannot establish the original Codex resume account")
+        if binding is not None:
+            assert source is not None
+            if source.is_relative_to(
+                Path(environment["AOP_PROVIDER_STATE_DIR"]).resolve()
+            ):
+                raise AOPError(
+                    "Codex credential source must be outside this task's writable provider state"
+                )
+            auth_source = codex_auth.CredentialSource(
+                self.binary, source, environment.copy(), binding
+            )
+            access_token = auth_source.read(
+                deadline=(
+                    started + request.timeout_seconds
+                    if request.timeout_seconds is not None
+                    else None
+                )
+            )
+            request.effective_policy["codex_auth"] = {
+                "mode": "native-source-refresh",
+                "account_binding": binding,
+                "task_credentials": "access-token-only",
+            }
+        _prepare_codex_environment(
+            request, environment, external_auth=auth_source is not None
+        )
+        if (
+            auth_source is None
+            and request.inference_route is None
+            and not (request.profile == "host" and environment.get("CODEX_ACCESS_TOKEN"))
+            and codex_auth.source_binding(Path(environment["CODEX_HOME"])) is not None
+        ):
+            raise AOPError(
+                "Codex task has copied OAuth credentials but no current source login; refusing private refresh"
+            )
+        if auth_source is not None:
+            archive = (
+                run_dir.parent.parent / "retired-credentials"
+                / request.run_id / "codex-auth.json"
+            )
+            if codex_auth.retire_task_copy(Path(environment["CODEX_HOME"]), archive):
+                request.effective_policy["codex_auth"]["retired_credential_copy"] = (
+                    os.fspath(archive)
+                )
+            _atomic_write(
+                run_dir / "request.json", json.dumps(request.to_dict(), indent=2) + "\n"
+            )
         command = _provider_command(
             [self.binary, "app-server", "--stdio"],
             request,
             worktree,
             environment,
         )
-        started_at = _now()
-        started = time.monotonic()
         protocol_cwd = (
             os.fspath(worktree.path) if request.profile == "host" else "/workspace"
         )
@@ -342,6 +413,8 @@ class CodexAdapter:
                     cwd=protocol_cwd,
                     writable_roots=codex_writable_roots,
                     started=started,
+                    auth_source=auth_source,
+                    access_token=access_token,
                 )
             except KeyboardInterrupt:
                 self._stop_process(process)
@@ -381,10 +454,10 @@ class CodexAdapter:
                 )
         if timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
-        elif event_error:
-            error = event_error
         elif protocol_error:
             error = protocol_error
+        elif event_error:
+            error = event_error
         elif exit_code != 0:
             error = stderr.strip() or f"Codex exited with status {exit_code}"
         elif resume_error:
@@ -399,7 +472,15 @@ class CodexAdapter:
         final_message = parsed["final_message"]
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
-        billing = self._billing_provenance(request, worktree.path, environment)
+        billing = (
+            BillingProvenance(
+                route="subscription",
+                credential_source="chatgpt-oauth",
+                detected_by="Codex source getAuthStatus",
+            )
+            if auth_source is not None
+            else self._billing_provenance(request, worktree.path, environment)
+        )
         accounting = _finalize_accounting(
             timed_out=timed_out,
             usage=usage,
@@ -481,6 +562,8 @@ class CodexAdapter:
         cwd: str,
         writable_roots: list[str],
         started: float,
+        auth_source: codex_auth.CredentialSource | None = None,
+        access_token: codex_auth.AccessToken | None = None,
     ) -> _ProcessCapture:
         assert process.stdin is not None
         assert process.stdout is not None
@@ -524,14 +607,25 @@ class CodexAdapter:
         timed_out = False
         interrupt_completed = False
         protocol_error = None
+        secret_values = [access_token.value] if access_token is not None else []
 
-        def send(method: str, request_id: int | None, params: dict[str, Any]) -> bool:
+        def send(
+            method: str,
+            request_id: int | None,
+            params: dict[str, Any],
+            *,
+            sensitive: bool = False,
+        ) -> bool:
             value: dict[str, Any] = {"method": method, "params": params}
             if request_id is not None:
                 value["id"] = request_id
             serialized = f"{json.dumps(value)}\n"
             with capture_lock:
-                stdout_parts.append(serialized)
+                stdout_parts.append(
+                    json.dumps({**value, "params": "<redacted>"}) + "\n"
+                    if sensitive
+                    else serialized
+                )
             try:
                 process.stdin.write(serialized)
                 process.stdin.flush()
@@ -540,7 +634,7 @@ class CodexAdapter:
             return True
 
         def receive(until: float | None) -> bool:
-            nonlocal thread_id, turn_id
+            nonlocal thread_id, turn_id, access_token, protocol_error
             timeout = None if until is None else max(until - time.monotonic(), 0)
             try:
                 line = lines.get(timeout=timeout)
@@ -555,6 +649,46 @@ class CodexAdapter:
             if not isinstance(value, dict):
                 return True
             response_id = value.get("id")
+            if (
+                value.get("method") == "account/chatgptAuthTokens/refresh"
+                and response_id is not None
+            ):
+                params = value.get("params", {})
+                try:
+                    if (
+                        auth_source is None
+                        or access_token is None
+                        or not isinstance(params, dict)
+                        or params.get("previousAccountId") != access_token.account
+                        or params.get("reason") != "unauthorized"
+                    ):
+                        raise AOPError(
+                            "Codex requested refresh for an unexpected account"
+                        )
+                    access_token = auth_source.read(
+                        previous=access_token, deadline=until
+                    )
+                    secret_values.append(access_token.value)
+                    response = {"id": response_id, "result": access_token.parameters()}
+                except AOPError as error:
+                    protocol_error = str(error)
+                    response = {
+                        "id": response_id,
+                        "error": {"code": -32000, "message": protocol_error},
+                    }
+                try:
+                    with capture_lock:
+                        stdout_parts.append(
+                            json.dumps(
+                                {"id": response_id, "result": "<redacted>"}
+                                if "result" in response else response
+                            ) + "\n"
+                        )
+                    process.stdin.write(json.dumps(response) + "\n")
+                    process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    return False
+                return protocol_error is None
             if isinstance(response_id, int):
                 responses[response_id] = value
                 result = value.get("result")
@@ -597,7 +731,7 @@ class CodexAdapter:
                     },
                     **(
                         {"capabilities": {"experimentalApi": True}}
-                        if request.no_web
+                        if request.no_web or auth_source is not None
                         else {}
                     ),
                 },
@@ -606,6 +740,24 @@ class CodexAdapter:
                 timed_out = deadline is not None and time.monotonic() >= deadline
             else:
                 send("initialized", None, {})
+                if access_token is not None:
+                    send(
+                        "account/login/start",
+                        5,
+                        {"type": "chatgptAuthTokens", **access_token.parameters()},
+                        sensitive=True,
+                    )
+                    accepted = wait_for(lambda: 5 in responses, deadline)
+                    login_result = responses.get(5, {}).get("result")
+                    if not (
+                        accepted
+                        and response_ok(5)
+                        and isinstance(login_result, dict)
+                        and login_result.get("type") == "chatgptAuthTokens"
+                    ):
+                        raise AOPError(
+                            "Codex did not accept source-managed access-token authentication"
+                        )
                 thread_params: dict[str, Any] = {
                     "cwd": cwd,
                     "approvalPolicy": "never",
@@ -677,6 +829,9 @@ class CodexAdapter:
                     lambda: turn_id in terminal_turn_ids,
                     time.monotonic() + self._SHUTDOWN_GRACE_SECONDS,
                 )
+        except AOPError as error:
+            protocol_error = str(error)
+            timed_out = deadline is not None and time.monotonic() >= deadline
         finally:
             try:
                 process.stdin.close()
@@ -693,9 +848,14 @@ class CodexAdapter:
             stdout_reader.join(timeout=self._SHUTDOWN_GRACE_SECONDS)
             stderr_reader.join(timeout=self._SHUTDOWN_GRACE_SECONDS)
 
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
+        for secret in secret_values:
+            stdout = stdout.replace(secret, "<redacted>")
+            stderr = stderr.replace(secret, "<redacted>")
         return _ProcessCapture(
-            stdout="".join(stdout_parts),
-            stderr="".join(stderr_parts),
+            stdout=stdout,
+            stderr=stderr,
             exit_code=process.returncode,
             timed_out=timed_out,
             duration_seconds=round(time.monotonic() - started, 6),
@@ -4271,7 +4431,7 @@ _DEVIN_DATA_RUNTIME_NAMES = {
 
 
 def _prepare_codex_environment(
-    request: RunRequest, environment: dict[str, str]
+    request: RunRequest, environment: dict[str, str], *, external_auth: bool = False
 ) -> None:
     source = _codex_source_home(environment)
     codex_root = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "codex"
@@ -4285,6 +4445,7 @@ def _prepare_codex_environment(
         destination,
         sealed=_sealed(environment) or request.no_web,
         custom_route=request.inference_route is not None,
+        external_auth=external_auth,
     )
     if request.inference_route is not None:
         assert request.model is not None
@@ -4505,6 +4666,7 @@ def _prepare_codex_state(
     *,
     sealed: bool = False,
     custom_route: bool = False,
+    external_auth: bool = False,
 ) -> None:
     if destination.is_dir():
         return
@@ -4514,6 +4676,10 @@ def _prepare_codex_state(
         if source:
             for entry in source.iterdir():
                 target = temporary / entry.name
+                if entry.name == ".aop-auth.lock" or (
+                    external_auth and entry.name == "auth.json"
+                ):
+                    continue
                 if sealed and entry.name != "auth.json":
                     continue
                 if custom_route and entry.is_file():

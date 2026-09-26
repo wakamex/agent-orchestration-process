@@ -195,7 +195,9 @@ def repository(tmp_path: Path) -> Path:
 def fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     source_home = tmp_path / "codex-home"
     source_home.mkdir()
-    source_home.joinpath("auth.json").write_text('{"auth_mode": "chatgpt"}\n')
+    source_home.joinpath("auth.json").write_text(
+        '{"auth_mode": "apikey", "OPENAI_API_KEY": "synthetic-key"}\n'
+    )
     source_home.joinpath("config.toml").write_text('model = "test"\n')
     source_home.joinpath("models_cache.json").write_text('{"models": []}\n')
     source_home.joinpath("history.jsonl").write_text("global history\n")

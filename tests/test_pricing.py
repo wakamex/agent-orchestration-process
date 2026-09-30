@@ -180,6 +180,7 @@ def test_harness_model_names_resolve_to_the_lab_price() -> None:
     assert estimate.amount_usd == 0.000375
     assert estimate.model == "gemini-3.5-flash-low"
     assert estimate.priced_as == "google/gemini-3.5-flash"
+    assert estimate.removed_suffix == "-low"
 
 
 def test_zai_flash_uses_the_sourced_correction() -> None:
@@ -326,4 +327,8 @@ def test_legacy_calculated_cost_records_still_load() -> None:
     loaded = CalculatedCost.from_dict(legacy)
 
     assert loaded is not None
-    assert loaded.to_dict() == {**legacy, "pricing_period": None}
+    assert loaded.to_dict() == {
+        **legacy,
+        "pricing_period": None,
+        "removed_suffix": None,
+    }

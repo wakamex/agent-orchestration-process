@@ -8,7 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .pricing import TokenUsage, CalculatedCost, estimate_api_cost, merge_periods
+from .pricing import (
+    TokenUsage,
+    CalculatedCost,
+    estimate_api_cost,
+    merge_periods,
+    merge_suffixes,
+)
 from .worktrees import AOPError
 
 
@@ -214,6 +220,7 @@ def calculate_cost(
         pricing_source=" ".join(sorted({cost.pricing_source for cost in costs})),
         long_context_pricing=any(cost.long_context_pricing for cost in costs),
         pricing_period=merge_periods(cost.pricing_period for cost in costs),
+        removed_suffix=merge_suffixes(cost.removed_suffix for cost in costs),
     )
 
 

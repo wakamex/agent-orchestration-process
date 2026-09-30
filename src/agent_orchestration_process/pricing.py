@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime, timedelta
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from importlib.metadata import version
 
 import llm_prices
@@ -67,6 +67,8 @@ class CalculatedCost:
     pricing_basis: str | None = None
     # "peak", "off_peak", or "mixed" under time-of-day pricing, else None.
     pricing_period: str | None = None
+    # Text llm-prices removed from the model name to find its price, such as "-max".
+    removed_suffix: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -93,8 +95,7 @@ def estimate_api_cost(
 
     `requests` lists each measured request's usage and, when the provider
     reported it, the time it was served, which must fall within the run. A
-    request without a time is priced only when the rates did not change between
-    `started_at` and `finished_at`.
+    request without a time is priced only when one price covered the whole run.
     """
     if model is None:
         return None
@@ -131,12 +132,18 @@ def estimate_api_cost(
         long_context_pricing=long_context,
         pricing_basis=llm_prices.pricing_basis(),
         pricing_period=merge_periods(rates.period for rates in found),
+        removed_suffix=merge_suffixes(rates.removed_suffix for rates in found),
     )
 
 
 def merge_periods(periods: Iterable[str | None]) -> str | None:
     distinct = set(periods)
     return distinct.pop() if len(distinct) == 1 else "mixed"
+
+
+def merge_suffixes(suffixes: Iterable[str | None]) -> str | None:
+    """Join the name suffixes llm-prices removed to find a price, if any."""
+    return " ".join(sorted(set(suffixes) - {"", None})) or None
 
 
 def _request_rates(
@@ -147,32 +154,13 @@ def _request_rates(
         if not _utc(started_at) <= _utc(at) <= _utc(finished_at):
             return None
         return llm_prices.rates(model, at=at, provider=provider)
-    # Rates change at price changes, which persist, and at the hour-aligned
-    # boundaries of time-of-day pricing, so sampling the run's endpoints and
-    # every hour boundary between them finds any change during the run.
-    distinct = {}
-    for moment in _hour_boundaries(started_at, finished_at):
-        rates = llm_prices.rates(model, at=moment, provider=provider)
-        if rates is None:
-            return None
-        # A new source for the same prices is not a price change.
-        distinct.setdefault(replace(rates, valid_from="", source=""), rates)
-    return next(iter(distinct.values())) if len(distinct) == 1 else None
+    spans = llm_prices.rates_between(model, started_at, finished_at, provider=provider)
+    # Without a request time, only one price covering the whole run applies.
+    return spans[0][1] if len(spans) == 1 else None
 
 
 def _utc(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(UTC)
-
-
-def _hour_boundaries(started_at: str, finished_at: str) -> list[datetime]:
-    start = _utc(started_at)
-    finish = max(_utc(finished_at), start)
-    moments = [start]
-    boundary = start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    while boundary < finish:
-        moments.append(boundary)
-        boundary += timedelta(hours=1)
-    return [*moments, finish]
 
 
 def _sum_usage(usages: Sequence[TokenUsage]) -> TokenUsage:

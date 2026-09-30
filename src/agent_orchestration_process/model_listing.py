@@ -25,7 +25,7 @@ from .codex_routes import (
 )
 from .model_catalog import ModelCatalog
 from .models import InferenceRoute
-from .pricing import pricing_metadata
+import llm_prices
 from .provider_versions import require_supported_agy
 from .worktrees import AOPError
 
@@ -63,7 +63,6 @@ class AvailableModel:
     cache_write_per_million_usd: float | None = None
     output_per_million_usd: float | None = None
     pricing_source: str | None = None
-    pricing_retrieved_at: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -822,36 +821,39 @@ def _record(
     inventory_sha256: str | None = None,
     authenticated: bool = False,
 ) -> AvailableModel:
-    metadata = (
-        pricing_metadata(catalog, provider, priced_model)
+    rates = (
+        llm_prices.rates(priced_model, provider=provider)
         if provider and priced_model
         else None
     )
-    cost = metadata.get("cost") if isinstance(metadata, dict) else None
-    provenance = metadata.get("aop_pricing", {}) if isinstance(metadata, dict) else {}
-    cost = cost if isinstance(cost, dict) else {}
+    if rates is None:
+        return AvailableModel(
+            agent=agent,
+            model=model,
+            name=name,
+            availability=availability,
+            price_scope="unknown",
+            inference_provider=inference_provider,
+            inventory_retrieved_at=inventory_retrieved_at,
+            inventory_sha256=inventory_sha256,
+            authenticated=authenticated,
+        )
+    period = rates.period.replace("_", "-") if rates.period else None
     return AvailableModel(
         agent=agent,
         model=model,
         name=name,
         availability=availability,
-        price_scope=(
-            "api-equivalent-peak" if provenance.get("basis") == "peak" else price_scope
-        )
-        if cost
-        else "unknown",
+        price_scope=f"{price_scope}-{period}" if period else price_scope,
         inference_provider=inference_provider,
         inventory_retrieved_at=inventory_retrieved_at,
         inventory_sha256=inventory_sha256,
         authenticated=authenticated,
-        input_per_million_usd=_number(cost.get("input")),
-        cached_input_per_million_usd=_number(cost.get("cache_read")),
-        cache_write_per_million_usd=_number(cost.get("cache_write")),
-        output_per_million_usd=_number(cost.get("output")),
-        pricing_source=provenance.get("source", catalog.source) if cost else None,
-        pricing_retrieved_at=provenance.get("verified_at", catalog.fetched_at)
-        if cost
-        else None,
+        input_per_million_usd=rates.input,
+        cached_input_per_million_usd=rates.cache_read,
+        cache_write_per_million_usd=rates.cache_write,
+        output_per_million_usd=rates.output,
+        pricing_source=rates.source,
     )
 
 
@@ -870,12 +872,6 @@ def _name(metadata: object, fallback: str) -> str:
     if isinstance(metadata, dict) and isinstance(metadata.get("name"), str):
         return metadata["name"]
     return fallback
-
-
-def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
 
 
 def _per_million(value: object) -> float | None:

@@ -481,6 +481,7 @@ class CodexAdapter:
             if auth_source is not None
             else self._billing_provenance(request, worktree.path, environment)
         )
+        finished_at = _now()
         accounting = _finalize_accounting(
             timed_out=timed_out,
             usage=usage,
@@ -488,8 +489,10 @@ class CodexAdapter:
             calculated_cost=estimate_api_cost(
                 effective_model,
                 usage,
-                providers=("zai",) if request.inference_route else ("openai",),
-                request_usages=parsed["request_usages"],
+                provider="zai" if request.inference_route else "openai",
+                started_at=started_at,
+                finished_at=finished_at,
+                requests=[(value, None) for value in parsed["request_usages"]],
             ),
         )
 
@@ -510,7 +513,7 @@ class CodexAdapter:
                 ),
             ),
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             duration_seconds=round(duration, 6),
             time_to_first_event_seconds=_rounded(first_event_seconds),
             time_to_first_response_seconds=_rounded(first_response_seconds),
@@ -1561,6 +1564,7 @@ class ZcodeAdapter:
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
         usage = parsed["usage"]
+        finished_at = _now()
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
@@ -1571,7 +1575,7 @@ class ZcodeAdapter:
             session_id=session_id,
             command=_recorded_command(command, secret_names=set(credential_names)),
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             duration_seconds=capture.duration_seconds,
             time_to_first_event_seconds=capture.first_event_seconds,
             time_to_first_response_seconds=capture.first_response_seconds,
@@ -1581,10 +1585,13 @@ class ZcodeAdapter:
             final_message=final_message,
             usage=usage,
             calculated_cost=(
-                zcode.calculate_cost(model, usage, parsed["requests"])
+                zcode.calculate_cost(
+                    model, usage, parsed["requests"], started_at, finished_at
+                )
                 if canonical_zai
                 and all(
-                    name.split("/", 1)[0] == provider for name, _ in parsed["requests"]
+                    name.split("/", 1)[0] == provider
+                    for name, _, _ in parsed["requests"]
                 )
                 else None
             ),
@@ -1828,11 +1835,18 @@ class GrokAdapter:
             if billing.route in {"metered-api", "provider-credits"}
             else None
         )
+        finished_at = _now()
         accounting = _finalize_accounting(
             timed_out=capture.timed_out,
             usage=usage,
             usage_observed=parsed["usage_observed"],
-            calculated_cost=estimate_api_cost(model, usage, providers=("xai",)),
+            calculated_cost=estimate_api_cost(
+                model,
+                usage,
+                provider="xai",
+                started_at=started_at,
+                finished_at=finished_at,
+            ),
             provider_reported_cost=reported_cost,
         )
         return RunResult(
@@ -1845,7 +1859,7 @@ class GrokAdapter:
             session_id=session_id,
             command=_recorded_command(command),
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             duration_seconds=capture.duration_seconds,
             time_to_first_event_seconds=capture.first_event_seconds,
             time_to_first_response_seconds=capture.first_response_seconds,
@@ -2616,7 +2630,10 @@ class OpenCodeAdapter:
             if billing.route in {"metered-api", "provider-credits"}
             else None
         )
-        calculated_cost = self._calculated_cost(request.model, usage)
+        finished_at = _now()
+        calculated_cost = self._calculated_cost(
+            request.model, usage, parsed["requests"], started_at, finished_at
+        )
         accounting = _finalize_accounting(
             timed_out=capture.timed_out,
             usage=usage,
@@ -2635,7 +2652,7 @@ class OpenCodeAdapter:
             session_id=session_id,
             command=_recorded_command(command),
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             duration_seconds=capture.duration_seconds,
             time_to_first_event_seconds=capture.first_event_seconds,
             time_to_first_response_seconds=capture.first_response_seconds,
@@ -2694,11 +2711,24 @@ class OpenCodeAdapter:
         )
 
     @staticmethod
-    def _calculated_cost(model: str | None, usage: TokenUsage) -> CalculatedCost | None:
+    def _calculated_cost(
+        model: str | None,
+        usage: TokenUsage,
+        requests: list[tuple[TokenUsage, str | None]],
+        started_at: str,
+        finished_at: str,
+    ) -> CalculatedCost | None:
         provider = model.partition("/")[0] if model else ""
         if provider in {"ollama", "lmstudio"}:
             return None
-        return estimate_api_cost(model, usage, providers=(provider,))
+        return estimate_api_cost(
+            model,
+            usage,
+            provider=None,
+            started_at=started_at,
+            finished_at=finished_at,
+            requests=requests,
+        )
 
     def _command(self, request: RunRequest, worktree: Worktree) -> list[str]:
         command = [
@@ -2744,6 +2774,7 @@ class OpenCodeAdapter:
         cached_input_tokens = 0
         output_tokens = 0
         reasoning_output_tokens = 0
+        requests = []
         cost_usd = 0.0
         has_reported_cost = False
         first_timestamp = None
@@ -2792,16 +2823,27 @@ class OpenCodeAdapter:
                     cache = cache if isinstance(cache, dict) else {}
                     cache_read = OpenCodeAdapter._integer(cache.get("read"))
                     cache_write = OpenCodeAdapter._integer(cache.get("write"))
-                    input_tokens += (
-                        OpenCodeAdapter._integer(tokens.get("input"))
-                        + cache_read
-                        + cache_write
-                    )
-                    cached_input_tokens += cache_read
-                    visible_output = OpenCodeAdapter._integer(tokens.get("output"))
                     reasoning_output = OpenCodeAdapter._integer(tokens.get("reasoning"))
-                    output_tokens += visible_output + reasoning_output
-                    reasoning_output_tokens += reasoning_output
+                    step_usage = TokenUsage(
+                        input_tokens=OpenCodeAdapter._integer(tokens.get("input"))
+                        + cache_read
+                        + cache_write,
+                        cached_input_tokens=cache_read,
+                        output_tokens=OpenCodeAdapter._integer(tokens.get("output"))
+                        + reasoning_output,
+                        reasoning_output_tokens=reasoning_output,
+                    )
+                    input_tokens += step_usage.input_tokens
+                    cached_input_tokens += step_usage.cached_input_tokens
+                    output_tokens += step_usage.output_tokens
+                    reasoning_output_tokens += step_usage.reasoning_output_tokens
+                    finished = (
+                        datetime.fromtimestamp(timestamp / 1000, UTC).isoformat()
+                        if isinstance(timestamp, (int, float))
+                        and not isinstance(timestamp, bool)
+                        else None
+                    )
+                    requests.append((step_usage, finished))
                 amount = part.get("cost")
                 if isinstance(amount, (int, float)) and not isinstance(amount, bool):
                     cost_usd += max(float(amount), 0.0)
@@ -2830,6 +2872,7 @@ class OpenCodeAdapter:
             "status": status,
             "has_finish": has_finish,
             "usage": usage,
+            "requests": requests,
             "reported_cost": reported_cost,
             "duration_seconds": duration_seconds,
             "usage_observed": usage_observed,
@@ -2934,6 +2977,7 @@ class AgyAdapter:
             error = None
         model = parsed["model"] or request.model
         usage = parsed["usage"]
+        finished_at = _now()
         accounting = _finalize_accounting(
             timed_out=capture.timed_out,
             usage=usage,
@@ -2941,8 +2985,9 @@ class AgyAdapter:
             calculated_cost=estimate_api_cost(
                 model,
                 usage,
-                providers=("google",),
-                catalog_model=_agy_catalog_model(model),
+                provider="google",
+                started_at=started_at,
+                finished_at=finished_at,
             ),
         )
         return RunResult(
@@ -2955,7 +3000,7 @@ class AgyAdapter:
             session_id=session_id,
             command=_recorded_command(command),
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             duration_seconds=capture.duration_seconds,
             time_to_first_event_seconds=capture.first_event_seconds,
             time_to_first_response_seconds=capture.first_response_seconds,
@@ -3103,15 +3148,6 @@ class AgyAdapter:
         }
 
 
-def _agy_catalog_model(model: str | None) -> str | None:
-    if model is None:
-        return None
-    for suffix in ("-low", "-medium", "-high"):
-        if model.endswith(suffix):
-            return model.removesuffix(suffix)
-    return model
-
-
 @dataclass(frozen=True)
 class _HermesSession:
     model: str | None
@@ -3183,8 +3219,14 @@ class HermesAdapter:
             _atomic_write(run_dir / "last-message.txt", final_message)
         baseline = before if request.session_id == session_id else None
         usage = self._usage_delta(baseline, after)
+        finished_at = _now()
         calculated_cost, reported_cost = self._cost_delta(
-            baseline, after, request.model, usage
+            baseline,
+            after,
+            request.model,
+            usage,
+            started_at=started_at,
+            finished_at=finished_at,
         )
         billing = self._billing_provenance(after)
         if billing.route not in {"metered-api", "provider-credits"}:
@@ -3220,7 +3262,7 @@ class HermesAdapter:
             session_id=session_id,
             command=_recorded_command(command),
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             duration_seconds=capture.duration_seconds,
             time_to_first_event_seconds=capture.first_event_seconds,
             time_to_first_response_seconds=capture.first_response_seconds,
@@ -3447,6 +3489,9 @@ class HermesAdapter:
         after: _HermesSession | None,
         requested_model: str | None,
         usage: TokenUsage,
+        *,
+        started_at: str,
+        finished_at: str,
     ) -> tuple[CalculatedCost | None, ProviderReportedCost | None]:
         if after is None:
             return None, None
@@ -3455,7 +3500,16 @@ class HermesAdapter:
         if after.cost_source == "none":
             if provider is None or usage.total_tokens == 0:
                 return None, None
-            return estimate_api_cost(model, usage, providers=(provider,)), None
+            return (
+                estimate_api_cost(
+                    model,
+                    usage,
+                    provider=provider,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                ),
+                None,
+            )
         if after.cost_usd is None:
             return None, None
         previous = before.cost_usd if before and before.cost_usd is not None else 0.0
@@ -3475,7 +3529,13 @@ class HermesAdapter:
                 None,
             )
         calculated = (
-            estimate_api_cost(model, usage, providers=(provider,))
+            estimate_api_cost(
+                model,
+                usage,
+                provider=provider,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
             if provider is not None
             else None
         )
@@ -3635,12 +3695,13 @@ class DeepSeekHarnessAdapter:
             error = None
         model = parsed["model"] or request.model
         usage = parsed["usage"]
+        finished_at = _now()
         accounting = _finalize_accounting(
             timed_out=capture.timed_out,
             usage=usage,
             usage_observed=parsed["usage_observed"],
             calculated_cost=(
-                self._estimate_cost(request, model, usage)
+                self._estimate_cost(request, model, usage, started_at, finished_at)
                 if parsed["usage_observed"]
                 else None
             ),
@@ -3665,7 +3726,7 @@ class DeepSeekHarnessAdapter:
                 secret_names={environment.get("AOP_DSH_CREDENTIAL_REF", "")},
             ),
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             duration_seconds=capture.duration_seconds,
             time_to_first_event_seconds=capture.first_event_seconds,
             time_to_first_response_seconds=capture.first_response_seconds,
@@ -3690,7 +3751,11 @@ class DeepSeekHarnessAdapter:
 
     @staticmethod
     def _estimate_cost(
-        request: RunRequest, model: str | None, usage: TokenUsage
+        request: RunRequest,
+        model: str | None,
+        usage: TokenUsage,
+        started_at: str,
+        finished_at: str,
     ) -> CalculatedCost | None:
         provider = request.inference_provider or "deepseek-official"
         catalog_provider = {
@@ -3706,7 +3771,9 @@ class DeepSeekHarnessAdapter:
         return estimate_api_cost(
             model,
             usage,
-            providers=(catalog_provider,),
+            provider=catalog_provider,
+            started_at=started_at,
+            finished_at=finished_at,
         )
 
     @staticmethod

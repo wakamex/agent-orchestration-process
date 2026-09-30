@@ -356,7 +356,7 @@ def test_codex_route_run_projects_one_credential_and_resume_keeps_snapshot(
     assert first.billing.route == "subscription"
     assert first.billing.credential_source == "ZAI_API_KEY"
     assert first.calculated_cost is not None
-    assert first.calculated_cost.priced_as == "glm-5.3-flash"
+    assert first.calculated_cost.priced_as == "zai/glm-5.3-flash"
     persisted = "\n".join(
         path.read_text() for path in (manager.state_dir / "runs").glob("*/request.json")
     )

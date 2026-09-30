@@ -27,8 +27,13 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dependencies = [
+    "llm-prices>=0.1.0",
     "pyyaml>=6.0.2",
 ]
+
+# Local checkout until llm-prices is published; builds use --no-sources.
+[tool.uv.sources]
+llm-prices = { path = "../llm-prices", editable = true }
 
 [project.urls]
 Homepage = "https://github.com/wakamex/agent-orchestration-process"

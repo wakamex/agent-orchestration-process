@@ -8,8 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .pricing import TokenUsage, CalculatedCost, estimate_api_cost
-from .model_catalog import ensure_catalog_fresh
+from .pricing import TokenUsage, CalculatedCost, estimate_api_cost, merge_periods
 from .worktrees import AOPError
 
 
@@ -181,18 +180,29 @@ def sum_usage(usages: list[TokenUsage]) -> TokenUsage:
 
 
 def calculate_cost(
-    model: str, usage: TokenUsage | None, requests: list[tuple[str, TokenUsage]]
+    model: str,
+    usage: TokenUsage | None,
+    requests: list[tuple[str, TokenUsage, str | None]],
+    started_at: str,
+    finished_at: str,
 ) -> CalculatedCost | None:
+    """Price each measured request at the time Zcode reports it completed."""
     if (
         usage is None
         or not requests
-        or sum_usage([value for _, value in requests]) != usage
+        or sum_usage([value for _, value, _ in requests]) != usage
     ):
         return None
-    catalog = ensure_catalog_fresh()
     costs = [
-        estimate_api_cost(name, value, catalog, providers=("zai",))
-        for name, value in requests
+        estimate_api_cost(
+            name,
+            value,
+            provider="zai",
+            started_at=started_at,
+            finished_at=finished_at,
+            requests=[(value, at)],
+        )
+        for name, value, at in requests
     ]
     if any(cost is None for cost in costs):
         return None
@@ -201,7 +211,9 @@ def calculate_cost(
         model=model,
         amount_usd=round(sum(cost.amount_usd for cost in costs), 8),
         priced_as=" + ".join(sorted({cost.priced_as for cost in costs})),
+        pricing_source=" ".join(sorted({cost.pricing_source for cost in costs})),
         long_context_pricing=any(cost.long_context_pricing for cost in costs),
+        pricing_period=merge_periods(cost.pricing_period for cost in costs),
     )
 
 
@@ -266,9 +278,13 @@ def parse_stream(stdout: str) -> dict[str, Any]:
                         raise ValueError("Zcode usage is missing its model identity")
                     key = (event.get("turnId"), request_id, payload.get("attempt", 1))
                     measurement = (f"{ref['providerId']}/{ref['modelId']}", measured)
-                    if key in requests and requests[key] != measurement:
+                    if key in requests and requests[key][:2] != measurement:
                         raise ValueError("Zcode reported conflicting request usage")
-                    requests[key] = measurement
+                    completed_at = payload.get("timestamp")
+                    requests[key] = (
+                        *measurement,
+                        completed_at if isinstance(completed_at, str) else None,
+                    )
             except (ValueError, TypeError) as failure:
                 error = str(failure)
         if event.get("type") == "turn.failed":
@@ -324,7 +340,7 @@ def parse_stream(stdout: str) -> dict[str, Any]:
         except ValueError as failure:
             error = error or str(failure)
     if usage is None and requests:
-        usage = sum_usage([value for _, value in requests.values()])
+        usage = sum_usage([value for _, value, _ in requests.values()])
     accounting_status = (
         "unavailable"
         if usage is None

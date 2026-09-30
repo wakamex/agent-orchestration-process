@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Strict subset of the Zcode 0.16.9 stdio contract used by the adapter."""
 import argparse
+import datetime
 import json
 import os
 import pathlib
@@ -75,7 +76,8 @@ for line in sys.stdin:
                 session = 'sess_wrong'
             event('turn.started', {})
             usage = {'inputTokens':120,'cacheReadTokens':30,'outputTokens':20,'reasoningTokens':7}
-            event('session.updated', {'type':'model_request_completed', 'requestId':'request-one','providerId':provider,'modelId':model,'usage':usage})
+            completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+            event('session.updated', {'type':'model_request_completed', 'requestId':'request-one','providerId':provider,'modelId':model,'usage':usage,'timestamp':completed_at})
             event('turn.completed', {'inputId':params['commandId'], 'resultType':'success','response':'answer:'+prompt,'usage':{'source':'provider', **usage}})
     elif method == 'session/resume':
         assert set(params) == {'sessionId', 'mcpServers'}

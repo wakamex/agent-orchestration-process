@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import llm_prices
 import pytest
+from conftest import api_cost
 
 from agent_orchestration_process import zcode
 from agent_orchestration_process.model_listing import AGENTS, list_models
@@ -205,11 +207,12 @@ def test_authenticated_zai_inventory(zcode_config, fake_zcode, monkeypatch):
     assert flash.inventory_sha256 == "inventory-sha256"
     assert flash.inference_provider == "zai-coding-plan"
     assert flash.price_scope == "api-equivalent"
-    assert flash.input_per_million_usd == 0.5
-    assert flash.cached_input_per_million_usd == 0.1
-    assert flash.output_per_million_usd == 3
-    assert flash.cache_write_per_million_usd is None
-    assert flash.pricing_source == ensure_catalog_fresh().source
+    rates = llm_prices.rates("glm-5.3-flash", provider="zai")
+    assert flash.input_per_million_usd == rates.input
+    assert flash.cached_input_per_million_usd == rates.cache_read
+    assert flash.output_per_million_usd == rates.output
+    assert flash.cache_write_per_million_usd == rates.cache_write
+    assert flash.pricing_source == rates.source
     assert models["test/test-model"].price_scope == "unknown"
     assert models["test/test-model"].input_per_million_usd is None
     assert models["other/other-model"].availability == "configured"
@@ -278,8 +281,9 @@ def test_configured_zai_models_use_catalog_without_credentials(
     assert flash.availability == "configured"
     assert not flash.authenticated
     assert flash.price_scope == "api-equivalent"
-    assert flash.input_per_million_usd == 0.5
-    assert flash.output_per_million_usd == 3
+    rates = llm_prices.rates("glm-5.3-flash", provider="zai")
+    assert flash.input_per_million_usd == rates.input
+    assert flash.output_per_million_usd == rates.output
     assert models["other/other-model"].price_scope == "unavailable"
 
 
@@ -397,7 +401,7 @@ def test_run_retains_partial_usage_and_cost(
     assert not result.succeeded
     assert result.accounting_status == "partial"
     assert result.usage.input_tokens == 120
-    assert result.calculated_cost.amount_usd == 0.000108
+    assert result.calculated_cost.amount_usd == flash_cost(result.started_at)
     assert result.billing.route == "subscription"
     assert result.billing.credential_source == "native-config"
     assert result.inference_provider == "zai-coding-plan"
@@ -417,44 +421,57 @@ def test_successful_run_cost_and_billing(repository, zcode_config, fake_zcode):
     resumed = runner.resume(run_id=first.run_id, prompt="second")
     for result in (first, resumed):
         assert result.succeeded, result.error
-        assert result.calculated_cost.amount_usd == 0.000108
-        assert result.calculated_cost.pricing_source == ensure_catalog_fresh().source
+        assert result.calculated_cost.amount_usd == flash_cost(result.started_at)
+        assert result.calculated_cost.priced_as == "zai/glm-5.3-flash"
         assert result.inference_provider == "zai-coding-plan"
         assert result.billing.route == "subscription"
         assert result.accounting_status == "complete"
 
 
-def test_mixed_model_cost_and_missing_prices():
-    from dataclasses import replace
-    from agent_orchestration_process.pricing import TokenUsage
-    from agent_orchestration_process.model_catalog import ModelCatalog
-    from unittest.mock import patch
+def flash_cost(at):
+    return api_cost(
+        "glm-5.3-flash",
+        at,
+        input_tokens=120,
+        cached_input_tokens=30,
+        output_tokens=20,
+        provider="zai",
+    )
 
-    catalog = ensure_catalog_fresh()
-    providers = {
-        **catalog.providers,
-        "zai": {
-            "models": {
-                "fast": {"cost": {"input": 1, "cache_read": 0.1, "output": 2}},
-                "lite": {"cost": {"input": 0.1, "cache_read": 0.01, "output": 0.2}},
-            }
-        },
-    }
-    assert isinstance(catalog, ModelCatalog)
+
+def test_mixed_model_cost_is_priced_per_request_time():
+    from agent_orchestration_process.pricing import TokenUsage
+
+    at = "2026-09-12T00:00:00+00:00"
+    usage = TokenUsage(1000, 100, 100)
     requests = [
-        ("zai/fast", TokenUsage(1000, 100, 100)),
-        ("zai/lite", TokenUsage(1000, 100, 100)),
+        ("zai/glm-5.3", usage, "2026-09-12T00:00:00Z"),
+        ("zai/glm-5.3-flash", usage, "2026-09-12T00:01:00Z"),
     ]
-    total = zcode.sum_usage([usage for _, usage in requests])
-    with patch.object(
-        zcode,
-        "ensure_catalog_fresh",
-        return_value=replace(catalog, providers=providers),
-    ):
-        cost = zcode.calculate_cost("zai/fast", total, requests)
-        assert cost.amount_usd == 0.001221
-        assert zcode.calculate_cost("zai/fast", total, requests[:1]) is None
-        assert zcode.calculate_cost("zai/fast", total, [("zai/missing", total)]) is None
+    total = zcode.sum_usage([usage for _, usage, _ in requests])
+    finish = "2026-09-12T00:05:00+00:00"
+    cost = zcode.calculate_cost("zai/glm-5.3", total, requests, at, finish)
+    assert cost.amount_usd == round(
+        sum(
+            api_cost(
+                name,
+                request_at,
+                input_tokens=1000,
+                cached_input_tokens=100,
+                output_tokens=100,
+                provider="zai",
+            )
+            for name, _, request_at in requests
+        ),
+        8,
+    )
+    assert cost.priced_as == "zai/glm-5.3 + zai/glm-5.3-flash"
+    assert zcode.calculate_cost("zai/glm-5.3", total, requests[:1], at, finish) is None
+    missing = [("zai/missing", total, None)]
+    assert zcode.calculate_cost("zai/glm-5.3", total, missing, at, finish) is None
+    # A request reported outside the run has an untrustworthy time.
+    late = [("zai/glm-5.3", usage, "2026-09-12T01:00:00Z")]
+    assert zcode.calculate_cost("zai/glm-5.3", usage, late, at, finish) is None
 
 
 @pytest.mark.parametrize("filename", ["zcode.json", ".zcode/config.json"])

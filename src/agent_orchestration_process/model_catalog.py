@@ -1,4 +1,4 @@
-"""Fresh, machine-readable model metadata and prices."""
+"""Fresh models.dev metadata for model inventories and display names."""
 
 from __future__ import annotations
 

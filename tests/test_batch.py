@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
+from conftest import api_cost
 
 from agent_orchestration_process.batch import BatchRunner, load_manifest
 from agent_orchestration_process.cli import main
@@ -98,7 +99,9 @@ prompt = "four"
     assert result.tasks[0].input_tokens == 1
     assert result.tasks[0].output_tokens == 1
     assert result.tasks[0].accounting_status == "complete"
-    assert result.tasks[0].calculated_cost_usd == 0.000035
+    assert result.tasks[0].calculated_cost_usd == api_cost(
+        "gpt-5.6-sol", input_tokens=1, output_tokens=1, provider="openai"
+    )
     assert result.tasks[0].provider_reported_cost_usd is None
     assert result.tasks[0].billing_route == "subscription"
     assert {item.task for item in manager.list()} == {"alpha", "beta", "gamma", "delta"}

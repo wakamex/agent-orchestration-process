@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+import llm_prices
 import pytest
 
 
@@ -167,6 +168,28 @@ def fresh_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     )
     monkeypatch.setenv("AOP_MODEL_CATALOG_CACHE", os.fspath(path))
     return path
+
+
+def api_cost(
+    model: str,
+    at: str | None = None,
+    *,
+    input_tokens: int = 0,
+    cached_input_tokens: int = 0,
+    output_tokens: int = 0,
+    provider: str | None = None,
+) -> float:
+    """Expected calculated cost for one request, from llm-prices directly."""
+    amount = llm_prices.cost(
+        model,
+        provider=provider,
+        input_tokens=input_tokens - cached_input_tokens,
+        cache_read_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+        at=at,
+    )
+    assert amount is not None
+    return round(amount, 8)
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -1054,20 +1077,20 @@ if prompt == "CHECK_OPENCODE_SANDBOX":
 
 print(json.dumps({{
     "type": "step_start",
-    "timestamp": 1000,
+    "timestamp": int(time.time() * 1000),
     "sessionID": session_id,
     "part": {{"type": "step-start"}},
 }}), flush=True)
 if prompt in {{"OPENCODE_TOOL_LOOP", "OPENCODE_PARTIAL_TIMEOUT"}}:
     print(json.dumps({{
         "type": "text",
-        "timestamp": 1100,
+        "timestamp": int(time.time() * 1000),
         "sessionID": session_id,
         "part": {{"type": "text", "text": "intermediate"}},
     }}), flush=True)
     print(json.dumps({{
         "type": "step_finish",
-        "timestamp": 1200,
+        "timestamp": int(time.time() * 1000),
         "sessionID": session_id,
         "part": {{
             "type": "step-finish",
@@ -1086,27 +1109,27 @@ if prompt in {{"OPENCODE_TOOL_LOOP", "OPENCODE_PARTIAL_TIMEOUT"}}:
         time.sleep(10)
     print(json.dumps({{
         "type": "step_start",
-        "timestamp": 1300,
+        "timestamp": int(time.time() * 1000),
         "sessionID": session_id,
         "part": {{"type": "step-start"}},
     }}), flush=True)
 if prompt in {{"OPENCODE_ERROR", "OPENCODE_ERROR_WITH_RESPONSE"}}:
     print(json.dumps({{
         "type": "error",
-        "timestamp": 1200,
+        "timestamp": int(time.time() * 1000),
         "sessionID": session_id,
         "error": {{"name": "ProviderError", "data": {{"message": "synthetic failure"}}}},
     }}), flush=True)
 if prompt != "OPENCODE_ERROR":
     print(json.dumps({{
         "type": "text",
-        "timestamp": 1400,
+        "timestamp": int(time.time() * 1000),
         "sessionID": session_id,
         "part": {{"type": "text", "text": f"answer:{{prompt}}"}},
     }}), flush=True)
     print(json.dumps({{
         "type": "step_finish",
-        "timestamp": 1500,
+        "timestamp": int(time.time() * 1000),
         "sessionID": session_id,
         "part": {{
             "type": "step-finish",

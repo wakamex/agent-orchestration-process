@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 
+import llm_prices
 import pytest
 
 from agent_orchestration_process import cli, model_catalog, model_listing
@@ -87,14 +88,6 @@ def test_non_dispatch_cli_commands_skip_the_catalog_preflight(
 def test_native_model_parsers_and_pricing(
     fresh_model_catalog: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from types import SimpleNamespace
-    from agent_orchestration_process import pricing
-
-    monkeypatch.setattr(
-        pricing,
-        "time",
-        SimpleNamespace(time=lambda: pricing.DEEPSEEK_PRICE_VERIFIED_AT),
-    )
     catalog = ensure_catalog_fresh()
     commands = []
     monkeypatch.setattr(model_listing, "_require_binary", lambda binary: None)
@@ -178,9 +171,10 @@ def test_native_model_parsers_and_pricing(
     grok = model_listing.list_models("grok", catalog)
     dsh = model_listing.list_models("dsh", catalog)
 
-    assert codex.input_per_million_usd == 5
+    sol = llm_prices.rates("gpt-5.6-sol", provider="openai")
+    assert codex.input_per_million_usd == sol.input
     assert codex.price_scope == "api-equivalent"
-    assert cursor.input_per_million_usd == 5
+    assert cursor.input_per_million_usd == sol.input
     assert agy.availability == "account"
     assert ["agy", "--output-format", "json", "models"] in commands
     assert devin[0].model == "swe-1-7"
@@ -192,17 +186,23 @@ def test_native_model_parsers_and_pricing(
     assert opencode.availability == "account"
     assert [item.model for item in grok] == ["grok-build", "grok-4.5"]
     assert grok[0].price_scope == "unknown"
-    assert grok[1].input_per_million_usd == 2
-    assert grok[1].output_per_million_usd == 6
+    grok_rates = llm_prices.rates("grok-4.5", provider="xai")
+    assert grok[1].input_per_million_usd == grok_rates.input
+    assert grok[1].output_per_million_usd == grok_rates.output
     assert [item.model for item in dsh] == [
         "deepseek-flash",
         "deepseek-v4-flash",
         "deepseek-v4-pro",
     ]
     assert dsh[0].availability == "installed-default"
-    assert dsh[0].input_per_million_usd == 0.3
-    assert dsh[0].price_scope == "api-equivalent-peak"
-    assert dsh[1].input_per_million_usd == 0.3
+    flash = llm_prices.rates("deepseek-flash", provider="deepseek")
+    assert dsh[0].input_per_million_usd == flash.input
+    assert dsh[0].price_scope == (
+        f"api-equivalent-{flash.period.replace('_', '-')}"
+    )
+    assert dsh[1].input_per_million_usd == (
+        llm_prices.rates("deepseek-v4-flash", provider="deepseek").input
+    )
 
 
 def test_agy_model_inventory_rejects_an_invalid_structured_response(
@@ -282,7 +282,9 @@ def test_codex_provider_inventory_reports_route_and_authenticated_snapshot(
     assert model["inference_provider"] == "zai-coding-plan"
     assert model["authenticated"] is True
     assert model["inventory_sha256"] == "b" * 64
-    assert model["input_per_million_usd"] == 0.5
+    assert model["input_per_million_usd"] == (
+        llm_prices.rates("glm-5.3-flash", provider="zai").input
+    )
 
 
 def test_hermes_uses_live_provider_prices(

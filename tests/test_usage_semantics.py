@@ -288,6 +288,32 @@ def test_opencode_retained_step_adds_cache_to_input_and_reasoning_to_output() ->
     assert _usage_tuple(usage) == (25_389, 18_891, 5_171, 11)
 
 
+def test_opencode_steps_are_separate_timed_requests() -> None:
+    def step(timestamp: int, tokens: dict[str, object]) -> str:
+        return json.dumps(
+            {
+                "type": "step_finish",
+                "timestamp": timestamp,
+                "sessionID": "session",
+                "part": {"type": "step-finish", "tokens": tokens},
+            }
+        )
+
+    first = {"input": 1, "output": 2, "reasoning": 1, "cache": {"read": 3, "write": 4}}
+    second = {"input": 40, "output": 5, "reasoning": 1, "cache": {"read": 7}}
+    parsed = OpenCodeAdapter._parse(
+        "\n".join([step(1_789_000_000_000, first), step(1_789_000_000_500, second)]),
+        "model",
+    )
+
+    assert parsed["requests"] == [
+        (TokenUsage(8, 3, 3, 1), "2026-09-10T00:26:40+00:00"),
+        (TokenUsage(47, 7, 6, 1), "2026-09-10T00:26:40.500000+00:00"),
+    ]
+    assert parsed["usage"] == TokenUsage(55, 10, 9, 2)
+    assert parsed["duration_seconds"] == 0.5
+
+
 def test_grok_terminal_usage_has_total_output_and_disjoint_input_cache() -> None:
     event = {
         "type": "end",

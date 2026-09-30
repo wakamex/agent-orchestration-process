@@ -11,7 +11,9 @@ import subprocess
 import time
 from pathlib import Path
 
+import llm_prices
 import pytest
+from conftest import api_cost
 
 from agent_orchestration_process import __version__
 from agent_orchestration_process.cli import build_parser, main
@@ -611,8 +613,11 @@ def test_run_persists_structured_codex_artifacts(
     assert result.usage.input_tokens == 1
     assert result.usage.output_tokens == 1
     assert result.usage.reasoning_output_tokens == 0
+    expected_cost = api_cost(
+        "gpt-5.6-sol", result.started_at, input_tokens=1, output_tokens=1
+    )
     assert result.calculated_cost is not None
-    assert result.calculated_cost.amount_usd == 0.000035
+    assert result.calculated_cost.amount_usd == expected_cost
     assert result.provider_reported_cost is None
     assert result.billing.route == "subscription"
     assert result.billing.credential_source == "chatgpt-oauth"
@@ -648,8 +653,8 @@ def test_run_persists_structured_codex_artifacts(
         "credential_source": "chatgpt-oauth",
         "detected_by": "codex login status",
     }
-    assert persisted_result["calculated_cost"]["pricing_version"].startswith(
-        "models-dev-"
+    assert persisted_result["calculated_cost"]["pricing_basis"] == (
+        llm_prices.pricing_basis()
     )
     assert persisted_result["provider_reported_cost"] is None
 
@@ -664,7 +669,7 @@ def test_run_persists_structured_codex_artifacts(
     }
     loaded_legacy = RunResult.from_dict(legacy_result)
     assert loaded_legacy.calculated_cost is not None
-    assert loaded_legacy.calculated_cost.amount_usd == 0.000035
+    assert loaded_legacy.calculated_cost.amount_usd == expected_cost
     assert loaded_legacy.provider_reported_cost is None
     legacy_result["read_paths"] = legacy_result.pop("inputs")
     loaded_read_paths = RunResult.from_dict(legacy_result)
@@ -1241,7 +1246,13 @@ def test_timeout_terminates_process_and_records_result(
     assert result.usage.output_tokens == 2
     assert result.usage.reasoning_output_tokens == 1
     assert result.calculated_cost is not None
-    assert result.calculated_cost.amount_usd == 0.000092
+    assert result.calculated_cost.amount_usd == api_cost(
+        "gpt-5.6-sol",
+        result.started_at,
+        input_tokens=10,
+        cached_input_tokens=4,
+        output_tokens=2,
+    )
     assert result.provider_status == "interrupted"
     assert result.provider_reported_cost is None
     result_path = repository / ".aop" / "runs" / result.run_id / "result.json"

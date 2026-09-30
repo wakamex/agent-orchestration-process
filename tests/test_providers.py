@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from conftest import api_cost
 
 from agent_orchestration_process import runner as runner_module
 from agent_orchestration_process.pricing import TokenUsage
@@ -50,7 +51,14 @@ def test_dsh_run_and_exact_resume_use_the_native_patch_interface(
     assert first.usage.output_tokens == 20
     assert first.usage.reasoning_output_tokens == 7
     assert first.calculated_cost is not None
-    assert first.calculated_cost.amount_usd == 0.0001038
+    assert first.calculated_cost.amount_usd == api_cost(
+        "deepseek-v4-pro",
+        first.started_at,
+        input_tokens=120,
+        cached_input_tokens=30,
+        output_tokens=20,
+        provider="deepseek",
+    )
     assert first.provider_reported_cost is None
     assert first.billing.route == "metered-api"
     assert first.billing.credential_source == "deepseek-api-key"
@@ -811,7 +819,17 @@ def test_opencode_defaults_to_zen_model_and_resumes_exact_session(
     assert first.usage.cached_input_tokens == 10
     assert first.usage.output_tokens == 7
     assert first.usage.reasoning_output_tokens == 2
-    assert first.provider_duration_seconds == 0.5
+    assert first.provider_duration_seconds is not None
+    assert first.calculated_cost is not None
+    assert first.calculated_cost.priced_as == "deepseek/deepseek-v4-flash"
+    assert first.calculated_cost.amount_usd == api_cost(
+        "deepseek-v4-flash",
+        first.started_at,
+        input_tokens=53,
+        cached_input_tokens=10,
+        output_tokens=7,
+        provider="deepseek",
+    )
     assert first.provider_reported_cost is not None
     assert first.provider_reported_cost.amount_usd == 0.00012345
     assert first.provider_reported_cost.source == "OpenCode step_finish events"
@@ -1070,7 +1088,7 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     assert first.calculated_cost is not None
     assert first.calculated_cost.amount_usd == 0.0003345
     assert first.calculated_cost.model == "gemini-3.5-flash"
-    assert first.calculated_cost.priced_as == "gemini-3.5-flash"
+    assert first.calculated_cost.priced_as == "google/gemini-3.5-flash"
     assert first.billing.route == "subscription"
     assert first.billing.credential_source == "google-oauth"
     events_path = manager.state_dir / "runs" / first.run_id / "events.jsonl"
@@ -1965,7 +1983,10 @@ def test_hermes_does_not_return_a_stale_message_when_resume_adds_no_answer() -> 
     assert HermesAdapter._final_message(previous, unchanged) is None
 
 
-def test_hermes_unknown_session_cost_uses_catalog_api_equivalent() -> None:
+AT = "2026-09-01T12:00:00+00:00"
+
+
+def test_hermes_unknown_session_cost_uses_api_equivalent_rates() -> None:
     session = _HermesSession(
         model="grok-4.5",
         billing_provider="xai-oauth",
@@ -1983,11 +2004,13 @@ def test_hermes_unknown_session_cost_uses_catalog_api_equivalent() -> None:
         output_tokens=1_000,
     )
 
-    cost, reported_cost = HermesAdapter._cost_delta(None, session, "grok-4.5", usage)
+    cost, reported_cost = HermesAdapter._cost_delta(
+        None, session, "grok-4.5", usage, started_at=AT, finished_at=AT
+    )
 
     assert cost is not None
     assert cost.amount_usd == 0.00915
-    assert cost.pricing_source == "https://models.dev/api.json"
+    assert cost.priced_as == "xai/grok-4.5"
     assert reported_cost is None
 
 
@@ -2004,10 +2027,9 @@ def test_hermes_unknown_session_cost_with_no_usage_remains_unknown() -> None:
         pricing_version="hermes-cli-reported",
     )
 
-    assert HermesAdapter._cost_delta(None, session, "grok-4.5", TokenUsage()) == (
-        None,
-        None,
-    )
+    assert HermesAdapter._cost_delta(
+        None, session, "grok-4.5", TokenUsage(), started_at=AT, finished_at=AT
+    ) == (None, None)
 
 
 def test_hermes_separates_calculated_cost_from_provider_reported_cost() -> None:
@@ -2028,7 +2050,9 @@ def test_hermes_separates_calculated_cost_from_provider_reported_cost() -> None:
         output_tokens=1_000,
     )
 
-    cost, reported_cost = HermesAdapter._cost_delta(None, session, "grok-4.5", usage)
+    cost, reported_cost = HermesAdapter._cost_delta(
+        None, session, "grok-4.5", usage, started_at=AT, finished_at=AT
+    )
 
     assert cost is not None
     assert cost.amount_usd == 0.00915

@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence, TextIO
 
+import llm_prices
+
 from . import __version__
 from .batch import BatchResult, BatchRunner
 from .integration import CheckpointManager, IntegrationManager
@@ -207,8 +209,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 catalog = ensure_catalog_fresh(force=args.refresh)
             except (AOPError, OSError) as error:
-                # Native inventories remain useful without prices. Dispatch
-                # keeps its separate fail-closed catalog preflight below.
+                # Native inventories remain useful without catalog metadata.
                 catalog_error = str(error)
                 catalog = ModelCatalog({}, 0, "", "")
             return _report_models(
@@ -228,9 +229,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _report_policy(policy, json_output=args.json)
             return 0
-
-        if args.command in {"run", "resume", "batch", "integrate"}:
-            ensure_catalog_fresh()
 
         if args.command == "run" and args.profile == "sealed":
             manager = WorktreeManager.standalone(Path.cwd())
@@ -740,6 +738,7 @@ def _report_models(
                     "errors": errors,
                     "warnings": warnings,
                     "models": [model.to_dict() for model in models],
+                    "pricing_basis": llm_prices.pricing_basis(),
                 },
                 sort_keys=True,
             )
@@ -758,11 +757,8 @@ def _report_models(
                 f"{_price(model.cache_write_per_million_usd)}\t"
                 f"{_price(model.output_per_million_usd)}"
             )
-        sources = sorted(
-            {model.pricing_source for model in models if model.pricing_source}
-        )
         print(
-            f"aop: prices_per_million_usd sources={','.join(sources)} "
+            f"aop: prices_per_million_usd basis={llm_prices.pricing_basis()} "
             f"catalog_fetched_at={fetched_at} catalog_sha256={catalog.sha256}",
             file=sys.stderr,
         )

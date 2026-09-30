@@ -1,13 +1,13 @@
-"""Fresh calculations of standard API-equivalent token cost."""
+"""API-equivalent token cost at the rates in effect when each request ran."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
-import time
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime, timedelta
+from importlib.metadata import version
 
-from .model_catalog import ModelCatalog, ensure_catalog_fresh
+import llm_prices
 
 
 @dataclass(frozen=True)
@@ -55,17 +55,6 @@ class TokenUsage:
 
 
 @dataclass(frozen=True)
-class ModelPrice:
-    input_per_million_usd: float
-    cached_input_per_million_usd: float
-    output_per_million_usd: float
-    long_context_threshold: int | None = None
-    long_context_input_per_million_usd: float | None = None
-    long_context_cached_input_per_million_usd: float | None = None
-    long_context_output_per_million_usd: float | None = None
-
-
-@dataclass(frozen=True)
 class CalculatedCost:
     amount_usd: float
     currency: str
@@ -76,6 +65,8 @@ class CalculatedCost:
     long_context_pricing: bool
     pricing_retrieved_at: float | None = None
     pricing_basis: str | None = None
+    # "peak", "off_peak", or "mixed" under time-of-day pricing, else None.
+    pricing_period: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -92,67 +83,96 @@ class CalculatedCost:
 def estimate_api_cost(
     model: str | None,
     usage: TokenUsage,
-    catalog: ModelCatalog | None = None,
     *,
-    providers: tuple[str, ...] = ("openai",),
-    catalog_model: str | None = None,
-    request_usages: Sequence[TokenUsage] | None = None,
+    provider: str | None,
+    started_at: str,
+    finished_at: str,
+    requests: Sequence[tuple[TokenUsage, str | None]] | None = None,
 ) -> CalculatedCost | None:
+    """Price usage at llm-prices API rates in effect when each request ran.
+
+    `requests` lists each measured request's usage and, when the provider
+    reported it, the time it was served, which must fall within the run. A
+    request without a time is priced only when the rates did not change between
+    `started_at` and `finished_at`.
+    """
     if model is None:
         return None
-    catalog = catalog or ensure_catalog_fresh()
-    resolved = _catalog_price(catalog, catalog_model or model, providers)
-    if resolved is None:
-        return None
-    priced_as, price, provenance = resolved
-    usages = tuple(request_usages) if request_usages is not None else (usage,)
-    if request_usages is not None and _sum_usage(usages) != usage:
+    priced = tuple(requests) if requests is not None else ((usage, None),)
+    if _sum_usage([request_usage for request_usage, _ in priced]) != usage:
         raise ValueError("request usage does not match aggregate usage")
-    priced_usages = [_usage_cost(request_usage, price) for request_usage in usages]
-    amount = sum(request_amount for request_amount, _ in priced_usages)
-    long_context = any(is_long_context for _, is_long_context in priced_usages)
+    # With no measured requests, pricing zero usage still requires known rates.
+    priced = priced or ((usage, None),)
+    amount = 0.0
+    long_context = False
+    found = []
+    for request_usage, at in priced:
+        rates = _request_rates(model, provider, at, started_at, finished_at)
+        if rates is None:
+            return None
+        amount += rates.cost(
+            input_tokens=request_usage.input_tokens - request_usage.cached_input_tokens,
+            cache_read_tokens=request_usage.cached_input_tokens,
+            output_tokens=request_usage.output_tokens,
+        )
+        long_context = long_context or any(
+            request_usage.input_tokens > tier.above for tier in rates.tiers
+        )
+        found.append(rates)
     return CalculatedCost(
         amount_usd=round(amount, 8),
         currency="USD",
         model=model,
-        priced_as=priced_as,
-        pricing_version=provenance.get("version", catalog.version),
-        pricing_source=provenance.get("source", catalog.source),
+        priced_as=" + ".join(
+            sorted({f"{rates.provider}/{rates.model}" for rates in found})
+        ),
+        pricing_version=f"llm-prices-{version('llm-prices')}",
+        pricing_source=" ".join(sorted({rates.source for rates in found})),
         long_context_pricing=long_context,
-        pricing_retrieved_at=provenance.get("verified_at", catalog.fetched_at),
-        pricing_basis=provenance.get("basis"),
+        pricing_basis=llm_prices.pricing_basis(),
+        pricing_period=merge_periods(rates.period for rates in found),
     )
 
 
-def _usage_cost(usage: TokenUsage, price: ModelPrice) -> tuple[float, bool]:
-    long_context = (
-        price.long_context_threshold is not None
-        and usage.input_tokens > price.long_context_threshold
-    )
-    input_rate = (
-        price.long_context_input_per_million_usd
-        if long_context
-        else price.input_per_million_usd
-    )
-    cached_rate = (
-        price.long_context_cached_input_per_million_usd
-        if long_context
-        else price.cached_input_per_million_usd
-    )
-    output_rate = (
-        price.long_context_output_per_million_usd
-        if long_context
-        else price.output_per_million_usd
-    )
-    assert (
-        input_rate is not None and cached_rate is not None and output_rate is not None
-    )
-    cached = usage.cached_input_tokens
-    uncached = usage.input_tokens - cached
-    amount = (
-        uncached * input_rate + cached * cached_rate + usage.output_tokens * output_rate
-    ) / 1_000_000
-    return amount, long_context
+def merge_periods(periods: Iterable[str | None]) -> str | None:
+    distinct = set(periods)
+    return distinct.pop() if len(distinct) == 1 else "mixed"
+
+
+def _request_rates(
+    model: str, provider: str | None, at: str | None, started_at: str, finished_at: str
+) -> llm_prices.Rates | None:
+    if at is not None:
+        # A reported time outside the run is a clock or parsing error.
+        if not _utc(started_at) <= _utc(at) <= _utc(finished_at):
+            return None
+        return llm_prices.rates(model, at=at, provider=provider)
+    # Rates change at price changes, which persist, and at the hour-aligned
+    # boundaries of time-of-day pricing, so sampling the run's endpoints and
+    # every hour boundary between them finds any change during the run.
+    distinct = {}
+    for moment in _hour_boundaries(started_at, finished_at):
+        rates = llm_prices.rates(model, at=moment, provider=provider)
+        if rates is None:
+            return None
+        # A new source for the same prices is not a price change.
+        distinct.setdefault(replace(rates, valid_from="", source=""), rates)
+    return next(iter(distinct.values())) if len(distinct) == 1 else None
+
+
+def _utc(value: str) -> datetime:
+    return datetime.fromisoformat(value).astimezone(UTC)
+
+
+def _hour_boundaries(started_at: str, finished_at: str) -> list[datetime]:
+    start = _utc(started_at)
+    finish = max(_utc(finished_at), start)
+    moments = [start]
+    boundary = start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    while boundary < finish:
+        moments.append(boundary)
+        boundary += timedelta(hours=1)
+    return [*moments, finish]
 
 
 def _sum_usage(usages: Sequence[TokenUsage]) -> TokenUsage:
@@ -162,133 +182,6 @@ def _sum_usage(usages: Sequence[TokenUsage]) -> TokenUsage:
         output_tokens=sum(usage.output_tokens for usage in usages),
         reasoning_output_tokens=sum(usage.reasoning_output_tokens for usage in usages),
     )
-
-
-# Temporary official fallback while models.dev lacks the canonical Flash price.
-# Reverify or remove after this window; a catalog refresh must not renew it.
-DEEPSEEK_PRICE_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing/"
-DEEPSEEK_PRICE_VERIFIED_AT = datetime(2026, 9, 10, tzinfo=UTC).timestamp()
-DEEPSEEK_PRICE_EXPIRES_AT = datetime(2026, 9, 17, tzinfo=UTC).timestamp()
-ZAI_FLASH_PRICE_SOURCE = "https://docs.z.ai/guides/overview/pricing"
-ZAI_FLASH_PRICE_VERIFIED_AT = datetime(2026, 9, 10, tzinfo=UTC).timestamp()
-ZAI_FLASH_PRICE_EXPIRES_AT = datetime(2026, 9, 17, tzinfo=UTC).timestamp()
-
-
-def pricing_metadata(catalog: ModelCatalog, provider: str, model: str) -> dict | None:
-    """Resolve catalog rates with bounded, sourced corrections and fallbacks."""
-    metadata = catalog.model(provider, model)
-    # Correct only the observed stale Z.ai tariff, without masking future updates
-    # or applying the international API rate to resellers or Chinese endpoints.
-    if provider == "zai" and model == "glm-5.3-flash" and metadata is not None:
-        cost = metadata.get("cost")
-        if isinstance(cost, dict) and tuple(
-            cost.get(key) for key in ("input", "cache_read", "output")
-        ) == (0.075, 0.015, 0.25):
-            if not (
-                ZAI_FLASH_PRICE_VERIFIED_AT <= time.time() < ZAI_FLASH_PRICE_EXPIRES_AT
-            ):
-                return {**metadata, "cost": {}}
-            return {
-                **metadata,
-                "cost": {"input": 0.15, "cache_read": 0.03, "output": 0.50},
-                "aop_pricing": {
-                    "source": ZAI_FLASH_PRICE_SOURCE,
-                    "verified_at": ZAI_FLASH_PRICE_VERIFIED_AT,
-                    "version": "zai-official-2026-09-10",
-                },
-            }
-    if metadata is not None and _model_price(metadata.get("cost")) is not None:
-        return metadata
-    if (
-        provider == "deepseek"
-        and model == "deepseek-flash"
-        and DEEPSEEK_PRICE_VERIFIED_AT <= time.time() < DEEPSEEK_PRICE_EXPIRES_AT
-    ):
-        return {
-            "cost": {"input": 0.30, "cache_read": 0.006, "output": 1.20},
-            "aop_pricing": {
-                "source": DEEPSEEK_PRICE_SOURCE,
-                "verified_at": DEEPSEEK_PRICE_VERIFIED_AT,
-                "version": "deepseek-official-2026-09-10-peak",
-                "basis": "peak",
-            },
-        }
-    return metadata
-
-
-def _catalog_price(
-    catalog: ModelCatalog, model: str, providers: tuple[str, ...]
-) -> tuple[str, ModelPrice, dict] | None:
-    unqualified = model.partition("/")[2] or model
-    aliases = {"gpt-5.6": "gpt-5.6-sol"}
-    requested = aliases.get(unqualified, unqualified)
-    for provider in providers:
-        models = catalog.providers.get(provider, {}).get("models", {})
-        if not isinstance(models, dict):
-            continue
-        candidates = [requested]
-        candidates.extend(
-            candidate
-            for candidate in models
-            if isinstance(candidate, str) and requested.startswith(f"{candidate}-20")
-        )
-        for candidate in sorted(set(candidates), key=len, reverse=True):
-            metadata = pricing_metadata(catalog, provider, candidate)
-            if not isinstance(metadata, dict):
-                continue
-            price = _model_price(metadata.get("cost"))
-            if price is not None:
-                return candidate, price, metadata.get("aop_pricing", {})
-    return None
-
-
-def _model_price(value: object) -> ModelPrice | None:
-    if not isinstance(value, dict):
-        return None
-    input_rate = _rate(value.get("input"))
-    output_rate = _rate(value.get("output"))
-    cached_rate = _rate(value.get("cache_read"))
-    if input_rate is None or output_rate is None:
-        return None
-    if cached_rate is None:
-        cached_rate = input_rate
-    tier = _context_tier(value.get("tiers"))
-    return ModelPrice(
-        input_per_million_usd=input_rate,
-        cached_input_per_million_usd=cached_rate,
-        output_per_million_usd=output_rate,
-        long_context_threshold=tier[0] if tier else None,
-        long_context_input_per_million_usd=tier[1] if tier else None,
-        long_context_cached_input_per_million_usd=tier[2] if tier else None,
-        long_context_output_per_million_usd=tier[3] if tier else None,
-    )
-
-
-def _context_tier(value: object) -> tuple[int, float, float, float] | None:
-    if not isinstance(value, list):
-        return None
-    for tier in value:
-        if not isinstance(tier, dict) or not isinstance(tier.get("tier"), dict):
-            continue
-        condition = tier["tier"]
-        size = condition.get("size")
-        input_rate = _rate(tier.get("input"))
-        output_rate = _rate(tier.get("output"))
-        cached_rate = _rate(tier.get("cache_read"))
-        if (
-            condition.get("type") == "context"
-            and isinstance(size, int)
-            and input_rate is not None
-            and output_rate is not None
-        ):
-            return size, input_rate, cached_rate or input_rate, output_rate
-    return None
-
-
-def _rate(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
 
 
 def _nonnegative_integer(value: object) -> int:

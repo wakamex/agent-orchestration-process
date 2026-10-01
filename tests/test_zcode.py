@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import llm_prices
+import model_prices
 import pytest
 from conftest import api_cost
 
@@ -207,7 +207,7 @@ def test_authenticated_zai_inventory(zcode_config, fake_zcode, monkeypatch):
     assert flash.inventory_sha256 == "inventory-sha256"
     assert flash.inference_provider == "zai-coding-plan"
     assert flash.price_scope == "api-equivalent"
-    rates = llm_prices.rates("glm-5.3-flash", provider="zai")
+    rates = model_prices.rates("glm-5.3-flash", provider="zai")
     assert flash.input_per_million_usd == rates.input
     assert flash.cached_input_per_million_usd == rates.cache_read
     assert flash.output_per_million_usd == rates.output
@@ -281,7 +281,7 @@ def test_configured_zai_models_use_catalog_without_credentials(
     assert flash.availability == "configured"
     assert not flash.authenticated
     assert flash.price_scope == "api-equivalent"
-    rates = llm_prices.rates("glm-5.3-flash", provider="zai")
+    rates = model_prices.rates("glm-5.3-flash", provider="zai")
     assert flash.input_per_million_usd == rates.input
     assert flash.output_per_million_usd == rates.output
     assert models["other/other-model"].price_scope == "unavailable"

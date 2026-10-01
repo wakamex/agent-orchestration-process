@@ -11,7 +11,7 @@ import subprocess
 import time
 from pathlib import Path
 
-import llm_prices
+import model_prices
 import pytest
 from conftest import api_cost
 
@@ -654,7 +654,7 @@ def test_run_persists_structured_codex_artifacts(
         "detected_by": "codex login status",
     }
     assert persisted_result["calculated_cost"]["pricing_basis"] == (
-        llm_prices.pricing_basis()
+        model_prices.pricing_basis()
     )
     assert persisted_result["provider_reported_cost"] is None
 

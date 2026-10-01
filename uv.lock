@@ -7,7 +7,7 @@ name = "agent-orchestration-process"
 version = "0.1.18"
 source = { editable = "." }
 dependencies = [
-    { name = "llm-prices" },
+    { name = "model-prices" },
     { name = "pyyaml" },
 ]
 
@@ -19,7 +19,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "llm-prices", editable = "../llm-prices" },
+    { name = "model-prices", editable = "../model-prices" },
     { name = "pyyaml", specifier = ">=6.0.2" },
 ]
 
@@ -48,14 +48,9 @@ wheels = [
 ]
 
 [[package]]
-name = "llm-prices"
-version = "0.1.0"
-source = { editable = "../llm-prices" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest" }]
+name = "model-prices"
+version = "0.0.1"
+source = { editable = "../model-prices" }
 
 [[package]]
 name = "packaging"

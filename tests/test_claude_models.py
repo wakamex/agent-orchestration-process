@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-import llm_prices
+import model_prices
 import pytest
 
 from agent_orchestration_process import cli, model_listing
@@ -73,7 +73,7 @@ def test_native_inventory_adds_launch_models_without_prices(native_cli: Path) ->
     assert launch.authenticated is False  # Advertisement is not entitlement proof.
     assert launch.price_scope == "unknown"
     assert launch.input_per_million_usd is None
-    known = llm_prices.rates("claude-sonnet-5", provider="anthropic")
+    known = model_prices.rates("claude-sonnet-5", provider="anthropic")
     assert rows["claude-sonnet-5"].input_per_million_usd == known.input
     assert rows["claude-sonnet-5"].availability == "native-advertised"
     assert rows["legacy-alias"].price_scope == "unknown"
@@ -121,11 +121,11 @@ def test_listing_survives_catalog_failure_and_queries_native_each_time(
     assert output["catalog"] is None
     assert output["warnings"] == {"catalog": "pricing unavailable"}
     assert output["errors"] == {}
-    # Prices come from llm-prices, so they survive a catalog failure.
+    # Prices come from model-prices, so they survive a catalog failure.
     scopes = {row["model"]: row["price_scope"] for row in output["models"]}
     assert scopes["claude-launch"] == "unknown"
     assert scopes["claude-sonnet-5"] != "unknown"
-    assert output["pricing_basis"] == llm_prices.pricing_basis()
+    assert output["pricing_basis"] == model_prices.pricing_basis()
     monkeypatch.setenv("AOP_TEST_CLAUDE_MODE", "exit")
     assert cli.main(args) == 1
     output = json.loads(capsys.readouterr().out)

@@ -4,7 +4,7 @@ import json
 import time
 from pathlib import Path
 
-import llm_prices
+import model_prices
 import pytest
 
 from agent_orchestration_process import cli, model_catalog, model_listing
@@ -171,7 +171,7 @@ def test_native_model_parsers_and_pricing(
     grok = model_listing.list_models("grok", catalog)
     dsh = model_listing.list_models("dsh", catalog)
 
-    sol = llm_prices.rates("gpt-5.6-sol", provider="openai")
+    sol = model_prices.rates("gpt-5.6-sol", provider="openai")
     assert codex.input_per_million_usd == sol.input
     assert codex.price_scope == "api-equivalent"
     assert cursor.input_per_million_usd == sol.input
@@ -186,7 +186,7 @@ def test_native_model_parsers_and_pricing(
     assert opencode.availability == "account"
     assert [item.model for item in grok] == ["grok-build", "grok-4.5"]
     assert grok[0].price_scope == "unknown"
-    grok_rates = llm_prices.rates("grok-4.5", provider="xai")
+    grok_rates = model_prices.rates("grok-4.5", provider="xai")
     assert grok[1].input_per_million_usd == grok_rates.input
     assert grok[1].output_per_million_usd == grok_rates.output
     assert [item.model for item in dsh] == [
@@ -195,13 +195,13 @@ def test_native_model_parsers_and_pricing(
         "deepseek-v4-pro",
     ]
     assert dsh[0].availability == "installed-default"
-    flash = llm_prices.rates("deepseek-flash", provider="deepseek")
+    flash = model_prices.rates("deepseek-flash", provider="deepseek")
     assert dsh[0].input_per_million_usd == flash.input
     assert dsh[0].price_scope == (
         f"api-equivalent-{flash.period.replace('_', '-')}"
     )
     assert dsh[1].input_per_million_usd == (
-        llm_prices.rates("deepseek-v4-flash", provider="deepseek").input
+        model_prices.rates("deepseek-v4-flash", provider="deepseek").input
     )
 
 
@@ -283,7 +283,7 @@ def test_codex_provider_inventory_reports_route_and_authenticated_snapshot(
     assert model["authenticated"] is True
     assert model["inventory_sha256"] == "b" * 64
     assert model["input_per_million_usd"] == (
-        llm_prices.rates("glm-5.3-flash", provider="zai").input
+        model_prices.rates("glm-5.3-flash", provider="zai").input
     )
 
 

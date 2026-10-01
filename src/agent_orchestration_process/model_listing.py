@@ -25,7 +25,7 @@ from .codex_routes import (
 )
 from .model_catalog import ModelCatalog
 from .models import InferenceRoute
-import llm_prices
+import model_prices
 from .provider_versions import require_supported_agy
 from .worktrees import AOPError
 
@@ -822,7 +822,7 @@ def _record(
     authenticated: bool = False,
 ) -> AvailableModel:
     rates = (
-        llm_prices.rates(priced_model, provider=provider)
+        model_prices.rates(priced_model, provider=provider)
         if provider and priced_model
         else None
     )

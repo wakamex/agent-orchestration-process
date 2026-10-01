@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-import llm_prices
+import model_prices
 import pytest
 
 
@@ -179,8 +179,8 @@ def api_cost(
     output_tokens: int = 0,
     provider: str | None = None,
 ) -> float:
-    """Expected calculated cost for one request, from llm-prices directly."""
-    amount = llm_prices.cost(
+    """Expected calculated cost for one request, from model-prices directly."""
+    amount = model_prices.cost(
         model,
         provider=provider,
         input_tokens=input_tokens - cached_input_tokens,

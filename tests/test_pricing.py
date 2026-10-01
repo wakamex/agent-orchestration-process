@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import llm_prices
+import model_prices
 import pytest
 
 from agent_orchestration_process.pricing import (
@@ -45,8 +45,8 @@ def test_cost_uses_rates_in_effect_when_the_run_happened(at, expected) -> None:
     assert estimate is not None
     assert estimate.amount_usd == expected
     assert estimate.priced_as == "openai/gpt-5.6-sol"
-    assert estimate.pricing_basis == llm_prices.pricing_basis()
-    assert estimate.pricing_version.startswith("llm-prices-")
+    assert estimate.pricing_basis == model_prices.pricing_basis()
+    assert estimate.pricing_version.startswith("model-prices-")
     assert estimate.pricing_period is None
     assert estimate.long_context_pricing is False
     assert CalculatedCost.from_dict(estimate.to_dict()) == estimate
@@ -120,13 +120,13 @@ def test_run_crossing_a_peak_window_is_priced_only_per_request() -> None:
     assert estimate is not None
     assert estimate.pricing_period == "mixed"
     assert estimate.amount_usd == round(
-        llm_prices.cost(
+        model_prices.cost(
             "deepseek-flash",
             input_tokens=400,
             output_tokens=100,
             at="2026-09-30T00:55:00Z",
         )
-        + llm_prices.cost(
+        + model_prices.cost(
             "deepseek-flash",
             input_tokens=500,
             cache_read_tokens=100,
@@ -300,7 +300,7 @@ def test_listing_shows_current_rates_and_time_of_day_period() -> None:
         "deepseek",
         "deepseek-flash",
     )
-    rates = llm_prices.rates("deepseek-flash", provider="deepseek")
+    rates = model_prices.rates("deepseek-flash", provider="deepseek")
 
     assert (
         row.input_per_million_usd,

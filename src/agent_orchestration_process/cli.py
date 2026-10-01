@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence, TextIO
 
-import llm_prices
+import model_prices
 
 from . import __version__
 from .batch import BatchResult, BatchRunner
@@ -738,7 +738,7 @@ def _report_models(
                     "errors": errors,
                     "warnings": warnings,
                     "models": [model.to_dict() for model in models],
-                    "pricing_basis": llm_prices.pricing_basis(),
+                    "pricing_basis": model_prices.pricing_basis(),
                 },
                 sort_keys=True,
             )
@@ -758,7 +758,7 @@ def _report_models(
                 f"{_price(model.output_per_million_usd)}"
             )
         print(
-            f"aop: prices_per_million_usd basis={llm_prices.pricing_basis()} "
+            f"aop: prices_per_million_usd basis={model_prices.pricing_basis()} "
             f"catalog_fetched_at={fetched_at} catalog_sha256={catalog.sha256}",
             file=sys.stderr,
         )

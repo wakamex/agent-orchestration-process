@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from importlib.metadata import version
 
-import llm_prices
+import model_prices
 
 
 @dataclass(frozen=True)
@@ -67,7 +67,7 @@ class CalculatedCost:
     pricing_basis: str | None = None
     # "peak", "off_peak", or "mixed" under time-of-day pricing, else None.
     pricing_period: str | None = None
-    # Text llm-prices removed from the model name to find its price, such as "-max".
+    # Text model-prices removed from the model name to find its price, such as "-max".
     removed_suffix: str | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -91,7 +91,7 @@ def estimate_api_cost(
     finished_at: str,
     requests: Sequence[tuple[TokenUsage, str | None]] | None = None,
 ) -> CalculatedCost | None:
-    """Price usage at llm-prices API rates in effect when each request ran.
+    """Price usage at model-prices API rates in effect when each request ran.
 
     `requests` lists each measured request's usage and, when the provider
     reported it, the time it was served, which must fall within the run. A
@@ -126,10 +126,10 @@ def estimate_api_cost(
         priced_as=" + ".join(
             sorted({f"{rates.provider}/{rates.model}" for rates in found})
         ),
-        pricing_version=f"llm-prices-{version('llm-prices')}",
+        pricing_version=f"model-prices-{version('model-prices')}",
         pricing_source=" ".join(sorted({rates.source for rates in found})),
         long_context_pricing=long_context,
-        pricing_basis=llm_prices.pricing_basis(),
+        pricing_basis=model_prices.pricing_basis(),
         pricing_period=merge_periods(rates.period for rates in found),
         removed_suffix=merge_suffixes(rates.removed_suffix for rates in found),
     )
@@ -141,19 +141,19 @@ def merge_periods(periods: Iterable[str | None]) -> str | None:
 
 
 def merge_suffixes(suffixes: Iterable[str | None]) -> str | None:
-    """Join the name suffixes llm-prices removed to find a price, if any."""
+    """Join the name suffixes model-prices removed to find a price, if any."""
     return " ".join(sorted(set(suffixes) - {"", None})) or None
 
 
 def _request_rates(
     model: str, provider: str | None, at: str | None, started_at: str, finished_at: str
-) -> llm_prices.Rates | None:
+) -> model_prices.Rates | None:
     if at is not None:
         # A reported time outside the run is a clock or parsing error.
         if not _utc(started_at) <= _utc(at) <= _utc(finished_at):
             return None
-        return llm_prices.rates(model, at=at, provider=provider)
-    spans = llm_prices.rates_between(model, started_at, finished_at, provider=provider)
+        return model_prices.rates(model, at=at, provider=provider)
+    spans = model_prices.rates_between(model, started_at, finished_at, provider=provider)
     # Without a request time, only one price covering the whole run applies.
     return spans[0][1] if len(spans) == 1 else None
 

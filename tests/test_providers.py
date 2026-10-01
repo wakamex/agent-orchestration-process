@@ -410,9 +410,9 @@ def test_claude_run_and_exact_resume(repository: Path, fake_claude: Path) -> Non
         effort="high",
         timeout_seconds=5,
     )
+    assert first.succeeded, first.error
     resumed = runner.resume(run_id=first.run_id, prompt="second")
 
-    assert first.succeeded
     assert first.provider == "claude"
     assert first.model == "claude-test-model"
     assert first.usage.input_tokens == 60
@@ -2260,3 +2260,55 @@ def test_opencode_reuses_private_dependencies_on_run_and_resume(
         assert result.succeeded, result.error
     assert (private / ".bin/plugin").read_text() == '{"version": "task-local"}\n'
     assert (source / ".bin/plugin").read_text() == '{"version": "test"}\n'
+
+
+def test_claude_home_seed_skips_locks_and_files_removed_during_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    config = source / ".claude"
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text("{}")
+    (config / "history.jsonl.lock").write_text("")
+    (config / "vanishing.json").write_text("{}")
+    copy = runner_module.shutil.copy2
+
+    def copy_after_removal(source_path, target_path, *args, **kwargs):
+        if Path(source_path).name == "vanishing.json":
+            Path(source_path).unlink()
+        return copy(source_path, target_path, *args, **kwargs)
+
+    monkeypatch.setattr(runner_module.shutil, "copy2", copy_after_removal)
+    environment = {
+        "HOME": os.fspath(source),
+        "AOP_PROVIDER_STATE_DIR": os.fspath(tmp_path / "state"),
+    }
+
+    runner_module._prepare_claude_environment(environment)
+
+    seeded = Path(environment["HOME"]) / ".claude"
+    assert sorted(path.name for path in seeded.iterdir()) == ["settings.json"]
+    assert [path.name for path in (tmp_path / "state" / "claude").iterdir()] == [
+        "home"
+    ]
+
+
+def test_failed_claude_home_seed_leaves_no_partial_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "source" / ".claude"
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text("{}")
+
+    def fail(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(runner_module.shutil, "copy2", fail)
+    environment = {
+        "HOME": os.fspath(tmp_path / "source"),
+        "AOP_PROVIDER_STATE_DIR": os.fspath(tmp_path / "state"),
+    }
+
+    with pytest.raises(AOPError, match="could not prepare isolated Claude state"):
+        runner_module._prepare_claude_environment(environment)
+    assert list((tmp_path / "state" / "claude").iterdir()) == []

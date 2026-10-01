@@ -671,7 +671,12 @@ else:
 
 
 @pytest.fixture
-def fake_claude(tmp_path: Path) -> Path:
+def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # AOP seeds Claude runs from $HOME/.claude; never copy the host's live state.
+    home = tmp_path / "claude-source-home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text("{}\n")
+    monkeypatch.setenv("HOME", os.fspath(home))
     executable = tmp_path / "claude"
     executable.write_text(
         f"""#!{sys.executable}

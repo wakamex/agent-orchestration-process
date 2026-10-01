@@ -117,6 +117,7 @@ def test_exec_exposes_task_environment(repository: Path) -> None:
 def test_sealed_runtime_falls_back_when_user_runtime_is_read_only(
     repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("AOP_SEALED_RUNTIME_ROOT", raising=False)
     user_runtime = tmp_path / "user-runtime"
     user_runtime.mkdir()
     monkeypatch.setattr(worktrees, "_user_runtime_dir", lambda: user_runtime)

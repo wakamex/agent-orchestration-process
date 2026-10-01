@@ -4939,33 +4939,65 @@ def _prepare_claude_environment(environment: dict[str, str]) -> None:
     source_home = Path(environment["HOME"])
     destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "claude" / "home"
     if not destination.exists():
-        destination.mkdir(parents=True, mode=0o700)
-        source_config = source_home / ".claude"
-        private_config = destination / ".claude"
-        if _sealed(environment):
-            private_config.mkdir()
-            credentials = source_config / ".credentials.json"
-            if credentials.is_file():
-                shutil.copy2(credentials, private_config / credentials.name)
-        elif source_config.is_dir():
-            shutil.copytree(
-                source_config,
-                private_config,
-                ignore=shutil.ignore_patterns(
-                    "debug",
-                    "history.jsonl",
-                    "projects",
-                    "session-env",
-                    "shell-snapshots",
-                    "statsig",
-                    "todos",
-                ),
-            )
-        source_settings = source_home / ".claude.json"
-        if source_settings.is_file() and not _sealed(environment):
-            shutil.copy2(source_settings, destination / source_settings.name)
-        _make_tree_user_writable(destination)
+        # Seed a temporary home and rename it into place, so a failed copy
+        # never leaves a partial home that later runs would reuse.
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(
+            f".{destination.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            _seed_claude_home(source_home, temporary, sealed=_sealed(environment))
+            _make_tree_user_writable(temporary)
+            try:
+                os.replace(temporary, destination)
+            except OSError:
+                if not destination.is_dir():
+                    raise
+                # A concurrent run seeded the same home first.
+        except OSError as error:
+            raise AOPError(f"could not prepare isolated Claude state: {error}") from error
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
     environment["HOME"] = os.fspath(destination)
+
+
+def _seed_claude_home(source_home: Path, destination: Path, *, sealed: bool) -> None:
+    destination.mkdir(mode=0o700)
+    source_config = source_home / ".claude"
+    private_config = destination / ".claude"
+    if sealed:
+        private_config.mkdir()
+        credentials = source_config / ".credentials.json"
+        if credentials.is_file():
+            shutil.copy2(credentials, private_config / credentials.name)
+    elif source_config.is_dir():
+        shutil.copytree(
+            source_config,
+            private_config,
+            ignore=shutil.ignore_patterns(
+                "*.lock",
+                "debug",
+                "history.jsonl",
+                "projects",
+                "session-env",
+                "shell-snapshots",
+                "statsig",
+                "todos",
+            ),
+            copy_function=_copy_unless_removed,
+        )
+    source_settings = source_home / ".claude.json"
+    if source_settings.is_file() and not sealed:
+        shutil.copy2(source_settings, destination / source_settings.name)
+
+
+def _copy_unless_removed(source: str, target: str) -> None:
+    """Copy a file, skipping one that a running Claude removed after listing."""
+    try:
+        shutil.copy2(source, target)
+    except FileNotFoundError:
+        if os.path.lexists(source):
+            raise
 
 
 def _prepare_devin_state(

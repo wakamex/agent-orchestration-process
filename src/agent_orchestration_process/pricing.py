@@ -111,14 +111,13 @@ def estimate_api_cost(
         rates = _request_rates(model, provider, at, started_at, finished_at)
         if rates is None:
             return None
-        amount += rates.cost(
+        breakdown = rates.breakdown(
             input_tokens=request_usage.input_tokens - request_usage.cached_input_tokens,
             cache_read_tokens=request_usage.cached_input_tokens,
             output_tokens=request_usage.output_tokens,
         )
-        long_context = long_context or any(
-            request_usage.input_tokens > tier.above for tier in rates.tiers
-        )
+        amount += breakdown.total
+        long_context = long_context or breakdown.tier_above is not None
         found.append(rates)
     return CalculatedCost(
         amount_usd=round(amount, 8),

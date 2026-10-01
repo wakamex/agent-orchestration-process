@@ -31,10 +31,6 @@ dependencies = [
     "pyyaml>=6.0.2",
 ]
 
-# Local checkout until model-prices is published; builds use --no-sources.
-[tool.uv.sources]
-model-prices = { path = "../model-prices", editable = true }
-
 [project.urls]
 Homepage = "https://github.com/wakamex/agent-orchestration-process"
 Repository = "https://github.com/wakamex/agent-orchestration-process.git"

@@ -1444,3 +1444,19 @@ def test_cli_accepts_artifact_declarations(
         (repository / ".aop" / "runs" / run_id.group(1) / "result.json").read_text()
     )
     assert result["artifacts"][0]["logical_path"] == "paper.md"
+
+
+def test_codex_run_without_model_records_and_prices_the_default(
+    repository: Path, fake_codex: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    result = runner.run(task="default-model", prompt="hello", timeout_seconds=5)
+
+    assert result.succeeded, result.error
+    assert result.model == "gpt-5.6-sol"
+    assert result.calculated_cost is not None
+    persisted = runner.store.load_result(result.run_id)
+    assert persisted.model == "gpt-5.6-sol"

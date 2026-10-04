@@ -14,7 +14,7 @@ from typing import Sequence, TextIO
 
 import model_prices
 
-from . import __version__
+from . import __version__, pricing
 from .batch import BatchResult, BatchRunner
 from .integration import CheckpointManager, IntegrationManager
 from .isolation import PROFILES, explain_profile, resolve_policy
@@ -201,6 +201,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw_arguments = list(sys.argv[1:] if argv is None else argv)
         args = build_parser().parse_args(raw_arguments)
 
+        if args.command in {"models", "run", "resume", "batch", "integrate"}:
+            price_warnings = pricing.refresh_prices(
+                force=args.command == "models" and args.refresh
+            )
+            if args.command != "models":
+                for warning in price_warnings:
+                    print(f"aop: warning: {warning}", file=sys.stderr)
+
         if args.command == "models":
             agents = args.agent or AGENTS
             if args.provider is not None and agents != ["codex"]:
@@ -218,6 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 inference_provider=args.provider,
                 json_output=args.json,
                 catalog_error=catalog_error,
+                price_warnings=price_warnings,
                 refresh=args.refresh,
             )
 
@@ -692,6 +701,7 @@ def _report_models(
     inference_provider: str | None = None,
     json_output: bool,
     catalog_error: str | None = None,
+    price_warnings: Sequence[str] = (),
     refresh: bool = False,
 ) -> int:
     models: list[AvailableModel] = []
@@ -712,6 +722,8 @@ def _report_models(
                 errors[agent] = str(error)
     models.sort(key=lambda item: (item.agent, item.model))
     warnings = {"catalog": catalog_error} if catalog_error else {}
+    if price_warnings:
+        warnings["prices"] = "; ".join(price_warnings)
     warnings.update(
         {
             model.agent: model.discovery_error

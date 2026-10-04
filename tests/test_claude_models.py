@@ -145,3 +145,40 @@ def test_catalog_fallback_warning_in_json_and_text(
     assert output["warnings"]["claude"]
     assert cli.main(["models", "--agent", "claude"]) == 0
     assert "warning: claude:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+def test_models_refreshes_prices_and_reports_their_warnings(
+    native_cli: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    refresh: bool,
+) -> None:
+    calls = []
+
+    def refresh_prices(**options: object) -> list[str]:
+        calls.append(options)
+        return ["price data was last confirmed current 9 days ago"]
+
+    monkeypatch.setattr(cli.pricing, "refresh_prices", refresh_prices)
+    monkeypatch.setattr(cli, "ensure_catalog_fresh", lambda **kwargs: catalog())
+    args = ["models", "--agent", "claude", "--json"] + (["--refresh"] if refresh else [])
+    assert cli.main(args) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert calls == [{"force": refresh}]
+    assert output["warnings"]["prices"] == (
+        "price data was last confirmed current 9 days ago"
+    )
+
+
+def test_dispatch_refreshes_prices_and_warns_without_blocking(
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(
+        cli.pricing, "refresh_prices", lambda **options: ["could not fetch price data"]
+    )
+    cli.main(["integrate", "no-such-task"])
+    assert "aop: warning: could not fetch price data" in capsys.readouterr().err

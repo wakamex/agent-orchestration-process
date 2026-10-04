@@ -19,7 +19,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "model-prices", specifier = ">=0.0.1" },
+    { name = "model-prices", specifier = ">=0.0.3" },
     { name = "pyyaml", specifier = ">=6.0.2" },
 ]
 
@@ -49,11 +49,11 @@ wheels = [
 
 [[package]]
 name = "model-prices"
-version = "0.0.1"
+version = "0.0.3"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/af/3a/94d407acaad8501ea7b719591b1e9b0cb03e8d379b8a96b7f91c40265f4f/model_prices-0.0.1.tar.gz", hash = "sha256:9fe173a05b2d0aca1ef2a6eb0b23328a492901ce4e0a5eb6eebb2560505975b5", size = 60016, upload-time = "2026-10-01T20:06:22.879Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/6b/ad2667e16f14e00e099fbacbca70683a2965a153c26a87980dcad1701657/model_prices-0.0.3.tar.gz", hash = "sha256:359260ba598e27d7e7b295358ec32d95e18ad89be5375782ed5ab1b53bfb1209", size = 83743, upload-time = "2026-10-04T01:46:42.469Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bd/e0/dca85d588773471ce59c01bcfc01e7dbe6758f8ba88af490ca2ea61a1f36/model_prices-0.0.1-py3-none-any.whl", hash = "sha256:ca01abd995f80cb004e760bb09423a196ce967e3e9fa0dded22f139d63951ad3", size = 51986, upload-time = "2026-10-01T20:06:21.867Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/ad/52628789985d942df9421a9fd4da8ff22d30d6465821e24d4f71a34bfa5e/model_prices-0.0.3-py3-none-any.whl", hash = "sha256:a9c4671b044b625404685bca05b133397eff1c3bba132f78c4ff04b43b39fd46", size = 49358, upload-time = "2026-10-04T01:46:41.335Z" },
 ]
 
 [[package]]

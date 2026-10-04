@@ -62,6 +62,18 @@ if prompt.startswith("SEALED_PROVIDER_PROBE"):
 
 
 @pytest.fixture(autouse=True)
+def offline_price_refresh(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep tests off the network and the user's model-prices cache."""
+    monkeypatch.setenv("MODEL_PRICES_CACHE", os.fspath(tmp_path / "model-prices"))
+    if request.node.get_closest_marker("real_price_refresh") is None:
+        from agent_orchestration_process import pricing
+
+        monkeypatch.setattr(pricing, "refresh_prices", lambda **options: [])
+
+
+@pytest.fixture(autouse=True)
 def fresh_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     providers = {
         "openai": {

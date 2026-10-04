@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
+import warnings
 
 import model_prices
+
+# Fetch newer price data at most daily, and warn when the data in use has not
+# been confirmed current for longer than PRICE_DATA_STALE_AFTER.
+PRICE_DATA_MAX_AGE = timedelta(days=1)
+PRICE_DATA_STALE_AFTER = timedelta(days=3)
 
 
 @dataclass(frozen=True)
@@ -133,6 +139,28 @@ def estimate_api_cost(
         pricing_period=merge_periods(rates.period for rates in found),
         removed_suffix=merge_suffixes(rates.removed_suffix for rates in found),
     )
+
+
+def refresh_prices(*, force: bool = False) -> list[str]:
+    """Load the newest published price data and return warnings about it.
+
+    A failed download keeps the newest cached or bundled data, so pricing never
+    blocks a run; each calculated cost records the basis it used.
+    """
+    with warnings.catch_warnings():
+        # The returned status carries the same failure, reported once below.
+        warnings.simplefilter("ignore")
+        status = model_prices.refresh(
+            max_age=timedelta(0) if force else PRICE_DATA_MAX_AGE
+        )
+    found = [status.error] if status.error else []
+    age = datetime.now(UTC) - status.published_at
+    if age > PRICE_DATA_STALE_AFTER:
+        found.append(
+            f"price data was last confirmed current {age.days} days ago "
+            f"({status.basis})"
+        )
+    return found
 
 
 def merge_periods(periods: Iterable[str | None]) -> str | None:

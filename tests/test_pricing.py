@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import model_prices
 import pytest
 
@@ -332,3 +334,36 @@ def test_legacy_calculated_cost_records_still_load() -> None:
         "pricing_period": None,
         "removed_suffix": None,
     }
+
+
+@pytest.mark.real_price_refresh
+def test_failed_price_refresh_keeps_local_data_and_reports_once(monkeypatch):
+    import warnings
+
+    from agent_orchestration_process import pricing
+
+    monkeypatch.setattr(model_prices, "SNAPSHOT_URL", "http://127.0.0.1:9/")
+    monkeypatch.setattr(pricing, "PRICE_DATA_STALE_AFTER", timedelta(days=100_000))
+
+    with warnings.catch_warnings(record=True) as raised:
+        warnings.simplefilter("always")
+        found = pricing.refresh_prices(force=True)
+
+    assert raised == []
+    assert len(found) == 1
+    assert found[0].startswith("could not fetch price data from http://127.0.0.1:9/")
+    assert model_prices.pricing_basis().startswith("model-prices-")
+
+
+@pytest.mark.real_price_refresh
+def test_price_data_older_than_the_limit_warns(monkeypatch):
+    from agent_orchestration_process import pricing
+
+    monkeypatch.setattr(pricing, "PRICE_DATA_MAX_AGE", None)
+    monkeypatch.setattr(pricing, "PRICE_DATA_STALE_AFTER", timedelta(0))
+
+    found = pricing.refresh_prices()
+
+    assert len(found) == 1
+    assert "price data was last confirmed current" in found[0]
+    assert model_prices.pricing_basis() in found[0]

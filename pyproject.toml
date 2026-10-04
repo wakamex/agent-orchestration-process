@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dependencies = [
-    "model-prices>=0.0.1",
+    "model-prices>=0.0.3",
     "pyyaml>=6.0.2",
 ]
 
@@ -52,4 +52,5 @@ tmp_path_retention_policy = "failed"
 tmp_path_retention_count = "1"
 markers = [
     "live: opt-in tests that invoke authenticated external agent providers",
+    "real_price_refresh: run model-prices refresh instead of the offline stub",
 ]

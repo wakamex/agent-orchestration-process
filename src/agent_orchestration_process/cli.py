@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import uuid
@@ -59,7 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("init", help="prepare the current Git repository for AOP")
 
     cleanup = commands.add_parser(
-        "cleanup", help="discard the task worktree associated with a run"
+        "cleanup",
+        help="discard the task worktree and private runtime state of a run's task",
     )
     cleanup.add_argument("run_id")
 
@@ -527,45 +529,48 @@ def _report_policy(
 def _cleanup_sealed(manager: WorktreeManager, request: RunRequest) -> None:
     task = request.task
     policy = request.effective_policy
+    workspace = policy.get("workspace", {})
+    controller = policy.get("controller", {})
+    controller_path = workspace.get("controller_path")
+    recorded = [
+        (
+            Path(controller_path).parent if isinstance(controller_path, str) else None,
+            "sealed",
+        ),
+        (controller.get("provider_state"), "provider-state"),
+        (controller.get("scratch"), "scratch"),
+        (controller.get("cache"), "sealed-cache"),
+        (controller.get("input_projection_root"), "input-projections"),
+    ]
     with exclusive_lock(task_lock_path(manager.state_dir, task), f"task {task}"):
-        workspace = policy.get("workspace", {})
-        controller = policy.get("controller", {})
-        controller_path = workspace.get("controller_path")
-        if isinstance(controller_path, str):
-            sealed_run_dir = Path(controller_path).parent
-            sealed_root = (manager.sealed_runtime_dir / "sealed").resolve()
-            resolved = sealed_run_dir.resolve()
-            if resolved.is_relative_to(sealed_root) and resolved.exists():
-                shutil.rmtree(resolved)
-        provider_state = controller.get("provider_state")
-        if isinstance(provider_state, str):
-            state_path = Path(provider_state).resolve()
-            state_root = (manager.sealed_runtime_dir / "provider-state").resolve()
-            if state_path.is_relative_to(state_root) and state_path.exists():
-                shutil.rmtree(state_path)
-        scratch = controller.get("scratch")
-        if isinstance(scratch, str):
-            scratch_path = Path(scratch).resolve()
-            scratch_root = (manager.sealed_runtime_dir / "scratch").resolve()
-            if scratch_path.is_relative_to(scratch_root) and scratch_path.exists():
-                shutil.rmtree(scratch_path)
-        cache = controller.get("cache")
-        if isinstance(cache, str):
-            cache_path = Path(cache).resolve()
-            cache_root = (manager.sealed_runtime_dir / "sealed-cache").resolve()
-            if cache_path.is_relative_to(cache_root) and cache_path.exists():
-                shutil.rmtree(cache_path)
-        input_projection_root = controller.get("input_projection_root")
-        if isinstance(input_projection_root, str):
-            projection_path = Path(input_projection_root).resolve()
-            projections_root = (
-                manager.sealed_runtime_dir / "input-projections"
-            ).resolve()
-            if (
-                projection_path.is_relative_to(projections_root)
-                and projection_path.exists()
-            ):
-                shutil.rmtree(projection_path)
+        for value, kind in recorded:
+            path = _sealed_runtime_path(manager, value, kind)
+            if path is not None:
+                shutil.rmtree(path)
+                print(f"aop: removed {path}", file=sys.stderr)
+
+
+def _sealed_runtime_path(
+    manager: WorktreeManager, value: object, kind: str
+) -> Path | None:
+    """Return a recorded directory only if it is this project's sealed runtime state.
+
+    The check uses the recorded path's own structure, so cleanup works whatever
+    AOP_SEALED_RUNTIME_ROOT is set to now.
+    """
+    if not isinstance(value, (str, Path)):
+        return None
+    path = Path(value).resolve()
+    identity = path.parent.parent
+    if (
+        path.parent.name != kind
+        or identity.name != manager.sealed_runtime_identity
+        or identity.parent.name != f"aop-sealed-{os.getuid()}"
+        or not path.is_dir()
+        or path.stat().st_uid != os.getuid()
+    ):
+        return None
+    return path
 
 
 def _positive_timeout(value: str) -> float:

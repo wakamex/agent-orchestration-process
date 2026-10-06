@@ -71,8 +71,12 @@ class WorktreeManager:
         self.lock_file = self.state_dir / "worktrees.lock"
 
     @property
+    def sealed_runtime_identity(self) -> str:
+        return hashlib.sha256(os.fsencode(self.root)).hexdigest()[:24]
+
+    @property
     def sealed_runtime_dir(self) -> Path:
-        identity = hashlib.sha256(os.fsencode(self.root)).hexdigest()[:24]
+        identity = self.sealed_runtime_identity
         configured = os.environ.get("AOP_SEALED_RUNTIME_ROOT")
         if configured:
             base = Path(configured)

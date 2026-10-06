@@ -76,7 +76,7 @@ Codex runs use app-server for new turns and exact resumes. When `--timeout` expi
 
 ## Sealed runtime storage
 
-For long-running sealed workloads that would exhaust `/run/user` tmpfs, set `AOP_SEALED_RUNTIME_ROOT` to an absolute disk-backed directory. AOP creates it with mode 0700 and requires current-user ownership with no group or other permissions. Keep the same setting when resuming or cleaning up those runs. `aop cleanup RUN_ID` removes the finished run's disposable runtime while retaining its archived run records.
+For long-running sealed workloads that would exhaust `/run/user` tmpfs, set `AOP_SEALED_RUNTIME_ROOT` to an absolute disk-backed directory. AOP creates it with mode 0700 and requires current-user ownership with no group or other permissions. Keep the same setting when resuming those runs. `aop cleanup RUN_ID` removes the finished run's disposable runtime while retaining its archived run records, and finds that runtime from the paths recorded in the run's request, whatever `AOP_SEALED_RUNTIME_ROOT` is set to at cleanup.
 
 ## Machine-readable results
 
@@ -193,7 +193,9 @@ aop cleanup <run-id>
 
 Cleanup removes the task worktree, scratch data, overlays, and private harness state. It retains the
 request, input snapshots, normalized result, logs, final message, and archived artifacts. Repeating
-cleanup is safe, but an active task cannot be cleaned while it holds its execution lock.
+cleanup is safe, but an active task cannot be cleaned while it holds its execution lock. Cleanup prints each runtime directory it removes to stderr.
+
+AOP never removes runtime state on its own, because a task stays resumable until it is cleaned up. Each sealed run keeps a private harness home, scratch, and cache directory until then, so a caller that starts many sealed runs should clean up each task once it no longer needs to resume it. Run AOP, including cleanup, from the caller's own project directory: run records live under that directory's `.aop/runs`, and sealed runtime directories are named after it.
 
 Inspect or explicitly manage task worktrees when needed:
 

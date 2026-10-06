@@ -173,9 +173,11 @@ def test_cli_sealed_run_and_profile_explain_work_outside_git(
         resumed = json.loads(capsys.readouterr().out)
         assert resumed["succeeded"]
         assert resumed["session_id"] == result["session_id"]
+        # Cleanup finds the recorded runtime without the original setting.
+        monkeypatch.delenv("AOP_SEALED_RUNTIME_ROOT")
 
     assert main(["cleanup", result["run_id"]]) == 0
-    capsys.readouterr()
+    assert "aop: removed " in capsys.readouterr().err
     assert not Path(
         request["effective_policy"]["workspace"]["controller_path"]
     ).exists()
@@ -407,3 +409,25 @@ def test_every_provider_runs_under_the_sealed_semantic_boundary(
             "google_accounts.json",
             "oauth_creds.json",
         }
+
+
+def test_cleanup_removes_only_this_projects_sealed_runtime(tmp_path: Path) -> None:
+    from agent_orchestration_process.cli import _sealed_runtime_path
+
+    manager = WorktreeManager.standalone(tmp_path / "project")
+    owner = f"aop-sealed-{os.getuid()}"
+    own = tmp_path / "runtime" / owner / manager.sealed_runtime_identity
+    other = tmp_path / "runtime" / owner / ("0" * 24)
+    for root in (own, other):
+        (root / "provider-state" / "run").mkdir(parents=True)
+
+    assert _sealed_runtime_path(
+        manager, os.fspath(own / "provider-state" / "run"), "provider-state"
+    ) == (own / "provider-state" / "run").resolve()
+    assert _sealed_runtime_path(
+        manager, os.fspath(other / "provider-state" / "run"), "provider-state"
+    ) is None
+    assert _sealed_runtime_path(
+        manager, os.fspath(own / "provider-state" / "run"), "scratch"
+    ) is None
+    assert _sealed_runtime_path(manager, os.fspath(own / "provider-state"), "provider-state") is None

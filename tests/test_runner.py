@@ -20,6 +20,7 @@ from agent_orchestration_process.cli import build_parser, main
 from agent_orchestration_process.locks import exclusive_lock, task_lock_path
 from agent_orchestration_process.models import RunRequest, RunResult
 from agent_orchestration_process.runner import (
+    RunStore,
     AgentRunner,
     CodexAdapter,
     CursorAdapter,
@@ -1412,6 +1413,40 @@ def test_cli_cleanup_discards_a_run_worktree_but_keeps_run_records(
 
     assert main(["cleanup", result.run_id]) == 0
     assert capsys.readouterr().out == "disposable\n"
+
+
+@pytest.mark.parametrize("legacy_field", ["sandbox", "read_paths"])
+def test_requests_from_before_profiles_and_inputs_load_for_cleanup(
+    repository: Path,
+    fake_codex: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    legacy_field: str,
+) -> None:
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+    manager = WorktreeManager.discover(repository)
+    result = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+        task="legacy", prompt="first"
+    )
+    request_path = manager.state_dir / "runs" / result.run_id / "request.json"
+    request = json.loads(request_path.read_text())
+    # Requests before execution profiles recorded Codex's sandbox mode, and
+    # requests before input snapshots recorded the same records as read_paths.
+    if legacy_field == "sandbox":
+        del request["profile"]
+        request["sandbox"] = "scratch-write"
+    else:
+        request["read_paths"] = request.pop("inputs")
+    request_path.write_text(json.dumps(request))
+
+    loaded = RunStore(manager.state_dir / "runs").load_request(result.run_id)
+    assert loaded.profile == (
+        "scratch-write" if legacy_field == "sandbox" else request["profile"]
+    )
+    assert main(["cleanup", result.run_id]) == 0
+    assert capsys.readouterr().out == "legacy\n"
+    assert not any(item.task == "legacy" for item in manager.list())
 
 
 def test_cli_accepts_artifact_declarations(

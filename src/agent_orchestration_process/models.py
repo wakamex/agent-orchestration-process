@@ -92,7 +92,14 @@ class RunRequest:
         )
         fields.setdefault("no_web", False)
         fields.setdefault("effective_policy", {})
+        # Requests before execution profiles recorded Codex's sandbox mode. Keep
+        # the value, which no profile resolves, so resuming such a run fails.
+        legacy_sandbox = fields.pop("sandbox", None)
+        if legacy_sandbox is not None:
+            fields.setdefault("profile", legacy_sandbox)
         fields["artifacts"] = tuple(fields.get("artifacts", ()))
+        legacy_read_paths = fields.pop("read_paths", ())
+        fields.setdefault("inputs", legacy_read_paths)
         fields["inputs"] = tuple(
             InputSnapshot.from_dict(item) for item in fields.get("inputs", ())
         )
@@ -188,9 +195,7 @@ class RunResult:
     @property
     def execution_completed(self) -> bool:
         return (
-            self.exit_code == 0
-            and not self.timed_out
-            and self.session_id is not None
+            self.exit_code == 0 and not self.timed_out and self.session_id is not None
         )
 
     @property

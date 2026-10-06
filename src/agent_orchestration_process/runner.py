@@ -364,8 +364,13 @@ class CodexAdapter:
             _atomic_write(
                 run_dir / "request.json", json.dumps(request.to_dict(), indent=2) + "\n"
             )
+        # Codex clones its plugin marketplace (about 100 MB) into every fresh
+        # home unless plugins are disabled; sealed homes receive no extensions.
+        plugins = (
+            ["--disable", "plugins"] if _sealed(environment) or request.no_web else []
+        )
         command = _provider_command(
-            [self.binary, "app-server", "--stdio"],
+            [self.binary, "app-server", *plugins, "--stdio"],
             request,
             worktree,
             environment,

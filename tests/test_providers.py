@@ -1637,7 +1637,7 @@ def test_no_web_enforcement_is_recorded_for_supported_harnesses(
         (
             CodexAdapter(os.fspath(fake_codex)),
             "codex",
-            {"app-server", "--stdio"},
+            {"app-server", "--disable", "plugins", "--stdio"},
         ),
         (
             ClaudeAdapter(os.fspath(fake_claude)),

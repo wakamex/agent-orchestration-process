@@ -393,7 +393,7 @@ def test_codex_route_no_web_keeps_only_generated_provider_config(
     )
 
     assert result.succeeded
-    assert result.command[-2:] == ["app-server", "--stdio"]
+    assert result.command[-4:] == ["app-server", "--disable", "plugins", "--stdio"]
     events = [
         json.loads(line)
         for line in (repository / ".aop" / "runs" / result.run_id / "events.jsonl")

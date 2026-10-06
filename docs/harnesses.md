@@ -87,7 +87,7 @@ filesystem and environment boundary.
 
 ### Codex
 
-For native routes under `edit` and `review`, AOP seeds authentication, root configuration, user rules and skills, and the model catalog. It does not copy sessions, history, databases, logs, caches, or generated system skills. Native `sealed` runs receive authentication only.
+For native routes under `edit` and `review`, AOP seeds authentication, root configuration, user rules and skills, and the model catalog. It does not copy sessions, history, databases, logs, caches, or generated system skills. Native `sealed` runs receive authentication only. Sealed and `--no-web` runs start app-server with `--disable plugins`, which also stops Codex from cloning its plugin marketplace (about 100 MB) into each fresh private home.
 
 AOP executes new Codex turns and exact resumes through Codex app-server. The native protocol supplies thread identity, terminal messages, per-turn token usage, effective model identity, and exact resume without AOP reading Codex session history. When a run reaches its AOP deadline, AOP sends `turn/interrupt`, allows a bounded five-second accounting and teardown grace outside the requested run time, and then terminates the provider process if it does not stop. A timed-out turn remains failed even when native interruption returns terminal accounting evidence.
 

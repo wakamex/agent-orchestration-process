@@ -291,6 +291,7 @@ def test_resume_rejects_account_switch(repository, auth_codex, change):
     )
     first = runner.run(task="binding", profile="sealed", prompt="first")
     assert first.succeeded, first.error
+    assert first.command[-4:] == ["app-server", "--disable", "plugins", "--stdio"]
     write_auth(source, token(**{change: "different"}))
     with pytest.raises(AOPError, match="original source account"):
         runner.resume(run_id=first.run_id, prompt="second")

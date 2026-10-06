@@ -260,7 +260,9 @@ import time
 
 args = sys.argv[1:]
 app_server = False
-if args == ["app-server", "--stdio"]:
+if args in (
+    ["app-server", "--stdio"], ["app-server", "--disable", "plugins", "--stdio"]
+):
     app_server = True
     leaked = [name for name in os.environ if name.endswith("_API_KEY")]
     configured = json.loads(os.environ.get("AOP_FAKE_CODEX_CONFIG_READ", "null"))

@@ -1780,7 +1780,6 @@ def _prepare_zcode_environment(
 class GrokAdapter:
     provider = "grok"
     modes = frozenset({"agent"})
-    DEFAULT_MODEL = "grok-build"
     EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
     def __init__(self, binary: str | None = None):
@@ -1793,7 +1792,24 @@ class GrokAdapter:
             raise AOPError(
                 f"Grok effort must be one of: {', '.join(sorted(self.EFFORTS))}"
             )
-        return model or self.DEFAULT_MODEL, effort
+        # Grok's events do not name the model, so record the CLI's own default.
+        return model or self.native_default_model(), effort
+
+    def native_default_model(self) -> str:
+        try:
+            output = subprocess.run(
+                [self.binary, "models"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as error:
+            raise AOPError(f"could not read Grok's default model: {error}") from error
+        found = re.search(r"^Default model:\s*(\S+)", output, re.MULTILINE)
+        if found is None:
+            raise AOPError("`grok models` did not report a default model; pass --model")
+        return found.group(1)
 
     def execute(
         self,
@@ -2583,7 +2599,6 @@ class DevinAdapter:
 class OpenCodeAdapter:
     provider = "opencode"
     modes = frozenset({"agent"})
-    DEFAULT_MODEL = "opencode/deepseek-v4-flash"
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_OPENCODE_BIN", "opencode")
@@ -2591,10 +2606,27 @@ class OpenCodeAdapter:
     def normalize_options(
         self, model: str | None, effort: str | None
     ) -> tuple[str | None, str | None]:
-        selected = model or self.DEFAULT_MODEL
+        # OpenCode's events do not name the model, so record its configured default.
+        selected = model or self.configured_model()
         if "/" not in selected:
             selected = f"opencode/{selected}"
         return selected, effort
+
+    def configured_model(self) -> str:
+        try:
+            output = subprocess.run(
+                [self.binary, "debug", "config"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            ).stdout
+            model = json.loads(output).get("model")
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as error:
+            raise AOPError(f"could not read OpenCode's configuration: {error}") from error
+        if not isinstance(model, str) or not model:
+            raise AOPError("OpenCode has no configured default model; pass --model")
+        return model
 
     def execute(
         self,
@@ -3215,7 +3247,6 @@ class _HermesSession:
 class HermesAdapter:
     provider = "hermes"
     modes = frozenset({"agent", "participant"})
-    DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
     EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
     def __init__(self, binary: str | None = None):
@@ -3228,7 +3259,9 @@ class HermesAdapter:
             raise AOPError(
                 f"Hermes effort must be one of: {', '.join(sorted(self.EFFORTS))}"
             )
-        return model or self.DEFAULT_MODEL, effort
+        # Without --model, Hermes uses its configured default and its session
+        # export records the model it ran.
+        return model, effort
 
     def execute(
         self,
@@ -5366,15 +5399,19 @@ def _hermes_inference_provider(request: RunRequest) -> str | None:
     """The provider a Hermes run infers through: its override, else Hermes config."""
     if request.inference_provider is not None:
         return request.inference_provider
+    model = _hermes_model_config(_hermes_source_home(dict(os.environ)))
+    provider = model.get("provider") if model is not None else None
+    return provider if isinstance(provider, str) else None
+
+
+def _hermes_model_config(home: Path) -> dict[str, Any] | None:
+    """The `model` section of a Hermes home's config: provider, default, base URL."""
     try:
-        config = yaml.safe_load(
-            (_hermes_source_home(dict(os.environ)) / "config.yaml").read_text()
-        )
+        config = yaml.safe_load((home / "config.yaml").read_text())
     except (OSError, yaml.YAMLError):
         return None
     model = config.get("model") if isinstance(config, dict) else None
-    provider = model.get("provider") if isinstance(model, dict) else None
-    return provider if isinstance(provider, str) else None
+    return model if isinstance(model, dict) else None
 
 
 def _hermes_source_home(environment: dict[str, str]) -> Path:
@@ -5412,6 +5449,13 @@ def _prepare_hermes_home(
                 and (not sealed or entry.name == "auth.json")
             ):
                 shutil.copy2(entry, target)
+        if sealed:
+            # Provider selection only, so the credentials reach their provider.
+            model = _hermes_model_config(source)
+            if model is not None:
+                (temporary / "config.yaml").write_text(
+                    yaml.safe_dump({"model": model}, sort_keys=True)
+                )
         os.replace(temporary, destination)
     except OSError as error:
         shutil.rmtree(temporary, ignore_errors=True)

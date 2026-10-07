@@ -1050,6 +1050,9 @@ import sys
 import time
 
 args = sys.argv[1:]
+if args == ["debug", "config"]:
+    print(json.dumps({{"model": "opencode/deepseek-v4-flash"}}))
+    raise SystemExit(0)
 if args[0] != "run" or "--format" not in args or "--auto" not in args:
     raise RuntimeError(f"unexpected invocation: {{args}}")
 prompt = sys.stdin.read()
@@ -1319,6 +1322,10 @@ def fake_hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     hermes_home = tmp_path / "hermes-home"
     hermes_home.mkdir()
     (hermes_home / "auth.json").write_text("{}\n")
+    (hermes_home / "config.yaml").write_text(
+        "model:\n  default: deepseek/deepseek-v4-flash-0731\n  provider: nous\n"
+        "toolsets: [web]\n"
+    )
     (hermes_home / "skills" / "study-skill").mkdir(parents=True)
     (hermes_home / "skills" / "study-skill" / "SKILL.md").write_text(
         "concealed study instruction\n"
@@ -1329,6 +1336,7 @@ def fake_hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 
@@ -1386,7 +1394,15 @@ state = (
     if state_path.exists()
     else {{
         "id": session_id,
-        "model": args[args.index("--model") + 1],
+        # Without --model, Hermes uses its configured default.
+        "model": (
+            args[args.index("--model") + 1]
+            if "--model" in args
+            else re.search(
+                r"default: (\\S+)",
+                (pathlib.Path(os.environ["HERMES_HOME"]) / "config.yaml").read_text(),
+            ).group(1)
+        ),
         "billing_provider": (
             args[args.index("--provider") + 1]
             if "--provider" in args
@@ -1609,9 +1625,13 @@ import sys
 
 args = sys.argv[1:]
 if args == ["models"]:
+    # The format of grok 1.0.5's `grok models`.
+    print("You are logged in with grok.com.")
+    print()
+    print("Default model: grok-4.5")
+    print()
     print("Available models:")
-    print("  * grok-build (default)")
-    print("  * grok-4.5")
+    print("  * grok-4.5 (default)")
     raise SystemExit(0)
 
 required = {{

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import api_cost
 
 from agent_orchestration_process import runner as runner_module
@@ -1903,7 +1904,7 @@ def test_hermes_supports_workspace_sandbox_and_artifacts(
     ).read_text() == "# Hermes artifact\n"
 
 
-def test_hermes_defaults_to_deepseek_v4_flash_0731(
+def test_hermes_uses_and_records_its_configured_default_model(
     repository: Path, fake_hermes: Path
 ) -> None:
     runner = AgentRunner(
@@ -1913,12 +1914,31 @@ def test_hermes_defaults_to_deepseek_v4_flash_0731(
     result = runner.run(task="default-hermes", prompt="test")
 
     assert result.succeeded
+    assert "--model" not in result.command
     assert result.model == "deepseek/deepseek-v4-flash-0731"
     assert result.effort is None
-    assert ["--model", "deepseek/deepseek-v4-flash-0731"] == result.command[
-        result.command.index("--model") : result.command.index("--model") + 2
-    ]
     assert "--reasoning" not in result.command
+
+
+def test_sealed_hermes_home_gets_only_the_model_configuration(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "auth.json").write_text("{}")
+    (source / "config.yaml").write_text(
+        "model:\n  provider: xai-oauth\n  default: grok-build-0.1\n"
+        "toolsets: [web]\npersonality: concealed\n"
+    )
+    destination = tmp_path / "home"
+
+    runner_module._prepare_hermes_home(source, destination, sealed=True)
+
+    assert sorted(path.name for path in destination.iterdir()) == [
+        "auth.json",
+        "config.yaml",
+    ]
+    assert yaml.safe_load((destination / "config.yaml").read_text()) == {
+        "model": {"provider": "xai-oauth", "default": "grok-build-0.1"}
+    }
 
 
 def test_hermes_rejects_an_unsupported_effort(
@@ -2077,6 +2097,9 @@ def test_hermes_run_and_resume_with_read_only_runtime_home(
     hermes_home = tmp_path / f"managed-hermes-{profile}"
     hermes_home.mkdir()
     (hermes_home / "auth.json").write_text("{}\n")
+    (hermes_home / "config.yaml").write_text(
+        "model:\n  default: deepseek/deepseek-v4-flash-0731\n  provider: nous\n"
+    )
     state_path = hermes_home / "fake-state.json"
     hermes_home.chmod(0o555)
     monkeypatch.setenv("HERMES_HOME", os.fspath(hermes_home))
@@ -2151,6 +2174,9 @@ def test_hermes_migrates_freshest_rotated_credentials_and_serializes_tasks(
     source_home.mkdir()
     source_auth = source_home / "auth.json"
     source_auth.write_text(json.dumps(auth(0, updated_minute=5)))
+    (source_home / "config.yaml").write_text(
+        "model:\n  default: grok-4.6\n  provider: xai-oauth\n"
+    )
     monkeypatch.setenv("HERMES_HOME", os.fspath(source_home))
     monkeypatch.setenv("AOP_HERMES_BIN", os.fspath(fake_hermes))
     monkeypatch.setenv("AOP_FAKE_HERMES_STATE_IN_HOME", "1")

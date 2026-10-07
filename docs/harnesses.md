@@ -12,10 +12,10 @@ session mechanism while giving every run the same AOP access controls and result
 | [Claude Code](https://code.claude.com/docs/en/overview) | `claude` | Native default | Accepts normal model aliases and effort from `low` through `max`. |
 | [Cursor Agent](https://docs.cursor.com/en/cli/overview) | `cursor` | `composer-2.5` | Reasoning and fast variants are part of the model ID, so separate effort is rejected. |
 | [Devin CLI](https://docs.devin.ai/cli/index) | `devin` | `swe-1-7` | Reasoning variants are part of the model ID, so separate effort is rejected. |
-| [OpenCode](https://github.com/anomalyco/opencode) | `opencode` | `opencode/deepseek-v4-flash` | Short model names are qualified with `opencode/`; effort selects the native variant. |
+| [OpenCode](https://github.com/anomalyco/opencode) | `opencode` | the `model` in OpenCode's resolved configuration (`opencode debug config`); without one, `--model` is required | Short model names are qualified with `opencode/`; effort selects the native variant. |
 | [Antigravity](https://github.com/google-antigravity/antigravity-cli) | `agy` | Native default | Accepts exact names printed by `agy models`; effort is `low`, `medium`, or `high`. |
-| [Grok Build](https://github.com/xai-org/grok-build) | `grok` | `grok-build` | Accepts native effort from `none` through `max`. |
-| [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes` | `deepseek/deepseek-v4-flash-0731` | Uses the configured inference provider unless both `--provider` and `--model` override it. |
+| [Grok Build](https://github.com/xai-org/grok-build) | `grok` | the default `grok models` reports | Accepts native effort from `none` through `max`. |
+| [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes` | Hermes's configured default; AOP records the model from its session | Uses the configured inference provider unless both `--provider` and `--model` override it. |
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | `dsh` | `deepseek-flash` through `deepseek-official` | Also supports `deepseek-v4-pro`; another configured route requires both `--provider` and `--model`. |
 | Zcode | `zcode` | Native configured model | Uses native `provider/model` IDs and model-specific effort levels verified through the app-server. |
 

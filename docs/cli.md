@@ -84,11 +84,18 @@ aop run study-arm --agent codex --profile sealed --no-web \
 | Codex | `chatgpt.com:443`; AOP refreshes Codex logins outside the sandbox | A sealed `--no-web` run with the ChatGPT login answered |
 | OpenCode | `opencode.ai:443` | A sealed `--no-web` run answered |
 | Grok | `auth.x.ai:443`, `cli-chat-proxy.grok.com:443` | A sealed `--no-web` run reached both hosts and got the same server reply as an unrestricted run |
+| DeepSeek Harness on its `deepseek-official` route | `api.deepseek.com:443` | A sealed `--no-web` run reached the API, which reported the account out of credit; the run's tool roster had no web or shell tools |
+| Devin | `server.codeium.com:443` | A sealed `--no-web` run answered; `web_search` and shell calls were refused and a `webfetch` to an outside site was blocked by the proxy |
 | Hermes with the `xai-oauth` provider | `auth.x.ai:443`, `api.x.ai:443` | A run reached `auth.x.ai` as an unrestricted run did; `api.x.ai` is the provider's configured base URL |
 
-A harness or Hermes provider without an entry reaches only the URLs the run names. The network boundary cannot stop retrieval that a provider performs on its own servers through an allowed inference endpoint, such as a server-side search tool, so the harness-level restrictions above still apply. The `host` profile has no sandbox and keeps only the harness-level restrictions.
+A harness or Hermes provider without an entry reaches only the URLs the run names. The network boundary cannot stop retrieval that a provider performs on its own servers through an allowed inference endpoint, such as a server-side search tool, and a shell holding the run's credentials could call such a tool directly. The harness-level restrictions above therefore still apply, and harnesses whose web search runs server-side also lose their shell tools:
 
-The effective policy is stored in `request.json` under `model_capabilities`. Some harnesses require a stronger restriction than the name suggests. OpenCode currently runs without any model-visible tools, while Codex, Claude, Grok, and Hermes retain local-only tools. Cursor, Devin, Antigravity, and DeepSeek Harness currently reject `--no-web`. Grok also rejects the `host` profile because host-visible global customizations cannot be excluded with its current automation interface.
+- DeepSeek Harness: AOP's patch disables the `web`, `web-search-deepseek`, `web-fetch-http`, `tool-web`, `tool-bash`, `tool-pwsh`, `tool-jobs`, and `tool-workflow` plugins, because its `web_search` is a server-side tool call through the DeepSeek API host. File, subagent, skill, todo, and goal tools remain.
+- Devin: AOP adds the permission deny rules `exec` and `web_search` to the run's private Devin config, because `web_search` runs on Devin's API server. Its `webfetch` tool runs on the client, where the proxy refuses it. When a deny rule refuses a call, Devin ends the turn without a final message, so a run whose model insists on searching fails instead of continuing offline.
+
+Both require a sandboxed profile, because their remaining tools rely on the network namespace. The `host` profile has no sandbox and keeps only the harness-level restrictions.
+
+The effective policy is stored in `request.json` under `model_capabilities`. Some harnesses require a stronger restriction than the name suggests. OpenCode currently runs without any model-visible tools, while Codex, Claude, Grok, and Hermes retain local-only tools. Cursor and Antigravity currently reject `--no-web`: Antigravity's `search_web` and `read_url_content` run on Google's servers through its inference backend, and neither its `disabledTools` setting nor its permission rules removed them in a real run. Grok also rejects the `host` profile because host-visible global customizations cannot be excluded with its current automation interface.
 
 Exact resumes inherit the original `--no-web` policy and private provider state. For batch
 manifests, set `no_web = true` on a task.

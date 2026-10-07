@@ -309,6 +309,26 @@ _NO_WEB_POLICIES: dict[str, dict[str, object]] = {
             "hermes --safe-mode",
         ],
     },
+    "devin": {
+        "model_tools": "denylist",
+        "allowed_toolsets": [
+            "file tools, and webfetch, whose network is limited to the egress allowlist"
+        ],
+        "enforcement": [
+            "Devin permission deny rules: exec, web_search",
+        ],
+        "requires_network_sandbox": True,
+    },
+    "dsh": {
+        "model_tools": "denylist",
+        "allowed_toolsets": ["file, subagent, skill, todo, and goal tools"],
+        "enforcement": [
+            "dsh patch disables web, web-search-deepseek, web-fetch-http, tool-web, "
+            "tool-bash, tool-pwsh, tool-jobs, and tool-workflow",
+        ],
+        # Its shell keeps network access unless the sandbox removes it.
+        "requires_network_sandbox": True,
+    },
     "opencode": {
         "model_tools": "denied",
         "allowed_toolsets": [],
@@ -346,6 +366,10 @@ def resolve_model_capabilities(
             f"{provider} cannot enforce --no-web; AOP will not substitute "
             "a prompt-only restriction"
         ) from error
+    if provider_policy.get("requires_network_sandbox") and profile == "host":
+        raise AOPError(
+            f"{provider} --no-web needs the network sandbox, which the host profile lacks"
+        )
     return {
         "requested": {"external_retrieval": "denied"},
         "effective": {

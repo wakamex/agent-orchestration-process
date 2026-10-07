@@ -1723,7 +1723,7 @@ def test_no_web_enforcement_is_recorded_for_supported_harnesses(
             assert not grok_home.joinpath("config.toml").exists()
 
 
-@pytest.mark.parametrize("provider", ["cursor", "devin", "agy", "dsh"])
+@pytest.mark.parametrize("provider", ["cursor", "agy"])
 def test_no_web_rejects_unsupported_harness_before_creating_a_worktree(
     repository: Path,
     fake_cursor: Path,
@@ -2504,3 +2504,64 @@ def test_sealed_claude_run_reaches_a_loopback_recorder(
 
     assert result.succeeded, result.error
     assert received == [b"hello"]
+
+
+@pytest.mark.parametrize("provider", ["devin", "dsh"])
+def test_no_web_harnesses_relying_on_the_network_sandbox_reject_host(
+    repository: Path, fake_devin: Path, fake_dsh: Path, provider: str
+) -> None:
+    adapter = (
+        DevinAdapter(os.fspath(fake_devin))
+        if provider == "devin"
+        else DeepSeekHarnessAdapter(os.fspath(fake_dsh))
+    )
+    manager = WorktreeManager.discover(repository)
+
+    with pytest.raises(AOPError, match="needs the network sandbox"):
+        AgentRunner(manager, adapter).run(
+            task=f"host-{provider}", prompt="test", no_web=True, profile="host"
+        )
+    assert manager.list() == []
+
+
+def test_no_web_dsh_disables_web_and_shell_plugins(
+    repository: Path, fake_dsh: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), DeepSeekHarnessAdapter(os.fspath(fake_dsh))
+    )
+
+    result = runner.run(task="dsh-offline", prompt="test", no_web=True)
+
+    assert result.succeeded, result.error
+    patch = Path(result.command[result.command.index("--patch") + 1])
+    request = runner.store.load_request(result.run_id)
+    scratch = Path(request.effective_policy["controller"]["scratch"])
+    rows = (scratch / patch.name).read_text()
+    for plugin in (
+        "tool-web",
+        "web-fetch-http",
+        "web-search-deepseek",
+        "web",
+        "tool-bash",
+        "tool-pwsh",
+        "tool-jobs",
+        "tool-workflow",
+    ):
+        assert f"- id: {plugin}\n  disabled: true" in rows
+    assert "api.deepseek.com:443" in request.effective_policy["network"][
+        "allowed_endpoints"
+    ]
+
+
+def test_no_web_devin_denies_shell_and_web_search(tmp_path: Path) -> None:
+    config = tmp_path / "config.json"
+    config.write_text('{"version": 1, "permissions": {"deny": ["Exec(rm)"]}}')
+
+    runner_module._deny_devin_web_tools(config)
+
+    assert json.loads(config.read_text())["permissions"]["deny"] == [
+        "Exec(rm)",
+        "exec",
+        "web_search",
+    ]

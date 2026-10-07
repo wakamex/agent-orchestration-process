@@ -32,9 +32,12 @@ HARNESS_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "codex": ("chatgpt.com:443",),
     # xAI login and token refresh, and Grok Build's subscription inference.
     "grok": ("auth.x.ai:443", "cli-chat-proxy.grok.com:443"),
+    # Devin's API server: inference, login, and its model list.
+    "devin": ("server.codeium.com:443",),
     # OpenCode Zen inference.
     "opencode": ("opencode.ai:443",),
-    # Hermes endpoints depend on its inference provider.
+    # DeepSeek Harness and Hermes endpoints depend on their inference provider.
+    "dsh:deepseek-official": ("api.deepseek.com:443",),
     "hermes:xai-oauth": ("auth.x.ai:443", "api.x.ai:443"),
 }
 

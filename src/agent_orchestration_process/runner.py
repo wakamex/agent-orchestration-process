@@ -2371,7 +2371,7 @@ class DevinAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        _prepare_devin_environment(environment)
+        _prepare_devin_environment(environment, no_web=request.no_web)
         export_path = (
             Path(environment["AOP_SCRATCH_DIR"])
             / f".devin-export-{request.run_id}.json"
@@ -4767,6 +4767,25 @@ def _prepare_dsh_environment(request: RunRequest, environment: dict[str, str]) -
             "  disabled: true",
             "- id: headless-runner",
             "  disabled: true",
+            *(
+                # web_search runs on DeepSeek's servers through the inference
+                # host, which the network sandbox must allow. Shell and workflow
+                # tools go too: with the run's DeepSeek key, a shell could call
+                # that search directly.
+                row
+                for plugin in (
+                    "tool-web",
+                    "web-fetch-http",
+                    "web-search-deepseek",
+                    "web",
+                    "tool-bash",
+                    "tool-pwsh",
+                    "tool-jobs",
+                    "tool-workflow",
+                )
+                for row in (f"- id: {plugin}", "  disabled: true")
+                if request.no_web
+            ),
             "- insert:",
             "    - id: aop-headless-runner",
             f"      name: {json.dumps(runner_uri)}",
@@ -5027,7 +5046,31 @@ def _prepare_cursor_state(
         raise AOPError(f"could not prepare isolated Cursor state: {error}") from error
 
 
-def _prepare_devin_environment(environment: dict[str, str]) -> None:
+# Devin permission rules for --no-web. web_search runs on Devin's API server,
+# which the network sandbox must allow, so only Devin's rules can remove it;
+# shell execution goes too, since it could call that server with the run's login.
+# webfetch runs on the client, where the network sandbox refuses it.
+DEVIN_NO_WEB_DENY = ("exec", "web_search")
+
+
+def _deny_devin_web_tools(config_path: Path) -> None:
+    try:
+        config = json.loads(config_path.read_text())
+    except FileNotFoundError:
+        config = {}
+    except (OSError, ValueError) as error:
+        raise AOPError(f"could not read Devin config: {error}") from error
+    if not isinstance(config, dict):
+        raise AOPError("Devin config is not a JSON object")
+    permissions = config.setdefault("permissions", {})
+    permissions["deny"] = sorted({*permissions.get("deny", []), *DEVIN_NO_WEB_DENY})
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(config_path, json.dumps(config, indent=2) + "\n")
+
+
+def _prepare_devin_environment(
+    environment: dict[str, str], *, no_web: bool = False
+) -> None:
     source_data = _devin_source_data(environment)
     source_config = _devin_source_config(environment)
     destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "devin"
@@ -5037,6 +5080,8 @@ def _prepare_devin_environment(environment: dict[str, str]) -> None:
         destination,
         sealed=_sealed(environment),
     )
+    if no_web:
+        _deny_devin_web_tools(destination / "config" / "devin" / "config.json")
     cache = Path(environment["AOP_CACHE_DIR"]) / "devin"
     cache.mkdir(parents=True, exist_ok=True)
     environment.update(
@@ -6064,6 +6109,8 @@ class AgentRunner:
                 ],
                 _hermes_inference_provider(request)
                 if request.provider == "hermes"
+                else request.inference_provider or "deepseek-official"
+                if request.provider == "dsh"
                 else None,
             )
             effective_policy["network"] = {

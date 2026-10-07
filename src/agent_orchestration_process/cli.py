@@ -185,6 +185,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="LIST",
         help="exact comma-separated built-in tool set (claude only; '' for none)",
     )
+    run.add_argument(
+        "--provider-base-url",
+        metavar="URL",
+        help="send the harness's inference requests to URL, such as a local "
+        "recorder or proxy (claude only)",
+    )
     run.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
     run.add_argument(
         "--json", action="store_true", help="print the normalized result as JSON"
@@ -400,6 +406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 input_paths=args.input_paths,
                 system_prompt=_read_system_prompt(args),
                 tools=args.tools,
+                provider_base_url=args.provider_base_url,
             )
             return _report_run(result, manager, json_output=args.json)
 

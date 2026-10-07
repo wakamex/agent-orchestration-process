@@ -2378,3 +2378,103 @@ def test_system_prompt_and_tools_are_claude_only(
 
     with pytest.raises(AOPError, match="does not support --system-prompt"):
         runner.run(task="codex", prompt="first", system_prompt="")
+
+
+def test_claude_provider_base_url_reaches_the_sandbox_and_is_kept_on_resume(
+    repository: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = fake_claude.read_text()
+    fake_claude.write_text(
+        script.replace(
+            "prompt = sys.stdin.read()\n",
+            "prompt = sys.stdin.read()\n"
+            "if os.environ.get('ANTHROPIC_BASE_URL') != 'http://127.0.0.1:8765':\n"
+            "    raise SystemExit('base URL missing')\n",
+            1,
+        )
+    )
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+    )
+
+    for profile in ("sealed", "edit"):
+        first = runner.run(
+            task=f"recorded-{profile}",
+            prompt="first",
+            profile=profile,
+            provider_base_url="http://127.0.0.1:8765",
+        )
+        resumed = runner.resume(run_id=first.run_id, prompt="second")
+        for result in (first, resumed):
+            assert result.succeeded, result.error
+            request = runner.store.load_request(result.run_id)
+            assert request.provider_base_url == "http://127.0.0.1:8765"
+
+
+def test_ambient_claude_base_url_is_never_dropped_silently(
+    repository: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8765")
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+    )
+
+    with pytest.raises(AOPError, match="pass --provider-base-url"):
+        runner.run(task="ambient", prompt="first")
+    with pytest.raises(AOPError, match="http"):
+        runner.run(task="bad", prompt="first", provider_base_url="127.0.0.1:8765")
+
+
+def test_provider_base_url_is_claude_only(repository: Path, fake_codex: Path) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    with pytest.raises(AOPError, match="does not support --provider-base-url"):
+        runner.run(task="codex", prompt="first", provider_base_url="http://127.0.0.1:1")
+
+
+def test_sealed_claude_run_reaches_a_loopback_recorder(
+    repository: Path, fake_claude: Path
+) -> None:
+    import http.server
+    import threading
+
+    received: list[bytes] = []
+
+    class Recorder(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            received.append(self.rfile.read(int(self.headers["Content-Length"])))
+            self.send_response(400)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Recorder)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}"
+    script = fake_claude.read_text()
+    fake_claude.write_text(
+        script.replace(
+            "prompt = sys.stdin.read()\n",
+            "prompt = sys.stdin.read()\n"
+            "import urllib.request, urllib.error\n"
+            "try:\n"
+            "    urllib.request.urlopen(urllib.request.Request(\n"
+            "        os.environ['ANTHROPIC_BASE_URL'] + '/v1/messages',\n"
+            "        data=prompt.encode(), method='POST'))\n"
+            "except urllib.error.HTTPError:\n"
+            "    pass\n",
+            1,
+        )
+    )
+    try:
+        result = AgentRunner(
+            WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+        ).run(task="recorder", prompt="hello", profile="sealed", provider_base_url=url)
+    finally:
+        server.shutdown()
+
+    assert result.succeeded, result.error
+    assert received == [b"hello"]

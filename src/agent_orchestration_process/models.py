@@ -82,6 +82,8 @@ class RunRequest:
     # built-in tool set; None keeps the harness default.
     system_prompt: str | None = None
     tools: tuple[str, ...] | None = None
+    # Base URL the harness sends inference requests to, instead of its default.
+    provider_base_url: str | None = None
     # How `aop migrate-results` converted an older record, if it did.
     migration: dict[str, Any] | None = None
 

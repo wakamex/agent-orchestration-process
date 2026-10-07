@@ -14,6 +14,7 @@ import stat
 import subprocess
 import threading
 import time
+import urllib.parse
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -166,6 +167,8 @@ def _atomic_write_private(path: Path, content: str) -> None:
 T = TypeVar("T")
 # Claude tools that cannot reach the network, the default set under --no-web.
 CLAUDE_NO_WEB_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")
+# The environment variable each harness reads its inference base URL from.
+PROVIDER_BASE_URL_VARIABLES = {"claude": "ANTHROPIC_BASE_URL"}
 
 
 class RunStore:
@@ -1185,6 +1188,9 @@ class ClaudeAdapter:
         environment: dict[str, str],
     ) -> RunResult:
         _prepare_claude_environment(environment)
+        if request.provider_base_url is not None:
+            environment["ANTHROPIC_BASE_URL"] = request.provider_base_url
+            environment["AOP_PROVIDER_BASE_URL_ENV"] = "ANTHROPIC_BASE_URL"
         command = _provider_command(
             self._command(request, worktree), request, worktree, environment
         )
@@ -4264,6 +4270,9 @@ def _guest_environment(
         for name in ("ZCODE_MODEL", "ZCODE_MODEL_TELEMETRY_ENABLED", "ZCODE_BASE_URL"):
             if name in environment:
                 selected[name] = environment[name]
+    base_url_variable = environment.get("AOP_PROVIDER_BASE_URL_ENV")
+    if base_url_variable is not None:
+        selected[base_url_variable] = environment[base_url_variable]
     codex_credential_ref = environment.get("AOP_CODEX_CREDENTIAL_REF")
     if codex_credential_ref is not None:
         for name in _AUTH_ENV_NAMES:
@@ -5580,9 +5589,11 @@ class AgentRunner:
         input_paths: Sequence[str | os.PathLike[str]] = (),
         system_prompt: str | None = None,
         tools: Sequence[str] | None = None,
+        provider_base_url: str | None = None,
     ) -> RunResult:
         self._validate_mode(mode)
         tools = self._validated_framing(system_prompt, tools, no_web)
+        self._validate_provider_base_url(provider_base_url, profile)
         self._validate_inference_provider(inference_provider, model)
         if profile not in PROFILES:
             raise AOPError(f"unknown execution profile: {profile}")
@@ -5603,6 +5614,7 @@ class AgentRunner:
             artifacts=artifacts,
             system_prompt=system_prompt,
             tools=tools,
+            provider_base_url=provider_base_url,
         )
         worktree = (
             self._create_sealed_workspace(request.run_id)
@@ -5648,6 +5660,9 @@ class AgentRunner:
         self._validate_mode(parent_request.mode)
         self._validate_no_web(
             parent_request.no_web, parent_request.mode, parent_request.profile
+        )
+        self._validate_provider_base_url(
+            parent_request.provider_base_url, parent_request.profile
         )
         self._validate_adapter_installation()
         if not parent_result.session_id:
@@ -5726,6 +5741,7 @@ class AgentRunner:
             artifacts=artifacts,
             system_prompt=parent_request.system_prompt,
             tools=parent_request.tools,
+            provider_base_url=parent_request.provider_base_url,
         )
         return self._execute(
             request,
@@ -6024,6 +6040,7 @@ class AgentRunner:
         artifacts: Sequence[str] = (),
         system_prompt: str | None = None,
         tools: tuple[str, ...] | None = None,
+        provider_base_url: str | None = None,
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -6047,7 +6064,27 @@ class AgentRunner:
             created_at=_now(),
             system_prompt=system_prompt,
             tools=tools,
+            provider_base_url=provider_base_url,
         )
+
+    def _validate_provider_base_url(self, url: str | None, profile: str) -> None:
+        variable = PROVIDER_BASE_URL_VARIABLES.get(self.adapter.provider)
+        if url is None:
+            # A base URL the run would silently drop is ambiguous: the caller
+            # may believe the run cannot reach the default endpoint.
+            if variable and profile != "host" and os.environ.get(variable):
+                raise AOPError(
+                    f"{variable} is set but AOP does not pass it to {profile} runs; "
+                    "pass --provider-base-url to use it, or unset it"
+                )
+            return
+        if variable is None:
+            raise AOPError(
+                f"{self.adapter.provider} does not support --provider-base-url"
+            )
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise AOPError(f"--provider-base-url must be an http(s) URL: {url!r}")
 
     def _validated_framing(
         self, system_prompt: str | None, tools: Sequence[str] | None, no_web: bool

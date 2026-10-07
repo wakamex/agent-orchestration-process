@@ -62,10 +62,7 @@ adds `reasoning_output_tokens` to output. This is algebraically equivalent to th
 cache calculation for Agy and direct DeepSeek Harness runs, but no provider-specific pricing flag is
 needed.
 
-Unversioned records keep their persisted historical `calculated_cost` when loaded. AOP does not
-retroactively recalculate or rewrite that evidence. New normalized DeepSeek Harness runs use the
-same calculation for every inference route. This also fixes older non-DeepSeek Harness calculations
-that treated its disjoint uncached bucket as though it already included cache reads.
+DeepSeek Harness runs use the same calculation for every inference route.
 
 Cache creation and cache writes count toward total processed input. AOP currently has only a cached
 read subset and no separate persisted cache-write pricing bucket, so calculated cost continues to use
@@ -84,33 +81,37 @@ OpenCode can report billed per-step cost; Grok can report terminal cost; and Her
 through its selected inference provider. Cursor and Devin do not currently expose enough
 information for AOP to calculate an API-equivalent cost, so their calculated cost remains null.
 
-## Loading unversioned results
+## Migrating older run records
 
-Unversioned `result.json` records predate the common convention and use mixed meanings. AOP leaves
-those files and their raw provider artifacts unchanged. `RunResult.from_dict()` applies this
-centralized in-memory conversion and marks the loaded object as `aop-token-usage-v3`:
+AOP reads only current run records. Loading an older `result.json` or `request.json` fails with a message to run the one-time migration:
 
-| Legacy provider | In-memory conversion |
+```sh
+aop migrate-results --dry-run
+aop migrate-results
+aop migrate-results /code/project/.aop/runs ~/other/.aop/runs
+```
+
+Without arguments, the command migrates every state directory listed in `$XDG_STATE_HOME/aop/state-roots` (by default `~/.local/state/aop/state-roots`) and the current project's `.aop/runs`. AOP adds a state directory to that list whenever it records a run there, and the migration adds every directory it migrates. `--dry-run` prints, for each run directory, how many records each conversion would change, and writes nothing.
+
+For each record the migration rewrites, it keeps the original byte for byte beside it as `result.pre-v3.json` or `request.pre-v3.json` and adds a `migration` object naming the original schema, the conversions applied, the original's file name, and the migration time. Raw provider artifacts such as `events.jsonl` are never changed. Running the migration again skips records already in the current format.
+
+Results convert as follows:
+
+| Original record | Conversion |
 | --- | --- |
-| Agy | `input_tokens += cached_input_tokens` |
-| Cursor | `input_tokens += cached_input_tokens` |
-| DeepSeek Harness, all inference providers | `input_tokens += cached_input_tokens` |
-| OpenCode | `output_tokens += reasoning_output_tokens` |
-| Claude, Codex, Devin, Grok, Hermes | no arithmetic conversion |
+| Unversioned Agy, Cursor, and DeepSeek Harness results (every inference provider) | `input_tokens += cached_input_tokens`, because these adapters persisted the provider's disjoint uncached input bucket |
+| Unversioned OpenCode results | `output_tokens += reasoning_output_tokens` |
+| Unversioned and `aop-token-usage-v1` results | accounting status derived from the record: a run that did not time out becomes `complete`; a timed-out run becomes `partial` when it has usage or a provider-reported cost, and `unavailable` otherwise |
+| `aop-token-usage-v2` results of providers other than Agy | marker changed to v3; usage unchanged |
+| Every Agy result before v3 | usage recomputed from the `step_update` usage in the run's own `events.jsonl`, because Agy's terminal `result` event reports the conversation's running total across every run that resumed it; without usage events, usage and costs become unavailable |
+| `api_equivalent_cost`, `billing.actual_cost_known`, `calculated_cost.estimated`, `read_paths` | folded into `calculated_cost` or `provider_reported_cost`, removed, or renamed to `inputs` |
 
-Historical Cursor results did not retain cache-write tokens in `result.json`, and historical
-DeepSeek Harness results did not retain the optional Harness cache-write bucket. Their cache-read
-input is reconstructed exactly, but any unrecorded cache writes cannot be recovered without reading
-raw artifacts. The loader does not consult or alter those artifacts.
+When a conversion changes a result's usage, the migration reprices `calculated_cost` with model-prices at the run's own time and records the price data in `pricing_basis`. A run the model-prices data cannot price for that whole span gets a null cost. Results whose usage is unchanged keep their stored cost. Historical Cursor results did not retain cache-write tokens, and historical DeepSeek Harness results did not retain the optional Harness cache-write bucket, so those writes stay unrecoverable.
 
-## Loading v2 results
-
-`aop-token-usage-v2` is the v3 convention with one exception: an Agy run recorded the usage on Agy's terminal `result` event, which is the conversation's running total across every invocation that resumed it. A resumed Agy run therefore repeated all earlier runs' usage. AOP leaves those files unchanged. `RunStore.load_result()` recomputes a v2 Agy result's usage from the `step_update` usage in the run's own `events.jsonl` and drops its calculated cost when the recomputed usage differs, because that cost priced the conversation total. Without those events, the loaded result's usage and cost are unavailable. Other providers' v2 results load unchanged.
+Requests convert `sandbox` to `profile` and `read_paths` to `inputs`, and fill fields added after they were written with their defaults: `mode: "agent"`, `no_web: false`, an empty `effective_policy`, `artifacts`, and `inputs`, and null inference provider and route. A `sandbox` value is a Codex sandbox mode that no execution profile resolves, so resuming such a run fails while cleanup works.
 
 ## Downstream consumer rule
 
-Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v3"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the four counters as stored and calculate total tokens as `input_tokens + output_tokens`. Never add cached input or reasoning output. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Missing or unknown schema markers should be rejected instead of guessed.
-
-Legacy conversion remains centralized in AOP's `RunResult` loader for unversioned and v1 records that have not been migrated by their owner. Downstream consumers do not need to reproduce the provider table. A consumer reading v2 files directly can use them as v3 except for Agy results, whose usage it should recompute from the run's `events.jsonl` as described above or treat as unknown.
+Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v3"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the four counters as stored and calculate total tokens as `input_tokens + output_tokens`. Never add cached input or reasoning output. Each result records only its own invocation's usage, so results can be summed across runs. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Records with other schema markers should be migrated with `aop migrate-results` rather than converted by the consumer. To find every AOP run directory on a machine, read `$XDG_STATE_HOME/aop/state-roots` and look in each listed directory's `runs`.
 
 Zcode uses the native terminal `usage` summary for the current turn. If the terminal summary is missing, it sums observed `model_request_completed` measurements for that turn, deduplicated by request and attempt, and marks accounting partial. Timeouts retain these measurements. Cumulative session projection totals are never substituted for per-turn usage. For the canonical Z.ai Coding Plan route, AOP calculates API-equivalent cost for each measured model request at its completion time, including compaction and lite-model calls. A cost is available only when all measured models have prices and the measurements reconcile with reported turn usage. Native credential provenance identifies the subscription route separately; provider-reported monetary cost remains unavailable.

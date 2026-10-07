@@ -18,7 +18,7 @@ from conftest import api_cost
 from agent_orchestration_process import __version__
 from agent_orchestration_process.cli import build_parser, main
 from agent_orchestration_process.locks import exclusive_lock, task_lock_path
-from agent_orchestration_process.models import RunRequest, RunResult
+from agent_orchestration_process.models import RunRequest
 from agent_orchestration_process.runner import (
     RunStore,
     AgentRunner,
@@ -659,22 +659,6 @@ def test_run_persists_structured_codex_artifacts(
     )
     assert persisted_result["provider_reported_cost"] is None
 
-    legacy_result = dict(persisted_result)
-    legacy_result.pop("usage_schema")
-    legacy_result["api_equivalent_cost"] = dict(legacy_result.pop("calculated_cost"))
-    legacy_result["api_equivalent_cost"]["estimated"] = True
-    legacy_result.pop("provider_reported_cost")
-    legacy_result["billing"] = {
-        **legacy_result["billing"],
-        "actual_cost_known": False,
-    }
-    loaded_legacy = RunResult.from_dict(legacy_result)
-    assert loaded_legacy.calculated_cost is not None
-    assert loaded_legacy.calculated_cost.amount_usd == expected_cost
-    assert loaded_legacy.provider_reported_cost is None
-    legacy_result["read_paths"] = legacy_result.pop("inputs")
-    loaded_read_paths = RunResult.from_dict(legacy_result)
-    assert loaded_read_paths.inputs == loaded_legacy.inputs
     assert '"method": "thread/start"' in events
     assert '"approvalPolicy": "never"' in events
     assert '"sandbox": "danger-full-access"' in events
@@ -1416,7 +1400,7 @@ def test_cli_cleanup_discards_a_run_worktree_but_keeps_run_records(
 
 
 @pytest.mark.parametrize("legacy_field", ["sandbox", "read_paths"])
-def test_requests_from_before_profiles_and_inputs_load_for_cleanup(
+def test_requests_from_before_profiles_and_inputs_migrate_for_cleanup(
     repository: Path,
     fake_codex: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1440,7 +1424,15 @@ def test_requests_from_before_profiles_and_inputs_load_for_cleanup(
         request["read_paths"] = request.pop("inputs")
     request_path.write_text(json.dumps(request))
 
-    loaded = RunStore(manager.state_dir / "runs").load_request(result.run_id)
+    store = RunStore(manager.state_dir / "runs")
+    with pytest.raises(AOPError, match="aop migrate-results"):
+        store.load_request(result.run_id)
+    assert main(["cleanup", result.run_id]) == 2
+    assert "aop migrate-results" in capsys.readouterr().err
+    assert main(["migrate-results"]) == 0
+    capsys.readouterr()
+
+    loaded = store.load_request(result.run_id)
     assert loaded.profile == (
         "scratch-write" if legacy_field == "sandbox" else request["profile"]
     )

@@ -24,7 +24,13 @@ from .model_catalog import ModelCatalog, ensure_catalog_fresh
 from .model_listing import AGENTS, AvailableModel, list_models
 from .models import RunRequest, RunResult
 from .runner import AgentRunner, RunStore, adapter_for, provider_runtime_record
-from .worktrees import AOPError, WorktreeManager
+from .migration import migrate_runs, migration_roots, print_counts
+from .worktrees import (
+    AOPError,
+    WorktreeManager,
+    register_state_root,
+    registered_state_roots,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +64,23 @@ def build_parser() -> argparse.ArgumentParser:
     models.add_argument("--json", action="store_true", help="print JSON")
 
     commands.add_parser("init", help="prepare the current Git repository for AOP")
+
+    migrate = commands.add_parser(
+        "migrate-results",
+        help="convert older run records to the current format, keeping each original",
+    )
+    migrate.add_argument(
+        "runs_dirs",
+        nargs="*",
+        type=Path,
+        help="run directories such as PROJECT/.aop/runs "
+        "(default: every registered AOP state directory and the current project's)",
+    )
+    migrate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would change without writing",
+    )
 
     cleanup = commands.add_parser(
         "cleanup",
@@ -203,13 +226,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw_arguments = list(sys.argv[1:] if argv is None else argv)
         args = build_parser().parse_args(raw_arguments)
 
-        if args.command in {"models", "run", "resume", "batch", "integrate"}:
+        if args.command in {
+            "models",
+            "run",
+            "resume",
+            "batch",
+            "integrate",
+            "migrate-results",
+        }:
             price_warnings = pricing.refresh_prices(
                 force=args.command == "models" and args.refresh
             )
             if args.command != "models":
                 for warning in price_warnings:
                     print(f"aop: warning: {warning}", file=sys.stderr)
+
+        if args.command == "migrate-results":
+            return _migrate_results(args.runs_dirs, dry_run=args.dry_run)
 
         if args.command == "models":
             agents = args.agent or AGENTS
@@ -524,6 +557,27 @@ def _report_policy(
             f"sha256={runtime.get('sha256') or 'unavailable'}",
             file=stream,
         )
+
+
+def _migrate_results(runs_dirs: Sequence[Path], *, dry_run: bool) -> int:
+    if not runs_dirs:
+        try:
+            current = WorktreeManager.discover(Path.cwd()).state_dir
+        except AOPError:
+            current = Path.cwd() / ".aop"
+        runs_dirs = migration_roots(registered_state_roots(), current)
+    errors = 0
+    for runs_dir in runs_dirs:
+        if not runs_dir.is_dir():
+            raise AOPError(f"not a run directory: {runs_dir}")
+        counts = migrate_runs(runs_dir, dry_run=dry_run)
+        if not dry_run:
+            register_state_root(runs_dir.resolve().parent)
+        print_counts(runs_dir, counts)
+        errors += sum(
+            count for outcome, count in counts.items() if outcome.endswith("error")
+        )
+    return 1 if errors else 0
 
 
 def _cleanup_sealed(manager: WorktreeManager, request: RunRequest) -> None:

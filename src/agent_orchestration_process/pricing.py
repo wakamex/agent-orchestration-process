@@ -83,9 +83,7 @@ class CalculatedCost:
     def from_dict(cls, value: dict[str, object] | None) -> CalculatedCost | None:
         if value is None:
             return None
-        fields = dict(value)
-        fields.pop("estimated", None)
-        return cls(**fields)
+        return cls(**value)
 
 
 def estimate_api_cost(

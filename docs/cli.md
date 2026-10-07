@@ -185,6 +185,8 @@ for the complete safety contract.
 
 ## Cleanup and lower-level commands
 
+AOP reads only current run records. Convert records written by older AOP versions once with `aop migrate-results`, which keeps each original beside it; see [migrating older run records](token-usage.md#migrating-older-run-records).
+
 When you no longer need to resume or integrate a task, clean it up using any of its run IDs:
 
 ```sh

@@ -24,6 +24,35 @@ def _user_runtime_dir() -> Path:
     return Path("/run/user") / str(os.getuid())
 
 
+def state_roots_file() -> Path:
+    """List of every AOP state directory that has recorded a run."""
+    base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(base) / "aop" / "state-roots"
+
+
+def register_state_root(state_dir: Path) -> None:
+    path = state_roots_file()
+    entry = os.fspath(state_dir.resolve())
+    if entry in _registered_entries(path):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # One short O_APPEND write per entry, so concurrent runs cannot interleave.
+    with path.open("a") as stream:
+        stream.write(f"{entry}\n")
+
+
+def registered_state_roots() -> list[Path]:
+    return [Path(line) for line in _registered_entries(state_roots_file())]
+
+
+def _registered_entries(path: Path) -> list[str]:
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        return []
+    return list(dict.fromkeys(line for line in lines if line))
+
+
 class AOPError(RuntimeError):
     """A user-actionable orchestration error."""
 

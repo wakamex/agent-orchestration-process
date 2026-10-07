@@ -8,11 +8,8 @@ from typing import Any
 from .pricing import CalculatedCost, TokenUsage
 
 
-LEGACY_TOKEN_USAGE_SCHEMA = "aop-token-usage-v1"
-# v2 is v3's convention, except that resumed Agy runs recorded their
-# conversation's running total; RunStore.load_result corrects those.
-PREVIOUS_TOKEN_USAGE_SCHEMA = "aop-token-usage-v2"
 TOKEN_USAGE_SCHEMA = "aop-token-usage-v3"
+MIGRATE_HINT = "run `aop migrate-results` to convert older run records"
 ACCOUNTING_STATUSES = frozenset({"complete", "partial", "unavailable"})
 
 
@@ -81,6 +78,8 @@ class RunRequest:
     artifacts: tuple[str, ...]
     inputs: tuple[InputSnapshot, ...]
     created_at: str
+    # How `aop migrate-results` converted an older record, if it did.
+    migration: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -88,23 +87,12 @@ class RunRequest:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> RunRequest:
         fields = dict(value)
-        fields.setdefault("mode", "agent")
-        fields.setdefault("inference_provider", None)
         fields["inference_route"] = InferenceRoute.from_dict(
             fields.get("inference_route")
         )
-        fields.setdefault("no_web", False)
-        fields.setdefault("effective_policy", {})
-        # Requests before execution profiles recorded Codex's sandbox mode. Keep
-        # the value, which no profile resolves, so resuming such a run fails.
-        legacy_sandbox = fields.pop("sandbox", None)
-        if legacy_sandbox is not None:
-            fields.setdefault("profile", legacy_sandbox)
-        fields["artifacts"] = tuple(fields.get("artifacts", ()))
-        legacy_read_paths = fields.pop("read_paths", ())
-        fields.setdefault("inputs", legacy_read_paths)
+        fields["artifacts"] = tuple(fields["artifacts"])
         fields["inputs"] = tuple(
-            InputSnapshot.from_dict(item) for item in fields.get("inputs", ())
+            InputSnapshot.from_dict(item) for item in fields["inputs"]
         )
         return cls(**fields)
 
@@ -127,9 +115,7 @@ class BillingProvenance:
     def from_dict(cls, value: dict[str, Any] | None) -> BillingProvenance:
         if value is None:
             return cls()
-        fields = dict(value)
-        fields.pop("actual_cost_known", None)
-        return cls(**fields)
+        return cls(**value)
 
 
 @dataclass(frozen=True)
@@ -175,10 +161,14 @@ class RunResult:
     provider_error: str | None = None
     accounting_status: str = "complete"
     usage_schema: str = TOKEN_USAGE_SCHEMA
+    # How `aop migrate-results` converted an older record, if it did.
+    migration: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.usage_schema != TOKEN_USAGE_SCHEMA:
-            raise ValueError(f"unsupported token usage schema: {self.usage_schema}")
+            raise ValueError(
+                f"unsupported token usage schema {self.usage_schema!r}; {MIGRATE_HINT}"
+            )
         if self.accounting_status not in ACCOUNTING_STATUSES:
             raise ValueError(f"unsupported accounting status: {self.accounting_status}")
         evidence = (
@@ -239,145 +229,32 @@ class RunResult:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> RunResult:
         fields = dict(value)
-        fields.pop("execution_completed", None)
-        fields.pop("response_available", None)
-        fields.pop("status", None)
-        fields.pop("succeeded", None)
-        fields.setdefault("mode", "agent")
-        fields.setdefault("model", None)
-        fields.setdefault("effort", None)
-        fields.setdefault("time_to_first_event_seconds", None)
-        fields.setdefault("time_to_first_response_seconds", None)
-        fields.setdefault("provider_duration_seconds", None)
-        fields.setdefault("provider_status", None)
-        fields.setdefault("provider_error", None)
-        usage_schema = fields.get("usage_schema")
-        if usage_schema is None:
-            usage = _legacy_usage(
-                fields.get("usage"),
-                provider=fields.get("provider"),
-                inference_provider=fields.get("inference_provider"),
-            )
-            fields["usage_schema"] = TOKEN_USAGE_SCHEMA
-            _load_legacy_accounting(fields, usage)
-        elif usage_schema == LEGACY_TOKEN_USAGE_SCHEMA:
-            usage = TokenUsage.from_dict(fields.get("usage"))
-            fields["usage_schema"] = TOKEN_USAGE_SCHEMA
-            _load_legacy_accounting(fields, usage)
-        elif (
-            usage_schema == PREVIOUS_TOKEN_USAGE_SCHEMA
-            and fields.get("provider") == "agy"
+        for derived in (
+            "execution_completed",
+            "response_available",
+            "status",
+            "succeeded",
         ):
-            # Without its events, an Agy v2 usage may be a conversation total.
-            fields.update(
-                usage_schema=TOKEN_USAGE_SCHEMA,
-                usage=None,
-                calculated_cost=None,
-                provider_reported_cost=None,
-                accounting_status="unavailable",
+            fields.pop(derived, None)
+        if fields.get("usage_schema") != TOKEN_USAGE_SCHEMA:
+            raise ValueError(
+                f"unsupported token usage schema {fields.get('usage_schema')!r}; "
+                f"{MIGRATE_HINT}"
             )
-        elif usage_schema in {TOKEN_USAGE_SCHEMA, PREVIOUS_TOKEN_USAGE_SCHEMA}:
-            fields["usage_schema"] = TOKEN_USAGE_SCHEMA
-            status = fields.get("accounting_status")
-            if status not in ACCOUNTING_STATUSES:
-                raise ValueError(f"unsupported accounting status: {status}")
-            fields["usage"] = (
-                None
-                if fields.get("usage") is None
-                else TokenUsage.from_dict(fields.get("usage"))
-            )
-        else:
-            raise ValueError(f"unsupported token usage schema: {usage_schema}")
-        legacy_cost = fields.pop("api_equivalent_cost", None)
-        legacy_billing = fields.get("billing")
-        legacy_reported = (
-            isinstance(legacy_billing, dict)
-            and legacy_billing.get("actual_cost_known") is True
-        )
-        if "calculated_cost" not in fields and not legacy_reported:
-            fields["calculated_cost"] = legacy_cost
-        fields["calculated_cost"] = CalculatedCost.from_dict(
-            fields.get("calculated_cost")
-        )
-        fields.setdefault("provider_reported_cost", None)
-        if fields["provider_reported_cost"] is None and legacy_reported:
-            fields["provider_reported_cost"] = {
-                "amount_usd": legacy_cost["amount_usd"],
-                "currency": legacy_cost.get("currency", "USD"),
-                "source": legacy_cost.get("pricing_source", "legacy run result"),
-            }
+        usage = fields["usage"]
+        fields["usage"] = None if usage is None else TokenUsage.from_dict(usage)
+        fields["calculated_cost"] = CalculatedCost.from_dict(fields["calculated_cost"])
         fields["provider_reported_cost"] = ProviderReportedCost.from_dict(
             fields.get("provider_reported_cost")
         )
-        fields["billing"] = BillingProvenance.from_dict(legacy_billing)
-        fields.setdefault("inference_provider", None)
+        fields["billing"] = BillingProvenance.from_dict(fields.get("billing"))
         fields["inference_route"] = InferenceRoute.from_dict(
             fields.get("inference_route")
         )
         fields["artifacts"] = tuple(
             RunArtifact(**artifact) for artifact in fields.get("artifacts", ())
         )
-        legacy_read_paths = fields.pop("read_paths", ())
-        fields.setdefault("inputs", legacy_read_paths)
         fields["inputs"] = tuple(
             InputSnapshot.from_dict(item) for item in fields.get("inputs", ())
         )
         return cls(**fields)
-
-
-def _load_legacy_accounting(fields: dict[str, Any], usage: TokenUsage) -> None:
-    if not fields.get("timed_out"):
-        fields["usage"] = usage
-        fields["accounting_status"] = "complete"
-        return
-    usage_observed = usage.total_tokens > 0
-    legacy_billing = fields.get("billing")
-    legacy_reported = (
-        isinstance(legacy_billing, dict)
-        and legacy_billing.get("actual_cost_known") is True
-    )
-    cost_observed = fields.get("provider_reported_cost") is not None or legacy_reported
-    if not usage_observed:
-        fields["calculated_cost"] = None
-        if not legacy_reported:
-            fields.pop("api_equivalent_cost", None)
-    fields["usage"] = usage if usage_observed else None
-    fields["accounting_status"] = (
-        "partial" if usage_observed or cost_observed else "unavailable"
-    )
-
-
-def _legacy_usage(
-    value: object,
-    *,
-    provider: object,
-    inference_provider: object,
-) -> TokenUsage:
-    raw = value if isinstance(value, dict) else {}
-    input_tokens = _usage_integer(raw.get("input_tokens"))
-    cached_input_tokens = _usage_integer(raw.get("cached_input_tokens"))
-    output_tokens = _usage_integer(raw.get("output_tokens"))
-    reasoning_output_tokens = _usage_integer(raw.get("reasoning_output_tokens"))
-
-    # These adapters historically persisted their provider's disjoint uncached
-    # input bucket. DSH has that contract for every inference provider, so its
-    # inference provider does not alter this conversion.
-    if provider in {"agy", "cursor", "dsh"}:
-        input_tokens += cached_input_tokens
-    if provider == "opencode":
-        output_tokens += reasoning_output_tokens
-
-    _ = inference_provider
-
-    return TokenUsage(
-        input_tokens=input_tokens,
-        cached_input_tokens=cached_input_tokens,
-        output_tokens=output_tokens,
-        reasoning_output_tokens=reasoning_output_tokens,
-    )
-
-
-def _usage_integer(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
-    return max(value, 0)

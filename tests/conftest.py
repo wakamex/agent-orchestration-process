@@ -62,6 +62,12 @@ if prompt.startswith("SEALED_PROVIDER_PROBE"):
 
 
 @pytest.fixture(autouse=True)
+def private_state_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep AOP's registry of state directories out of the user's state."""
+    monkeypatch.setenv("XDG_STATE_HOME", os.fspath(tmp_path / "xdg-state"))
+
+
+@pytest.fixture(autouse=True)
 def offline_price_refresh(
     request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

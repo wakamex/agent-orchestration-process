@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterator, Protocol, Sequence
+from typing import Any, Callable, Iterator, Protocol, Sequence, TypeVar
 
 import yaml
 from yaml.constructor import ConstructorError
@@ -40,14 +40,12 @@ from .models import (
     RunRequest,
     RunResult,
     ProviderReportedCost,
-    PREVIOUS_TOKEN_USAGE_SCHEMA,
-    TOKEN_USAGE_SCHEMA,
 )
 from .locks import exclusive_lock, task_lock_path
 from .isolation import PROFILES, resolve_policy
 from .pricing import CalculatedCost, TokenUsage, estimate_api_cost
 from .provider_versions import require_supported_agy
-from .worktrees import AOPError, Worktree, WorktreeManager
+from .worktrees import AOPError, Worktree, WorktreeManager, register_state_root
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -165,6 +163,9 @@ def _atomic_write_private(path: Path, content: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+T = TypeVar("T")
+
+
 class RunStore:
     """Store durable inputs and terminal results for each invocation."""
 
@@ -175,6 +176,7 @@ class RunStore:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
         run_dir = self.root / request.run_id
+        register_state_root(self.root.parent)
         try:
             run_dir.mkdir(mode=0o700)
         except FileExistsError as error:
@@ -183,39 +185,20 @@ class RunStore:
         return run_dir
 
     def load_request(self, run_id: str) -> RunRequest:
-        return RunRequest.from_dict(self._load_json(run_id, "request.json"))
+        return self._load(run_id, "request.json", RunRequest.from_dict)
 
     def load_result(self, run_id: str) -> RunResult:
-        raw = self._load_json(run_id, "result.json")
-        if (
-            raw.get("usage_schema") == PREVIOUS_TOKEN_USAGE_SCHEMA
-            and raw.get("provider") == "agy"
-        ):
-            raw = self._corrected_agy_usage(run_id, raw)
-        return RunResult.from_dict(raw)
+        return self._load(run_id, "result.json", RunResult.from_dict)
 
-    def _corrected_agy_usage(
-        self, run_id: str, raw: dict[str, object]
-    ) -> dict[str, object]:
-        """Recompute a v2 Agy result's usage from its own step events."""
+    def _load(self, run_id: str, name: str, load: Callable[[dict[str, object]], T]) -> T:
+        value = self._load_json(run_id, name)
         try:
-            events = (self.path(run_id) / "events.jsonl").read_text()
-        except OSError:
-            return raw
-        parsed = AgyAdapter._parse(events)
-        if not parsed["usage_observed"]:
-            return raw
-        usage = parsed["usage"]
-        persisted = raw.get("usage")
-        return {
-            **raw,
-            "usage_schema": TOKEN_USAGE_SCHEMA,
-            "usage": usage.to_dict(),
-            # A cost priced from a conversation total is not this run's cost.
-            "calculated_cost": raw.get("calculated_cost")
-            if persisted == usage.to_dict()
-            else None,
-        }
+            return load(value)
+        except (TypeError, ValueError, KeyError) as error:
+            raise AOPError(
+                f"{self.path(run_id) / name} is not in the current run record format "
+                f"({error}); run `aop migrate-results` to convert older run records"
+            ) from error
 
     def path(self, run_id: str) -> Path:
         self._validate_run_id(run_id)
@@ -3801,6 +3784,17 @@ class DeepSeekHarnessAdapter:
         )
 
     @staticmethod
+    def pricing_provider(inference_provider: str | None) -> str | None:
+        return {
+            "deepseek-official": "deepseek",
+            "anthropic": "anthropic",
+            "google": "google",
+            "gemini": "google",
+            "openai": "openai",
+            "xai": "xai",
+        }.get(inference_provider or "deepseek-official")
+
+    @staticmethod
     def _estimate_cost(
         request: RunRequest,
         model: str | None,
@@ -3808,15 +3802,9 @@ class DeepSeekHarnessAdapter:
         started_at: str,
         finished_at: str,
     ) -> CalculatedCost | None:
-        provider = request.inference_provider or "deepseek-official"
-        catalog_provider = {
-            "deepseek-official": "deepseek",
-            "anthropic": "anthropic",
-            "google": "google",
-            "gemini": "google",
-            "openai": "openai",
-            "xai": "xai",
-        }.get(provider)
+        catalog_provider = DeepSeekHarnessAdapter.pricing_provider(
+            request.inference_provider
+        )
         if catalog_provider is None:
             return None
         return estimate_api_cost(

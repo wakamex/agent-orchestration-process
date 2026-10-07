@@ -22,3 +22,9 @@
   remain inspectable after the run.
 - Optimize for the long-term product rather than accidental local setup. A clean break is acceptable
   before users exist when it removes ambiguity or avoids a foreseeable rewrite.
+- Keep one current format for run records. Raw provider artifacts such as `events.jsonl` and
+  `stderr.log` are never rewritten. Derived records such as `result.json` and `request.json` may be
+  rewritten when an older format is wrong or obsolete, but only through an explicit, one-time
+  migration command that is documented in `docs/`, preserves each original file beside the
+  rewritten one, records the conversion it applied in the rewritten record, and is idempotent. After
+  a migration, readers accept only the current format instead of converting old formats in memory.

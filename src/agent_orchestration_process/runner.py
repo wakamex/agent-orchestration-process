@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -46,6 +48,7 @@ from .locks import exclusive_lock, task_lock_path
 from .isolation import PROFILES, resolve_policy
 from .pricing import CalculatedCost, TokenUsage, estimate_api_cost
 from .provider_versions import require_supported_agy
+from . import egress
 from .worktrees import AOPError, Worktree, WorktreeManager, register_state_root
 
 
@@ -4034,8 +4037,56 @@ def _provider_command(
         wrapped.extend(["--ro-bind", source, destination])
     for key, value in _guest_environment(environment, mappings).items():
         wrapped.extend(["--setenv", key, value])
+    if "AOP_EGRESS_SOCKET" in environment:
+        command = _egress_command(wrapped, command, environment)
     wrapped.extend(["--chdir", "/workspace", "--", *command])
     return wrapped
+
+
+def _egress_command(
+    wrapped: list[str], command: list[str], environment: dict[str, str]
+) -> list[str]:
+    """Give the sandbox only loopback, with egress through the AOP proxy."""
+    python = Path("/usr/bin/python3")
+    if not python.is_file():
+        raise AOPError("sandboxed --no-web needs /usr/bin/python3 for its egress bridge")
+    _add_guest_parent_directories(wrapped, Path(egress.GUEST_SOCKET))
+    wrapped.extend(
+        [
+            "--unshare-net",
+            "--bind",
+            environment["AOP_EGRESS_SOCKET"],
+            egress.GUEST_SOCKET,
+            "--ro-bind",
+            os.fspath(egress.BRIDGE_SOURCE),
+            egress.GUEST_BRIDGE,
+        ]
+    )
+    proxy = f"http://127.0.0.1:{egress.PROXY_PORT}"
+    forwards = [item for item in environment["AOP_EGRESS_FORWARDS"].split(",") if item]
+    no_proxy = ",".join(sorted({item.rpartition(":")[0] for item in forwards}))
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        wrapped.extend(["--setenv", name, proxy])
+    for name in ("NO_PROXY", "no_proxy"):
+        wrapped.extend(["--setenv", name, no_proxy])
+    return [
+        os.fspath(python),
+        "-I",
+        egress.GUEST_BRIDGE,
+        egress.GUEST_SOCKET,
+        str(egress.PROXY_PORT),
+        *forwards,
+        "--",
+        *command,
+    ]
+
+
+def _socket_parent() -> str | None:
+    """A short private directory, since Unix socket paths are limited to 108 bytes."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if runtime and os.path.isdir(runtime) and os.access(runtime, os.W_OK):
+        return runtime
+    return None
 
 
 def _prompt_runtime_command(
@@ -5311,6 +5362,21 @@ _HERMES_RUNTIME_FILES = {
 }
 
 
+def _hermes_inference_provider(request: RunRequest) -> str | None:
+    """The provider a Hermes run infers through: its override, else Hermes config."""
+    if request.inference_provider is not None:
+        return request.inference_provider
+    try:
+        config = yaml.safe_load(
+            (_hermes_source_home(dict(os.environ)) / "config.yaml").read_text()
+        )
+    except (OSError, yaml.YAMLError):
+        return None
+    model = config.get("model") if isinstance(config, dict) else None
+    provider = model.get("provider") if isinstance(model, dict) else None
+    return provider if isinstance(provider, str) else None
+
+
 def _hermes_source_home(environment: dict[str, str]) -> Path:
     configured = environment.get("HERMES_HOME")
     if configured:
@@ -5590,10 +5656,18 @@ class AgentRunner:
         system_prompt: str | None = None,
         tools: Sequence[str] | None = None,
         provider_base_url: str | None = None,
+        allowed_urls: Sequence[str] = (),
     ) -> RunResult:
         self._validate_mode(mode)
         tools = self._validated_framing(system_prompt, tools, no_web)
         self._validate_provider_base_url(provider_base_url, profile)
+        allowed_urls = tuple(allowed_urls)
+        if allowed_urls and not no_web:
+            raise AOPError("--allow-url requires --no-web; other runs are not filtered")
+        if allowed_urls and profile == "host":
+            raise AOPError("--allow-url needs a sandboxed profile, not host")
+        for url in allowed_urls:
+            egress.endpoint(url)
         self._validate_inference_provider(inference_provider, model)
         if profile not in PROFILES:
             raise AOPError(f"unknown execution profile: {profile}")
@@ -5615,6 +5689,7 @@ class AgentRunner:
             system_prompt=system_prompt,
             tools=tools,
             provider_base_url=provider_base_url,
+            allowed_urls=allowed_urls,
         )
         worktree = (
             self._create_sealed_workspace(request.run_id)
@@ -5742,6 +5817,7 @@ class AgentRunner:
             system_prompt=parent_request.system_prompt,
             tools=parent_request.tools,
             provider_base_url=parent_request.provider_base_url,
+            allowed_urls=parent_request.allowed_urls,
         )
         return self._execute(
             request,
@@ -5934,6 +6010,35 @@ class AgentRunner:
                     else item
                     for item in enforcement
                 ]
+        egress_endpoints = None
+        if request.no_web and request.profile != "host":
+            egress_endpoints = egress.allowed_endpoints(
+                request.provider,
+                [
+                    *request.allowed_urls,
+                    *filter(None, [request.provider_base_url]),
+                ],
+                _hermes_inference_provider(request)
+                if request.provider == "hermes"
+                else None,
+            )
+            effective_policy["network"] = {
+                "mode": "allowlist",
+                "isolation": "network-namespace",
+                "allowed_endpoints": egress_endpoints,
+                "forwarded_loopback_endpoints": egress.forwarded_endpoints(
+                    egress_endpoints
+                ),
+                "log": "network.jsonl",
+                "possible_context_channels": [
+                    "allowed-endpoints",
+                    "provider-account-state",
+                ],
+            }
+            effective_policy["model_capabilities"]["enforcement"] = [
+                *effective_policy["model_capabilities"].get("enforcement", []),
+                "AOP network namespace with an allowlisted egress proxy",
+            ]
         request = replace(
             request,
             prompt=_run_prompt(
@@ -6006,7 +6111,23 @@ class AgentRunner:
                 input_projection / "manifest.json"
             )
         try:
-            result = self.adapter.execute(request, worktree, run_dir, environment)
+            with contextlib.ExitStack() as stack:
+                if egress_endpoints is not None:
+                    socket_dir = Path(
+                        tempfile.mkdtemp(prefix="aop-egress-", dir=_socket_parent())
+                    )
+                    stack.callback(shutil.rmtree, socket_dir, ignore_errors=True)
+                    socket_path = socket_dir / "egress.sock"
+                    stack.enter_context(
+                        egress.EgressProxy(
+                            socket_path, egress_endpoints, run_dir / "network.jsonl"
+                        )
+                    )
+                    environment["AOP_EGRESS_SOCKET"] = os.fspath(socket_path)
+                    environment["AOP_EGRESS_FORWARDS"] = ",".join(
+                        egress.forwarded_endpoints(egress_endpoints)
+                    )
+                result = self.adapter.execute(request, worktree, run_dir, environment)
         finally:
             if input_projection != input_dir:
                 shutil.rmtree(input_projection)
@@ -6041,6 +6162,7 @@ class AgentRunner:
         system_prompt: str | None = None,
         tools: tuple[str, ...] | None = None,
         provider_base_url: str | None = None,
+        allowed_urls: tuple[str, ...] = (),
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -6065,6 +6187,7 @@ class AgentRunner:
             system_prompt=system_prompt,
             tools=tools,
             provider_base_url=provider_base_url,
+            allowed_urls=allowed_urls,
         )
 
     def _validate_provider_base_url(self, url: str | None, profile: str) -> None:

@@ -186,6 +186,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="exact comma-separated built-in tool set (claude only; '' for none)",
     )
     run.add_argument(
+        "--allow-url",
+        action="append",
+        default=[],
+        dest="allowed_urls",
+        metavar="URL",
+        help="with --no-web, also allow the sandbox to reach URL's host and port; "
+        "repeat for more",
+    )
+    run.add_argument(
         "--provider-base-url",
         metavar="URL",
         help="send the harness's inference requests to URL, such as a local "
@@ -407,6 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 system_prompt=_read_system_prompt(args),
                 tools=args.tools,
                 provider_base_url=args.provider_base_url,
+                allowed_urls=args.allowed_urls,
             )
             return _report_run(result, manager, json_output=args.json)
 

@@ -67,6 +67,27 @@ shell execution. The harness keeps the inference network access needed to call i
 If the selected adapter cannot prove the complete boundary, AOP rejects the run before creating a
 worktree or provider state.
 
+In the `edit`, `review`, and `sealed` profiles, AOP also enforces the boundary at the network level. The sandbox gets its own network namespace with only a loopback interface, and its one way out is an HTTP CONNECT proxy that AOP runs outside the sandbox and reaches through a Unix socket. The proxy opens connections only to the endpoints the harness needs for inference and for keeping its login valid, plus any URL named with `--allow-url` or `--provider-base-url`. Inside the sandbox, `HTTPS_PROXY` points at the proxy, and each allowed loopback URL, such as a local request recorder, is reachable at its own address. A harness that ignores the proxy settings cannot reach the network at all. Every connection attempt is logged with its decision in the run's `network.jsonl`, and the allowed endpoints are recorded in `request.json` under `effective_policy.network`:
+
+```sh
+aop run --agent claude --profile sealed --no-web \
+  --provider-base-url http://127.0.0.1:18977 --prompt-file prompt.txt
+aop run study-arm --agent codex --profile sealed --no-web \
+  --allow-url https://api.example.com --prompt "..."
+```
+
+`--allow-url` requires `--no-web` and a sandboxed profile, accepts `https` URLs and loopback `http` URLs, and is recorded in `request.json` as `allowed_urls`; resumes reuse it. These are the endpoints AOP allows for each harness, and the evidence for each:
+
+| Harness | Allowed endpoints | Evidence |
+| --- | --- | --- |
+| Claude | `api.anthropic.com:443` for inference, `platform.claude.com:443` for OAuth token refresh | A sealed `--no-web` run with the OAuth login answered; the refresh host is Claude Code's `TOKEN_URL` |
+| Codex | `chatgpt.com:443`; AOP refreshes Codex logins outside the sandbox | A sealed `--no-web` run with the ChatGPT login answered |
+| OpenCode | `opencode.ai:443` | A sealed `--no-web` run answered |
+| Grok | `auth.x.ai:443`, `cli-chat-proxy.grok.com:443` | A sealed `--no-web` run reached both hosts and got the same server reply as an unrestricted run |
+| Hermes with the `xai-oauth` provider | `auth.x.ai:443`, `api.x.ai:443` | A run reached `auth.x.ai` as an unrestricted run did; `api.x.ai` is the provider's configured base URL |
+
+A harness or Hermes provider without an entry reaches only the URLs the run names. The network boundary cannot stop retrieval that a provider performs on its own servers through an allowed inference endpoint, such as a server-side search tool, so the harness-level restrictions above still apply. The `host` profile has no sandbox and keeps only the harness-level restrictions.
+
 The effective policy is stored in `request.json` under `model_capabilities`. Some harnesses require a stronger restriction than the name suggests. OpenCode currently runs without any model-visible tools, while Codex, Claude, Grok, and Hermes retain local-only tools. Cursor, Devin, Antigravity, and DeepSeek Harness currently reject `--no-web`. Grok also rejects the `host` profile because host-visible global customizations cannot be excluded with its current automation interface.
 
 Exact resumes inherit the original `--no-web` policy and private provider state. For batch

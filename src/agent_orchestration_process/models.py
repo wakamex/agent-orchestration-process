@@ -84,6 +84,8 @@ class RunRequest:
     tools: tuple[str, ...] | None = None
     # Base URL the harness sends inference requests to, instead of its default.
     provider_base_url: str | None = None
+    # Extra URLs a --no-web run may reach through its egress proxy.
+    allowed_urls: tuple[str, ...] = ()
     # How `aop migrate-results` converted an older record, if it did.
     migration: dict[str, Any] | None = None
 
@@ -99,6 +101,7 @@ class RunRequest:
         fields["artifacts"] = tuple(fields["artifacts"])
         if fields.get("tools") is not None:
             fields["tools"] = tuple(fields["tools"])
+        fields["allowed_urls"] = tuple(fields.get("allowed_urls", ()))
         fields["inputs"] = tuple(
             InputSnapshot.from_dict(item) for item in fields["inputs"]
         )

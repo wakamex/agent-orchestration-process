@@ -8,7 +8,12 @@ import pytest
 
 from agent_orchestration_process.cli import main
 from agent_orchestration_process.isolation import PROFILES, explain_profile
-from agent_orchestration_process.runner import AgentRunner, CodexAdapter, adapter_for
+from agent_orchestration_process.runner import (
+    AgentRunner,
+    ClaudeAdapter,
+    CodexAdapter,
+    adapter_for,
+)
 from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
 
@@ -431,3 +436,89 @@ def test_cleanup_removes_only_this_projects_sealed_runtime(tmp_path: Path) -> No
         manager, os.fspath(own / "provider-state" / "run"), "scratch"
     ) is None
     assert _sealed_runtime_path(manager, os.fspath(own / "provider-state"), "provider-state") is None
+
+
+def test_sealed_run_inside_a_repository_resumes_and_cleans_up_from_its_directory(
+    repository: Path,
+    fake_codex: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    study = repository / "research" / "study"
+    study.mkdir(parents=True)
+    monkeypatch.chdir(study)
+    monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+
+    assert main(["run", "--profile", "sealed", "--prompt", "first", "--json"]) == 0
+    run_id = json.loads(capsys.readouterr().out)["run_id"]
+    assert (study / ".aop" / "runs" / run_id).is_dir()
+
+    assert main(["resume", run_id, "--prompt", "second", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["succeeded"]
+    assert main(["cleanup", run_id]) == 0
+
+
+def test_writable_sealed_workspace_keeps_files_across_resume(
+    repository: Path, fake_claude: Path
+) -> None:
+    script = fake_claude.read_text()
+    fake_claude.write_text(
+        script.replace(
+            "prompt = sys.stdin.read()\n",
+            "prompt = sys.stdin.read()\n"
+            "workspace = pathlib.Path('/workspace')\n"
+            "if prompt.startswith('WRITE'):\n"
+            "    workspace.joinpath('dream.py').write_text('print(1)')\n"
+            "if prompt.startswith('READ'):\n"
+            "    pathlib.Path('/output/seen.txt').write_text(\n"
+            "        workspace.joinpath('dream.py').read_text())\n"
+            "if prompt.startswith('TRY'):\n"
+            "    try:\n"
+            "        workspace.joinpath('x').write_text('x')\n"
+            "        outcome = 'written'\n"
+            "    except OSError:\n"
+            "        outcome = 'read-only'\n"
+            "    pathlib.Path('/output/seen.txt').write_text(outcome)\n",
+            1,
+        )
+    )
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+    )
+
+    first = runner.run(
+        task="dream", prompt="WRITE", profile="sealed", writable_workspace=True
+    )
+    resumed = runner.resume(run_id=first.run_id, prompt="READ", artifacts=["seen.txt"])
+    default = runner.run(
+        task="plain", prompt="TRY", profile="sealed", artifacts=["seen.txt"]
+    )
+
+    assert first.succeeded, first.error
+    assert resumed.succeeded, resumed.error
+    assert default.succeeded, default.error
+    seen = runner.store.path(resumed.run_id) / "artifacts" / "seen.txt"
+    assert seen.read_text() == "print(1)"
+    request = runner.store.load_request(resumed.run_id)
+    assert request.writable_workspace is True
+    assert request.effective_policy["workspace"]["writable"] is True
+    assert "/workspace" in request.effective_policy["writable_paths"]
+    default_seen = runner.store.path(default.run_id) / "artifacts" / "seen.txt"
+    assert default_seen.read_text() == "read-only"
+    with pytest.raises(AOPError, match="only to the sealed profile"):
+        runner.run(task="edit", prompt="x", writable_workspace=True)
+
+
+def test_sealed_claude_runs_exclude_account_connectors_and_skills(
+    repository: Path, fake_claude: Path
+) -> None:
+    result = AgentRunner(
+        WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+    ).run(task="sealed-claude", prompt="hello", profile="sealed")
+
+    assert result.succeeded, result.error
+    for flag in ("--safe-mode", "--strict-mcp-config"):
+        assert flag in result.command
+    assert result.command[result.command.index("--mcp-config") + 1] == (
+        '{"mcpServers":{}}'
+    )

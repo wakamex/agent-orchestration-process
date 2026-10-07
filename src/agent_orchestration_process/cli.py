@@ -186,6 +186,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="exact comma-separated built-in tool set (claude only; '' for none)",
     )
     run.add_argument(
+        "--writable-workspace",
+        action="store_true",
+        help="with --profile sealed, let the run write its private, initially empty "
+        "/workspace; resumes keep its files",
+    )
+    run.add_argument(
         "--allow-url",
         action="append",
         default=[],
@@ -309,13 +315,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "run" and args.profile == "sealed":
             manager = WorktreeManager.standalone(Path.cwd())
+        elif args.command in {"resume", "cleanup"}:
+            manager = _manager_holding_run(args.run_id)
         else:
-            try:
-                manager = WorktreeManager.discover(Path.cwd())
-            except AOPError:
-                if args.command not in {"resume", "cleanup"}:
-                    raise
-                manager = WorktreeManager.standalone(Path.cwd())
+            manager = WorktreeManager.discover(Path.cwd())
 
         if args.command == "init":
             manager.initialize()
@@ -417,6 +420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 tools=args.tools,
                 provider_base_url=args.provider_base_url,
                 allowed_urls=args.allowed_urls,
+                writable_workspace=args.writable_workspace,
             )
             return _report_run(result, manager, json_output=args.json)
 
@@ -609,6 +613,23 @@ def _report_policy(
             f"sha256={runtime.get('sha256') or 'unavailable'}",
             file=stream,
         )
+
+
+def _manager_holding_run(run_id: str) -> WorktreeManager:
+    """The state of the run: the repository's, or the current directory's.
+
+    Sealed runs record themselves under the current directory even inside a
+    repository, so a resume or cleanup looks in both places.
+    """
+    try:
+        repository = WorktreeManager.discover(Path.cwd())
+    except AOPError:
+        repository = None
+    if repository is not None and (repository.state_dir / "runs" / run_id).is_dir():
+        return repository
+    if repository is None or (Path.cwd() / ".aop" / "runs" / run_id).is_dir():
+        return WorktreeManager.standalone(Path.cwd())
+    return repository
 
 
 def _migrate_results(runs_dirs: Sequence[Path], *, dry_run: bool) -> int:

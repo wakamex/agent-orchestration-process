@@ -86,6 +86,8 @@ class RunRequest:
     provider_base_url: str | None = None
     # Extra URLs a --no-web run may reach through its egress proxy.
     allowed_urls: tuple[str, ...] = ()
+    # A sealed run's private, initially empty /workspace is writable.
+    writable_workspace: bool = False
     # How `aop migrate-results` converted an older record, if it did.
     migration: dict[str, Any] | None = None
 

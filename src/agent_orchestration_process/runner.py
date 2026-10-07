@@ -1353,16 +1353,20 @@ class ClaudeAdapter:
             "--add-dir",
             os.fspath(worktree.path),
         ]
-        if request.no_web:
+        if request.no_web or request.profile == "sealed":
+            # Safe mode and an empty strict MCP config keep out skills, MCP
+            # servers, and the account's claude.ai connectors and synced skills,
+            # which arrive with the login rather than from local files.
             command.extend(
                 [
                     "--safe-mode",
-                    "--no-chrome",
                     "--strict-mcp-config",
                     "--mcp-config",
                     '{"mcpServers":{}}',
                 ]
             )
+        if request.no_web:
+            command.append("--no-chrome")
         tools = CLAUDE_NO_WEB_TOOLS if request.no_web else None
         if request.tools is not None:
             tools = request.tools
@@ -3984,10 +3988,10 @@ def _provider_command(
             wrapped.extend(["--ro-bind", os.fspath(git_marker), "/workspace/.git"])
         common_git_directory = _git_common_directory(worktree.path)
         wrapped.extend(["--ro-bind", os.fspath(common_git_directory), "/git"])
-    elif request.profile == "review":
+    elif request.profile == "review" or not request.writable_workspace:
         wrapped.extend(["--ro-bind", os.fspath(worktree.path), "/workspace"])
     else:
-        wrapped.extend(["--ro-bind", os.fspath(worktree.path), "/workspace"])
+        wrapped.extend(["--bind", os.fspath(worktree.path), "/workspace"])
     wrapped.extend(
         [
             "--bind",
@@ -5746,8 +5750,11 @@ class AgentRunner:
         tools: Sequence[str] | None = None,
         provider_base_url: str | None = None,
         allowed_urls: Sequence[str] = (),
+        writable_workspace: bool = False,
     ) -> RunResult:
         self._validate_mode(mode)
+        if writable_workspace and profile != "sealed":
+            raise AOPError("--writable-workspace applies only to the sealed profile")
         tools = self._validated_framing(system_prompt, tools, no_web)
         self._validate_provider_base_url(provider_base_url, profile)
         allowed_urls = tuple(allowed_urls)
@@ -5779,6 +5786,7 @@ class AgentRunner:
             tools=tools,
             provider_base_url=provider_base_url,
             allowed_urls=allowed_urls,
+            writable_workspace=writable_workspace,
         )
         worktree = (
             self._create_sealed_workspace(request.run_id)
@@ -5907,6 +5915,7 @@ class AgentRunner:
             tools=parent_request.tools,
             provider_base_url=parent_request.provider_base_url,
             allowed_urls=parent_request.allowed_urls,
+            writable_workspace=parent_request.writable_workspace,
         )
         return self._execute(
             request,
@@ -6038,6 +6047,13 @@ class AgentRunner:
             input_names=tuple(Path(item.mounted_path).name for item in declared_inputs),
         ).to_dict()
         effective_policy["workspace"]["controller_path"] = os.fspath(worktree.path)
+        if request.writable_workspace:
+            effective_policy["workspace"]["writable"] = True
+            effective_policy["writable_paths"] = [
+                "/workspace",
+                *effective_policy["writable_paths"],
+            ]
+            effective_policy["writable_path_scopes"]["/workspace"] = "session-private"
         controller_policy = {
             "provider_state": os.fspath(provider_state),
             "scratch": os.fspath(scratch_dir),
@@ -6254,6 +6270,7 @@ class AgentRunner:
         tools: tuple[str, ...] | None = None,
         provider_base_url: str | None = None,
         allowed_urls: tuple[str, ...] = (),
+        writable_workspace: bool = False,
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -6279,6 +6296,7 @@ class AgentRunner:
             tools=tools,
             provider_base_url=provider_base_url,
             allowed_urls=allowed_urls,
+            writable_workspace=writable_workspace,
         )
 
     def _validate_provider_base_url(self, url: str | None, profile: str) -> None:

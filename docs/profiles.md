@@ -10,7 +10,7 @@ the host root filesystem.
 | --- | --- | --- | --- | --- | --- |
 | `edit` | Read-only at `/repository` | Read-write at `/workspace` | Runtime allowlist only | Project and user | `/workspace`, `/output`, `/scratch`, `/state`, `/cache`, `/tmp` |
 | `review` | Read-only at `/repository` | Read-only at `/workspace` | Runtime allowlist only | Project and user | `/output`, `/scratch`, `/state`, `/cache`, `/tmp` |
-| `sealed` | Not mounted | Empty read-only `/workspace` | Runtime allowlist only | No inherited local instructions | `/output`, `/scratch`, `/state`, `/cache`, `/tmp` |
+| `sealed` | Not mounted | Empty `/workspace`, read-only unless `--writable-workspace` | Runtime allowlist only | No inherited local instructions | `/output`, `/scratch`, `/state`, `/cache`, `/tmp`, and `/workspace` with `--writable-workspace` |
 | `host` | Native | Native | Native | Native | Native |
 
 The worktree's `.git` pointer and shared Git directory remain read-only under `edit` and `review`.
@@ -32,8 +32,13 @@ Under `sealed`, `/cache`, `/scratch`, and `/state` are private to one session an
 exact resumes. `/output` is private to one invocation. The compiled policy records these scopes
 explicitly.
 
-All profiles currently retain native host networking because the supported provider CLIs need it.
-Local network services and provider-side account state can therefore remain context channels.
+`--writable-workspace` makes a sealed run's `/workspace` writable, so the model can write and run code where it naturally works. The workspace still starts empty, belongs to that session alone, keeps its files across the session's resumes, and is removed by `aop cleanup`. The request records `writable_workspace`, and the effective policy marks `/workspace` writable.
+
+Account-level customizations arrive with a login rather than from local files, so a private home alone does not exclude them. Claude Code downloads a claude.ai account's connectors as `mcp__claude_ai_*` tools and its claude.ai skills into the home it runs with. Sealed Claude runs therefore pass `--safe-mode`, `--strict-mcp-config`, and an empty `--mcp-config`, which keep out MCP servers, connectors, skills, and other customizations. Claude Code's own built-in tools and skills remain.
+
+A sealed run records itself under the directory it was started from, even inside a Git repository. `aop resume` and `aop cleanup` look for the run in the repository's state first and then in the current directory's, so run them from the directory the run started in.
+
+Without `--no-web`, every profile retains native host networking because the supported provider CLIs need it. Local network services and provider-side account state can therefore remain context channels. With `--no-web`, the sandboxed profiles get their own network namespace with only an allowlisted egress proxy, as the CLI guide describes.
 `sealed` is a filesystem and local-state boundary, not complete information isolation.
 
 `--no-web` adds a separate model-capability boundary. It leaves provider inference traffic enabled

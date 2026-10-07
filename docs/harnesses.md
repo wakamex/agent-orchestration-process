@@ -120,6 +120,12 @@ For `edit` and `review`, AOP seeds Claude authentication and configuration into 
 leaving runtime history, project state, logs, and caches behind. `sealed` receives authentication
 only. Repository access is constrained by the selected AOP profile.
 
+`--system-prompt TEXT` or `--system-prompt-file PATH` replaces Claude's base system prompt, and `--tools LIST` sets its exact built-in tool set, for example `--tools Bash,Read,Write,Edit`; an empty value means no system prompt text or no tools. AOP passes them as Claude's `--system-prompt` and `--tools`, records them in `request.json` as `system_prompt` and `tools`, and reuses them on resume. They do not change the AOP sandbox or profile, and other harnesses reject them. Under `--no-web`, `--tools` must stay within the default no-web set: Read, Edit, Write, Glob, and Grep. User instructions, skills, and MCP servers are governed by the profile: `sealed` gives Claude a private home with only credentials and an empty workspace. Claude still adds its own environment and account context to each request. A minimally prompted run looks like:
+
+```sh
+aop run --agent claude --profile sealed --system-prompt '' --tools Bash,Read,Write,Edit --prompt-file prompt.txt
+```
+
 ### Cursor Agent
 
 For `edit` and `review`, AOP seeds CLI configuration, skills, plugins, policies, and authentication

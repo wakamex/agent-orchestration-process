@@ -78,6 +78,10 @@ class RunRequest:
     artifacts: tuple[str, ...]
     inputs: tuple[InputSnapshot, ...]
     created_at: str
+    # Replacement for the harness's base system prompt, and its exact
+    # built-in tool set; None keeps the harness default.
+    system_prompt: str | None = None
+    tools: tuple[str, ...] | None = None
     # How `aop migrate-results` converted an older record, if it did.
     migration: dict[str, Any] | None = None
 
@@ -91,6 +95,8 @@ class RunRequest:
             fields.get("inference_route")
         )
         fields["artifacts"] = tuple(fields["artifacts"])
+        if fields.get("tools") is not None:
+            fields["tools"] = tuple(fields["tools"])
         fields["inputs"] = tuple(
             InputSnapshot.from_dict(item) for item in fields["inputs"]
         )

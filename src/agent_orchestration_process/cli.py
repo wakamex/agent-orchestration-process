@@ -167,6 +167,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="deny model-controlled external retrieval or fail before dispatch",
     )
+    system_prompts = run.add_mutually_exclusive_group()
+    system_prompts.add_argument(
+        "--system-prompt",
+        metavar="TEXT",
+        help="replace the harness's base system prompt (claude only; '' for none)",
+    )
+    system_prompts.add_argument(
+        "--system-prompt-file",
+        type=Path,
+        metavar="PATH",
+        help="replace the harness's base system prompt with PATH's contents (claude only)",
+    )
+    run.add_argument(
+        "--tools",
+        type=_tool_list,
+        metavar="LIST",
+        help="exact comma-separated built-in tool set (claude only; '' for none)",
+    )
     run.add_argument("--timeout", type=_positive_timeout, help="wall-clock seconds")
     run.add_argument(
         "--json", action="store_true", help="print the normalized result as JSON"
@@ -380,6 +398,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
                 input_paths=args.input_paths,
+                system_prompt=_read_system_prompt(args),
+                tools=args.tools,
             )
             return _report_run(result, manager, json_output=args.json)
 
@@ -455,6 +475,21 @@ def _add_input_arguments(
         metavar="PATH",
         help=help_text,
     )
+
+
+def _tool_list(value: str) -> tuple[str, ...]:
+    return tuple(tool.strip() for tool in value.split(",")) if value.strip() else ()
+
+
+def _read_system_prompt(args: argparse.Namespace) -> str | None:
+    if args.system_prompt_file is None:
+        return args.system_prompt
+    try:
+        return args.system_prompt_file.read_text()
+    except OSError as error:
+        raise AOPError(
+            f"could not read system prompt file {args.system_prompt_file}: {error}"
+        ) from error
 
 
 def _read_prompt(args: argparse.Namespace) -> str:

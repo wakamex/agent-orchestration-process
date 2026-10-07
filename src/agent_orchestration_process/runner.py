@@ -164,6 +164,8 @@ def _atomic_write_private(path: Path, content: str) -> None:
 
 
 T = TypeVar("T")
+# Claude tools that cannot reach the network, the default set under --no-web.
+CLAUDE_NO_WEB_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")
 
 
 class RunStore:
@@ -1350,10 +1352,16 @@ class ClaudeAdapter:
                     "--strict-mcp-config",
                     "--mcp-config",
                     '{"mcpServers":{}}',
-                    "--tools",
-                    "Read,Edit,Write,Glob,Grep",
                 ]
             )
+        tools = CLAUDE_NO_WEB_TOOLS if request.no_web else None
+        if request.tools is not None:
+            tools = request.tools
+        if tools is not None:
+            # An empty list is Claude's spelling for no built-in tools.
+            command.extend(["--tools", ",".join(tools)])
+        if request.system_prompt is not None:
+            command.extend(["--system-prompt", request.system_prompt])
         if request.session_id:
             command.extend(["--resume", request.session_id])
         else:
@@ -5570,8 +5578,11 @@ class AgentRunner:
         timeout_seconds: float | None = None,
         artifacts: Sequence[str] = (),
         input_paths: Sequence[str | os.PathLike[str]] = (),
+        system_prompt: str | None = None,
+        tools: Sequence[str] | None = None,
     ) -> RunResult:
         self._validate_mode(mode)
+        tools = self._validated_framing(system_prompt, tools, no_web)
         self._validate_inference_provider(inference_provider, model)
         if profile not in PROFILES:
             raise AOPError(f"unknown execution profile: {profile}")
@@ -5590,6 +5601,8 @@ class AgentRunner:
             no_web=no_web,
             timeout_seconds=timeout_seconds,
             artifacts=artifacts,
+            system_prompt=system_prompt,
+            tools=tools,
         )
         worktree = (
             self._create_sealed_workspace(request.run_id)
@@ -5711,6 +5724,8 @@ class AgentRunner:
             session_id=parent_result.session_id,
             parent_run_id=run_id,
             artifacts=artifacts,
+            system_prompt=parent_request.system_prompt,
+            tools=parent_request.tools,
         )
         return self._execute(
             request,
@@ -6007,6 +6022,8 @@ class AgentRunner:
         session_id: str | None = None,
         parent_run_id: str | None = None,
         artifacts: Sequence[str] = (),
+        system_prompt: str | None = None,
+        tools: tuple[str, ...] | None = None,
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -6028,7 +6045,31 @@ class AgentRunner:
             artifacts=normalize_artifacts(artifacts),
             inputs=(),
             created_at=_now(),
+            system_prompt=system_prompt,
+            tools=tools,
         )
+
+    def _validated_framing(
+        self, system_prompt: str | None, tools: Sequence[str] | None, no_web: bool
+    ) -> tuple[str, ...] | None:
+        if system_prompt is None and tools is None:
+            return None
+        if self.adapter.provider != "claude":
+            raise AOPError(
+                f"{self.adapter.provider} does not support --system-prompt or --tools"
+            )
+        if tools is None:
+            return None
+        tools = tuple(tools)
+        if any(not tool or "," in tool or tool != tool.strip() for tool in tools):
+            raise AOPError(f"invalid tool list: {', '.join(tools)!r}")
+        outside = set(tools) - set(CLAUDE_NO_WEB_TOOLS)
+        if no_web and outside:
+            raise AOPError(
+                "--no-web allows only these Claude tools: "
+                f"{', '.join(CLAUDE_NO_WEB_TOOLS)}; got {', '.join(sorted(outside))}"
+            )
+        return tools
 
     def _validate_mode(self, mode: str) -> None:
         if mode not in {"agent", "participant"}:

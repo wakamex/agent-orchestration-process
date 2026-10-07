@@ -2317,3 +2317,64 @@ def test_failed_claude_home_seed_leaves_no_partial_home(
     with pytest.raises(AOPError, match="could not prepare isolated Claude state"):
         runner_module._prepare_claude_environment(environment)
     assert list((tmp_path / "state" / "claude").iterdir()) == []
+
+
+def test_claude_system_prompt_and_tools_are_recorded_and_kept_on_resume(
+    repository: Path, fake_claude: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+    )
+
+    first = runner.run(
+        task="minimal",
+        prompt="first",
+        system_prompt="",
+        tools=("Bash", "Read", "Write", "Edit"),
+    )
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    for result in (first, resumed):
+        assert result.succeeded, result.error
+        command = result.command
+        assert command[command.index("--system-prompt") + 1] == ""
+        assert command[command.index("--tools") + 1] == "Bash,Read,Write,Edit"
+        request = runner.store.load_request(result.run_id)
+        assert request.system_prompt == ""
+        assert request.tools == ("Bash", "Read", "Write", "Edit")
+
+
+def test_claude_empty_tool_list_disables_every_tool(
+    repository: Path, fake_claude: Path
+) -> None:
+    result = AgentRunner(
+        WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+    ).run(task="no-tools", prompt="first", tools=())
+
+    assert result.command[result.command.index("--tools") + 1] == ""
+    assert "--system-prompt" not in result.command
+
+
+def test_no_web_claude_tools_stay_within_the_offline_set(
+    repository: Path, fake_claude: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+    )
+
+    with pytest.raises(AOPError, match="--no-web allows only"):
+        runner.run(task="web", prompt="first", no_web=True, tools=("Read", "Bash"))
+    result = runner.run(task="offline", prompt="first", no_web=True, tools=("Read",))
+    assert result.command[result.command.index("--tools") + 1] == "Read"
+    assert result.command.count("--tools") == 1
+
+
+def test_system_prompt_and_tools_are_claude_only(
+    repository: Path, fake_codex: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+    )
+
+    with pytest.raises(AOPError, match="does not support --system-prompt"):
+        runner.run(task="codex", prompt="first", system_prompt="")

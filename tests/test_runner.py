@@ -1487,3 +1487,14 @@ def test_codex_run_without_model_records_and_prices_the_default(
     assert result.calculated_cost is not None
     persisted = runner.store.load_result(result.run_id)
     assert persisted.model == "gpt-5.6-sol"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("", ()), ("Bash, Read,Write", ("Bash", "Read", "Write"))]
+)
+def test_cli_parses_tool_lists(value: str, expected: tuple[str, ...]) -> None:
+    args = build_parser().parse_args(
+        ["run", "--agent", "claude", "--tools", value, "--prompt", "hi", "task"]
+    )
+
+    assert args.tools == expected

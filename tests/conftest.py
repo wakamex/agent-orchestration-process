@@ -1239,7 +1239,7 @@ if "--conversation" in args:
         print("conversation is absent from private state", file=sys.stderr)
         raise SystemExit(3)
 else:
-    state_path.write_text(json.dumps({{"conversation_id": session_id}}))
+    state = {{"conversation_id": session_id}}
 model = (
     args[args.index("--model") + 1]
     if "--model" in args
@@ -1259,35 +1259,36 @@ print(json.dumps({{
         "model": model,
     }},
 }}), flush=True)
-print(json.dumps({{
-    "event": "step_update",
-    "step_update": {{
-        "conversation_id": session_id,
-        "step_type": "agent_response",
-        "text_delta": "working",
-        "duration_seconds": 0.25,
-        "usage": {{
-            "input_tokens": 40,
-            "output_tokens": 5,
-            "thinking_tokens": 2,
-            "cache_read_tokens": 10,
-            "total_tokens": 45,
+# Native agy reports usage on each step and the conversation's running total,
+# across every invocation that resumed it, on the result.
+steps = [
+    {{"input_tokens": 40, "output_tokens": 5, "thinking_tokens": 2, "cache_read_tokens": 10}},
+    {{"input_tokens": 60, "output_tokens": 15, "thinking_tokens": 5, "cache_read_tokens": 20}},
+]
+totals = state.setdefault("usage", {{}})
+for index, usage in enumerate(steps):
+    print(json.dumps({{
+        "event": "step_update",
+        "step_update": {{
+            "conversation_id": session_id,
+            "step_index": index,
+            "step_type": "agent_response",
+            "text_delta": "working",
+            "duration_seconds": 0.25,
+            "usage": {{**usage, "total_tokens": usage["input_tokens"] + usage["output_tokens"]}},
         }},
-    }},
-}}), flush=True)
+    }}), flush=True)
+    for key, value in usage.items():
+        totals[key] = totals.get(key, 0) + value
+state["turns"] = state.get("turns", 0) + 1
+state_path.write_text(json.dumps(state))
 result = {{
     "conversation_id": session_id,
     "status": "SUCCESS",
     "response": f"answer:{{prompt}}",
     "duration_seconds": 1.25,
-    "num_turns": 1,
-    "usage": {{
-        "input_tokens": 100,
-        "output_tokens": 20,
-        "thinking_tokens": 7,
-        "cache_read_tokens": 30,
-        "total_tokens": 120,
-    }},
+    "num_turns": state["turns"],
+    "usage": {{**totals, "total_tokens": totals["input_tokens"] + totals["output_tokens"]}},
 }}
 if prompt.startswith("AGY_MISSING_SESSION"):
     result.pop("conversation_id")

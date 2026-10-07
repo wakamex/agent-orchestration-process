@@ -643,7 +643,7 @@ def test_run_persists_structured_codex_artifacts(
     assert request["artifacts"] == []
     assert request["inputs"] == []
     assert persisted_result["succeeded"] is True
-    assert persisted_result["usage_schema"] == "aop-token-usage-v2"
+    assert persisted_result["usage_schema"] == "aop-token-usage-v3"
     assert persisted_result["accounting_status"] == "complete"
     assert persisted_result["artifacts"] == []
     assert persisted_result["inference_provider"] is None

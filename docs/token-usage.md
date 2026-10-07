@@ -1,6 +1,6 @@
 # Token usage and pricing
 
-AOP persists token usage under one provider-independent convention. The marker for this convention is `usage_schema: "aop-token-usage-v2"` on `result.json`.
+AOP persists token usage under one provider-independent convention. The marker for this convention is `usage_schema: "aop-token-usage-v3"` on `result.json`. Every result records only its own invocation's usage, so consumers can sum results across runs, including runs that resume the same session.
 
 The invariant is:
 
@@ -36,7 +36,7 @@ sign means the provider reports disjoint buckets that AOP combines into a normal
 
 | Adapter | Provider input shape | Normalized input | Provider output shape | Normalized output |
 | --- | --- | --- | --- | --- |
-| Agy | `input_tokens` is uncached and `cache_read_tokens` is disjoint | input + cache read | `output_tokens` includes `thinking_tokens` | output, with thinking as subset |
+| Agy | each `step_update` carries usage where `input_tokens` is uncached and `cache_read_tokens` is disjoint | sum over this invocation's steps of input + cache read | `output_tokens` includes `thinking_tokens` | sum of output, with thinking as subset |
 | Claude | input, cache read, and cache creation are disjoint | input + cache read + cache creation | output is total | output |
 | Codex | input already includes `cached_input_tokens` | input | output already includes reasoning | output |
 | Cursor | input, cache read, and cache write are disjoint | input + cache read + cache write | output is total | output |
@@ -88,7 +88,7 @@ information for AOP to calculate an API-equivalent cost, so their calculated cos
 
 Unversioned `result.json` records predate the common convention and use mixed meanings. AOP leaves
 those files and their raw provider artifacts unchanged. `RunResult.from_dict()` applies this
-centralized in-memory conversion and marks the loaded object as `aop-token-usage-v2`:
+centralized in-memory conversion and marks the loaded object as `aop-token-usage-v3`:
 
 | Legacy provider | In-memory conversion |
 | --- | --- |
@@ -103,10 +103,14 @@ DeepSeek Harness results did not retain the optional Harness cache-write bucket.
 input is reconstructed exactly, but any unrecorded cache writes cannot be recovered without reading
 raw artifacts. The loader does not consult or alter those artifacts.
 
+## Loading v2 results
+
+`aop-token-usage-v2` is the v3 convention with one exception: an Agy run recorded the usage on Agy's terminal `result` event, which is the conversation's running total across every invocation that resumed it. A resumed Agy run therefore repeated all earlier runs' usage. AOP leaves those files unchanged. `RunStore.load_result()` recomputes a v2 Agy result's usage from the `step_update` usage in the run's own `events.jsonl` and drops its calculated cost when the recomputed usage differs, because that cost priced the conversation total. Without those events, the loaded result's usage and cost are unavailable. Other providers' v2 results load unchanged.
+
 ## Downstream consumer rule
 
-Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v2"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the four counters as stored and calculate total tokens as `input_tokens + output_tokens`. Never add cached input or reasoning output. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Missing or unknown schema markers should be rejected instead of guessed.
+Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v3"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the four counters as stored and calculate total tokens as `input_tokens + output_tokens`. Never add cached input or reasoning output. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Missing or unknown schema markers should be rejected instead of guessed.
 
-Legacy conversion remains centralized in AOP's `RunResult` loader for unversioned and v1 records that have not been migrated by their owner. Downstream consumers do not need to reproduce the provider table.
+Legacy conversion remains centralized in AOP's `RunResult` loader for unversioned and v1 records that have not been migrated by their owner. Downstream consumers do not need to reproduce the provider table. A consumer reading v2 files directly can use them as v3 except for Agy results, whose usage it should recompute from the run's `events.jsonl` as described above or treat as unknown.
 
 Zcode uses the native terminal `usage` summary for the current turn. If the terminal summary is missing, it sums observed `model_request_completed` measurements for that turn, deduplicated by request and attempt, and marks accounting partial. Timeouts retain these measurements. Cumulative session projection totals are never substituted for per-turn usage. For the canonical Z.ai Coding Plan route, AOP calculates API-equivalent cost for each measured model request at its completion time, including compaction and lite-model calls. A cost is available only when all measured models have prices and the measurements reconcile with reported turn usage. Native credential provenance identifies the subscription route separately; provider-reported monetary cost remains unavailable.

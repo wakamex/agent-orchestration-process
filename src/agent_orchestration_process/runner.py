@@ -40,6 +40,8 @@ from .models import (
     RunRequest,
     RunResult,
     ProviderReportedCost,
+    PREVIOUS_TOKEN_USAGE_SCHEMA,
+    TOKEN_USAGE_SCHEMA,
 )
 from .locks import exclusive_lock, task_lock_path
 from .isolation import PROFILES, resolve_policy
@@ -184,7 +186,36 @@ class RunStore:
         return RunRequest.from_dict(self._load_json(run_id, "request.json"))
 
     def load_result(self, run_id: str) -> RunResult:
-        return RunResult.from_dict(self._load_json(run_id, "result.json"))
+        raw = self._load_json(run_id, "result.json")
+        if (
+            raw.get("usage_schema") == PREVIOUS_TOKEN_USAGE_SCHEMA
+            and raw.get("provider") == "agy"
+        ):
+            raw = self._corrected_agy_usage(run_id, raw)
+        return RunResult.from_dict(raw)
+
+    def _corrected_agy_usage(
+        self, run_id: str, raw: dict[str, object]
+    ) -> dict[str, object]:
+        """Recompute a v2 Agy result's usage from its own step events."""
+        try:
+            events = (self.path(run_id) / "events.jsonl").read_text()
+        except OSError:
+            return raw
+        parsed = AgyAdapter._parse(events)
+        if not parsed["usage_observed"]:
+            return raw
+        usage = parsed["usage"]
+        persisted = raw.get("usage")
+        return {
+            **raw,
+            "usage_schema": TOKEN_USAGE_SCHEMA,
+            "usage": usage.to_dict(),
+            # A cost priced from a conversation total is not this run's cost.
+            "calculated_cost": raw.get("calculated_cost")
+            if persisted == usage.to_dict()
+            else None,
+        }
 
     def path(self, run_id: str) -> Path:
         self._validate_run_id(run_id)
@@ -3091,9 +3122,8 @@ class AgyAdapter:
         error = None
         status = None
         duration_seconds = None
-        usage = TokenUsage()
+        usage, usage_observed = _agy_invocation_usage(output)
         has_result = False
-        usage_observed = False
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -3126,20 +3156,9 @@ class AgyAdapter:
             duration = payload.get("duration_seconds")
             if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                 duration_seconds = round(float(duration), 6)
-            raw_usage = payload.get("usage")
-            usage_observed = isinstance(raw_usage, dict)
-            raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
-            usage = TokenUsage.from_dict(
-                {
-                    "input_tokens": (
-                        _token_count(raw_usage.get("input_tokens"))
-                        + _token_count(raw_usage.get("cache_read_tokens"))
-                    ),
-                    "cached_input_tokens": raw_usage.get("cache_read_tokens"),
-                    "output_tokens": raw_usage.get("output_tokens"),
-                    "reasoning_output_tokens": raw_usage.get("thinking_tokens"),
-                }
-            )
+            # The result's usage is the conversation's running total, which
+            # includes earlier invocations; usage comes from this run's steps.
+            usage_observed = usage_observed or isinstance(payload.get("usage"), dict)
         return {
             "session_id": result_session_id,
             "model": model,
@@ -3151,6 +3170,33 @@ class AgyAdapter:
             "has_result": has_result,
             "usage_observed": usage_observed,
         }
+
+
+def _agy_invocation_usage(output: str) -> tuple[TokenUsage, bool]:
+    """Sum the usage Agy reports on each step of this invocation."""
+    totals = [0, 0, 0, 0]
+    observed = False
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        step = event.get("step_update") if isinstance(event, dict) else None
+        raw = step.get("usage") if isinstance(step, dict) else None
+        if not isinstance(raw, dict):
+            continue
+        observed = True
+        cache_read = _token_count(raw.get("cache_read_tokens"))
+        for index, value in enumerate(
+            (
+                _token_count(raw.get("input_tokens")) + cache_read,
+                cache_read,
+                _token_count(raw.get("output_tokens")),
+                _token_count(raw.get("thinking_tokens")),
+            )
+        ):
+            totals[index] += value
+    return TokenUsage(*totals), observed
 
 
 @dataclass(frozen=True)

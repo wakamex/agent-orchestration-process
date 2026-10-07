@@ -9,7 +9,10 @@ from .pricing import CalculatedCost, TokenUsage
 
 
 LEGACY_TOKEN_USAGE_SCHEMA = "aop-token-usage-v1"
-TOKEN_USAGE_SCHEMA = "aop-token-usage-v2"
+# v2 is v3's convention, except that resumed Agy runs recorded their
+# conversation's running total; RunStore.load_result corrects those.
+PREVIOUS_TOKEN_USAGE_SCHEMA = "aop-token-usage-v2"
+TOKEN_USAGE_SCHEMA = "aop-token-usage-v3"
 ACCOUNTING_STATUSES = frozenset({"complete", "partial", "unavailable"})
 
 
@@ -261,7 +264,20 @@ class RunResult:
             usage = TokenUsage.from_dict(fields.get("usage"))
             fields["usage_schema"] = TOKEN_USAGE_SCHEMA
             _load_legacy_accounting(fields, usage)
-        elif usage_schema == TOKEN_USAGE_SCHEMA:
+        elif (
+            usage_schema == PREVIOUS_TOKEN_USAGE_SCHEMA
+            and fields.get("provider") == "agy"
+        ):
+            # Without its events, an Agy v2 usage may be a conversation total.
+            fields.update(
+                usage_schema=TOKEN_USAGE_SCHEMA,
+                usage=None,
+                calculated_cost=None,
+                provider_reported_cost=None,
+                accounting_status="unavailable",
+            )
+        elif usage_schema in {TOKEN_USAGE_SCHEMA, PREVIOUS_TOKEN_USAGE_SCHEMA}:
+            fields["usage_schema"] = TOKEN_USAGE_SCHEMA
             status = fields.get("accounting_status")
             if status not in ACCOUNTING_STATUSES:
                 raise ValueError(f"unsupported accounting status: {status}")

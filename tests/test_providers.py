@@ -1096,6 +1096,7 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     assert [event["event"] for event in events] == [
         "init",
         "step_update",
+        "step_update",
         "result",
     ]
     assert resumed.succeeded
@@ -1108,6 +1109,10 @@ def test_agy_passes_native_model_effort_and_resumes_exact_conversation(
     ]
     assert "--model" not in resumed.command
     assert "--effort" not in resumed.command
+    # Agy's result reports the conversation's running total; each run records
+    # only its own usage, so summing runs does not double count.
+    assert resumed.usage == first.usage
+    assert resumed.calculated_cost.amount_usd == first.calculated_cost.amount_usd
 
 
 @pytest.mark.parametrize("profile", ["review", "edit", "host"])

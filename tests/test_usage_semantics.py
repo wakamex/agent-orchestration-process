@@ -166,27 +166,136 @@ def test_claude_retained_result_adds_cache_creation_and_read_to_input() -> None:
     assert _usage_tuple(usage) == (26_994, 15_190, 58, 0)
 
 
-def test_agy_retained_result_adds_disjoint_cache_to_input() -> None:
-    event = {
-        "event": "result",
-        "result": {
-            "conversation_id": "conversation",
-            "status": "SUCCESS",
-            "response": "answer",
-            "usage": {
-                "input_tokens": 216_004,
-                "cache_read_tokens": 390_699,
-                "output_tokens": 41_309,
-                "thinking_tokens": 30_165,
-                "total_tokens": 257_313,
+def test_agy_usage_is_this_invocations_steps_with_disjoint_cache() -> None:
+    def step(input_tokens: int, cache_read: int, output: int, thinking: int) -> dict:
+        return {
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "conversation",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "cache_read_tokens": cache_read,
+                    "output_tokens": output,
+                    "thinking_tokens": thinking,
+                },
+            },
+        }
+
+    events = [
+        step(200_000, 390_699, 40_000, 30_000),
+        step(16_004, 0, 1_309, 165),
+        {
+            "event": "result",
+            "result": {
+                "conversation_id": "conversation",
+                "status": "SUCCESS",
+                "response": "answer",
+                # A resumed conversation's running total, from earlier runs too.
+                "usage": {
+                    "input_tokens": 5_127_032,
+                    "cache_read_tokens": 142_567_888,
+                    "output_tokens": 1_603_877,
+                },
             },
         },
-    }
+    ]
 
-    usage = AgyAdapter._parse(json.dumps(event))["usage"]
+    usage = AgyAdapter._parse("\n".join(map(json.dumps, events)))["usage"]
 
     assert isinstance(usage, TokenUsage)
     assert _usage_tuple(usage) == (606_703, 390_699, 41_309, 30_165)
+
+
+def test_v2_agy_results_load_with_usage_from_their_own_steps(tmp_path) -> None:
+    from agent_orchestration_process.runner import RunStore
+
+    store = RunStore(tmp_path)
+    raw = _v2_result("agy")
+    raw.update(
+        session_id="conversation",
+        usage={
+            "input_tokens": 147_694_920,
+            "cached_input_tokens": 142_567_888,
+            "output_tokens": 1_603_877,
+            "reasoning_output_tokens": 0,
+        },
+        calculated_cost={
+            "amount_usd": 99.0,
+            "currency": "USD",
+            "model": "gemini-3.7-flash",
+            "priced_as": "gemini-3.7-flash",
+            "pricing_version": "models-dev-2026-08-29",
+            "pricing_source": "https://models.dev/api.json",
+            "long_context_pricing": False,
+        },
+    )
+    run_dir = tmp_path / raw["run_id"]
+    run_dir.mkdir()
+    (run_dir / "result.json").write_text(json.dumps(raw))
+    step = {
+        "event": "step_update",
+        "step_update": {
+            "usage": {
+                "input_tokens": 6_476,
+                "cache_read_tokens": 220_102,
+                "output_tokens": 2_504,
+                "thinking_tokens": 426,
+            }
+        },
+    }
+    (run_dir / "events.jsonl").write_text(json.dumps(step) + "\n")
+
+    result = store.load_result(raw["run_id"])
+
+    assert result.usage_schema == TOKEN_USAGE_SCHEMA
+    assert _usage_tuple(result.usage) == (226_578, 220_102, 2_504, 426)
+    assert result.calculated_cost is None
+    assert result.accounting_status == "complete"
+
+    (run_dir / "events.jsonl").unlink()
+    without_events = store.load_result(raw["run_id"])
+    assert without_events.usage is None
+    assert without_events.accounting_status == "unavailable"
+
+
+def test_v2_results_of_other_providers_load_unchanged() -> None:
+    raw = _v2_result("codex")
+
+    result = RunResult.from_dict(raw)
+
+    assert result.usage_schema == TOKEN_USAGE_SCHEMA
+    assert result.usage.to_dict() == raw["usage"]
+
+
+def _v2_result(provider: str) -> dict:
+    return {
+        "run_id": "f1e2d3c4-0000-4000-8000-000000000001",
+        "provider": provider,
+        "mode": "agent",
+        "task": "task",
+        "model": "model",
+        "effort": None,
+        "session_id": "session",
+        "command": [provider],
+        "started_at": "2026-08-30T07:09:00+00:00",
+        "finished_at": "2026-08-30T07:09:09+00:00",
+        "duration_seconds": 9.0,
+        "exit_code": 0,
+        "timed_out": False,
+        "error": None,
+        "final_message": "answer",
+        "usage": {
+            "input_tokens": 10,
+            "cached_input_tokens": 4,
+            "output_tokens": 2,
+            "reasoning_output_tokens": 1,
+        },
+        "calculated_cost": None,
+        "provider_reported_cost": None,
+        "billing": {"route": "subscription"},
+        "accounting_status": "complete",
+        "usage_schema": "aop-token-usage-v2",
+    }
 
 
 def test_cursor_retained_result_adds_cache_read_and_write_to_input() -> None:

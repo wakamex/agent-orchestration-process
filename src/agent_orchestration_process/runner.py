@@ -4214,6 +4214,9 @@ def _isolated_root_command(bwrap: str) -> list[str]:
         "/etc/ca-certificates",
         "/etc/crypto-policies",
         "/etc/hosts",
+        # The dynamic linker finds libraries in folders registered under
+        # /etc/ld.so.conf.d only through this cache.
+        "/etc/ld.so.cache",
         "/etc/localtime",
         "/etc/nsswitch.conf",
         "/etc/pki",

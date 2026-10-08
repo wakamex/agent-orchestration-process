@@ -26,6 +26,7 @@ from agent_orchestration_process.runner import (
     CursorAdapter,
     _codex_no_web_config,
     _filtered_environment,
+    _isolated_root_command,
     _launch_environment,
     _provider_command,
     _provider_runtime,
@@ -199,6 +200,27 @@ class RunnerTest(AOPTestCase):
         assert result.error == (
             "Codex did not activate the requested no-web permission profile aop-no-web"
         )
+
+    def test_isolated_root_sees_the_host_library_cache(self) -> None:
+        bwrap = shutil.which("bwrap")
+        ldconfig = shutil.which("ldconfig") or shutil.which("ldconfig", path="/usr/sbin:/sbin")
+        if bwrap is None:
+            skip("bwrap is not installed")
+        if ldconfig is None or not Path("/etc/ld.so.cache").exists():
+            skip("this host has no ldconfig or library cache")
+        ldconfig = os.fspath(Path(ldconfig).resolve())
+
+        # Libraries in folders registered under /etc/ld.so.conf.d, such as
+        # PipeWire's libjack.so.0 on Fedora, load only through this cache.
+        host = subprocess.run([ldconfig, "-p"], capture_output=True, text=True, check=True)
+        sandbox = subprocess.run(
+            [*_isolated_root_command(bwrap), ldconfig, "-p"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        assert sandbox.stdout == host.stdout
 
     @parametrize("profile", ["edit", "review", "sealed", "host"])
     def test_installed_codex_executes_no_web_profile_inside_aop_filesystem_contract(

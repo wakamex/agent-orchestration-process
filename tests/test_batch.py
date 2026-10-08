@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from support import AOPTestCase, Capture, MonkeyPatch, parametrize, raises
-from fixtures import api_cost
+from shared_fixtures import api_cost
 
 from agent_orchestration_process.batch import BatchRunner, load_manifest
 from agent_orchestration_process.cli import main

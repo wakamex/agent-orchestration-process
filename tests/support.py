@@ -198,7 +198,7 @@ class AOPTestCase(unittest.TestCase):
                 setattr(cls, name + suffix, _bound(test, parameters))
 
     def setUp(self) -> None:
-        import fixtures  # noqa: F401  registers the shared fixtures
+        import shared_fixtures  # noqa: F401  registers the shared fixtures
 
         self._values: dict[str, Any] = {}
         self._stack = contextlib.ExitStack()

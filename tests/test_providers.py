@@ -7,7 +7,7 @@ from pathlib import Path
 
 from support import AOPTestCase, MonkeyPatch, parametrize, raises
 import yaml
-from fixtures import api_cost
+from shared_fixtures import api_cost
 
 from agent_orchestration_process import runner as runner_module
 from agent_orchestration_process.pricing import TokenUsage

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import model_prices
 from support import AOPTestCase, fail, fixture, parametrize, raises
-from fixtures import api_cost
+from shared_fixtures import api_cost
 
 from agent_orchestration_process import zcode
 from agent_orchestration_process.model_listing import AGENTS, list_models

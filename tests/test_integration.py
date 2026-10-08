@@ -17,7 +17,7 @@ from agent_orchestration_process.locks import task_lock_path
 from agent_orchestration_process.runner import AgentRunner, CodexAdapter, HermesAdapter
 from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
-from fixtures import git
+from shared_fixtures import git
 
 
 def commit_aop_ignore(repository: Path) -> None:

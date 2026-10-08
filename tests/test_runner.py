@@ -13,7 +13,7 @@ from pathlib import Path
 
 import model_prices
 from support import AOPTestCase, Capture, MonkeyPatch, fail, parametrize, raises, skip
-from fixtures import api_cost
+from shared_fixtures import api_cost
 
 from agent_orchestration_process import __version__
 from agent_orchestration_process.cli import build_parser, main

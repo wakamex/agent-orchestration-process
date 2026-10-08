@@ -170,6 +170,8 @@ def _atomic_write_private(path: Path, content: str) -> None:
 T = TypeVar("T")
 # Claude tools that cannot reach the network, the default set under --no-web.
 CLAUDE_NO_WEB_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")
+# Values of Claude Code's --thinking-display, which print mode applies.
+CLAUDE_THINKING_DISPLAYS = ("summarized", "omitted", "highlights")
 # The environment variable each harness reads its inference base URL from.
 PROVIDER_BASE_URL_VARIABLES = {"claude": "ANTHROPIC_BASE_URL"}
 
@@ -1375,6 +1377,8 @@ class ClaudeAdapter:
             command.extend(["--tools", ",".join(tools)])
         if request.system_prompt is not None:
             command.extend(["--system-prompt", request.system_prompt])
+        if request.thinking_display is not None:
+            command.extend(["--thinking-display", request.thinking_display])
         if request.session_id:
             command.extend(["--resume", request.session_id])
         else:
@@ -5751,10 +5755,21 @@ class AgentRunner:
         provider_base_url: str | None = None,
         allowed_urls: Sequence[str] = (),
         writable_workspace: bool = False,
+        thinking_display: str | None = None,
     ) -> RunResult:
         self._validate_mode(mode)
         if writable_workspace and profile != "sealed":
             raise AOPError("--writable-workspace applies only to the sealed profile")
+        if thinking_display is not None:
+            if self.adapter.provider != "claude":
+                raise AOPError(
+                    f"{self.adapter.provider} does not support --thinking-display"
+                )
+            if thinking_display not in CLAUDE_THINKING_DISPLAYS:
+                raise AOPError(
+                    "--thinking-display must be one of: "
+                    + ", ".join(CLAUDE_THINKING_DISPLAYS)
+                )
         tools = self._validated_framing(system_prompt, tools, no_web)
         self._validate_provider_base_url(provider_base_url, profile)
         allowed_urls = tuple(allowed_urls)
@@ -5787,6 +5802,7 @@ class AgentRunner:
             provider_base_url=provider_base_url,
             allowed_urls=allowed_urls,
             writable_workspace=writable_workspace,
+            thinking_display=thinking_display,
         )
         worktree = (
             self._create_sealed_workspace(request.run_id)
@@ -5916,6 +5932,7 @@ class AgentRunner:
             provider_base_url=parent_request.provider_base_url,
             allowed_urls=parent_request.allowed_urls,
             writable_workspace=parent_request.writable_workspace,
+            thinking_display=parent_request.thinking_display,
         )
         return self._execute(
             request,
@@ -6271,6 +6288,7 @@ class AgentRunner:
         provider_base_url: str | None = None,
         allowed_urls: tuple[str, ...] = (),
         writable_workspace: bool = False,
+        thinking_display: str | None = None,
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -6297,6 +6315,7 @@ class AgentRunner:
             provider_base_url=provider_base_url,
             allowed_urls=allowed_urls,
             writable_workspace=writable_workspace,
+            thinking_display=thinking_display,
         )
 
     def _validate_provider_base_url(self, url: str | None, profile: str) -> None:

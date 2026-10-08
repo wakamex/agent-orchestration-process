@@ -82,6 +82,8 @@ class RunRequest:
     # built-in tool set; None keeps the harness default.
     system_prompt: str | None = None
     tools: tuple[str, ...] | None = None
+    # How the harness returns the model's thinking, such as "summarized".
+    thinking_display: str | None = None
     # Base URL the harness sends inference requests to, instead of its default.
     provider_base_url: str | None = None
     # Extra URLs a --no-web run may reach through its egress proxy.

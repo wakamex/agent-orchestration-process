@@ -2565,3 +2565,28 @@ def test_no_web_devin_denies_shell_and_web_search(tmp_path: Path) -> None:
         "exec",
         "web_search",
     ]
+
+
+def test_claude_thinking_display_is_recorded_and_kept_on_resume(
+    repository: Path, fake_claude: Path, fake_codex: Path
+) -> None:
+    runner = AgentRunner(
+        WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+    )
+
+    first = runner.run(task="thinking", prompt="first", thinking_display="summarized")
+    resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+    for result in (first, resumed):
+        assert result.succeeded, result.error
+        flag = result.command.index("--thinking-display")
+        assert result.command[flag + 1] == "summarized"
+        assert runner.store.load_request(result.run_id).thinking_display == (
+            "summarized"
+        )
+    with pytest.raises(AOPError, match="must be one of"):
+        runner.run(task="bad", prompt="x", thinking_display="full")
+    with pytest.raises(AOPError, match="does not support --thinking-display"):
+        AgentRunner(
+            WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+        ).run(task="codex", prompt="x", thinking_display="summarized")

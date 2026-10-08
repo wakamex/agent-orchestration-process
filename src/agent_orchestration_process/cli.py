@@ -186,6 +186,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="exact comma-separated built-in tool set (claude only; '' for none)",
     )
     run.add_argument(
+        "--thinking-display",
+        choices=["summarized", "omitted", "highlights"],
+        help="how Claude returns the model's thinking, such as official summaries "
+        "(claude only)",
+    )
+    run.add_argument(
         "--writable-workspace",
         action="store_true",
         help="with --profile sealed, let the run write its private, initially empty "
@@ -421,6 +427,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider_base_url=args.provider_base_url,
                 allowed_urls=args.allowed_urls,
                 writable_workspace=args.writable_workspace,
+                thinking_display=args.thinking_display,
             )
             return _report_run(result, manager, json_output=args.json)
 

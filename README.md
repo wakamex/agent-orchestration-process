@@ -117,6 +117,6 @@ Clone the repository and synchronize its locked development environment:
 git clone https://github.com/wakamex/agent-orchestration-process.git
 cd agent-orchestration-process
 uv --no-config sync --locked
-uv --no-config run --locked pytest
+uv --no-config run --locked python -m unittest discover -s tests
 uv --no-config run --locked ruff check src tests
 ```

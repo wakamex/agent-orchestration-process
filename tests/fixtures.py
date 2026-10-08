@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import model_prices
-import pytest
+from support import MonkeyPatch, Request, fixture
 
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
@@ -61,26 +61,26 @@ if prompt.startswith("SEALED_PROVIDER_PROBE"):
 """
 
 
-@pytest.fixture(autouse=True)
-def private_state_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@fixture(autouse=True)
+def private_state_roots(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """Keep AOP's registry of state directories out of the user's state."""
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(tmp_path / "xdg-state"))
 
 
-@pytest.fixture(autouse=True)
+@fixture(autouse=True)
 def offline_price_refresh(
-    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    request: Request, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     """Keep tests off the network and the user's model-prices cache."""
     monkeypatch.setenv("MODEL_PRICES_CACHE", os.fspath(tmp_path / "model-prices"))
-    if request.node.get_closest_marker("real_price_refresh") is None:
+    if "real_price_refresh" not in request.marks:
         from agent_orchestration_process import pricing
 
         monkeypatch.setattr(pricing, "refresh_prices", lambda **options: [])
 
 
-@pytest.fixture(autouse=True)
-def fresh_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture(autouse=True)
+def fresh_model_catalog(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     providers = {
         "openai": {
             "models": {
@@ -219,7 +219,7 @@ def git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-@pytest.fixture
+@fixture
 def repository(tmp_path: Path) -> Path:
     root = tmp_path / "project"
     root.mkdir()
@@ -232,8 +232,8 @@ def repository(tmp_path: Path) -> Path:
     return root
 
 
-@pytest.fixture
-def fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture
+def fake_codex(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     source_home = tmp_path / "codex-home"
     source_home.mkdir()
     source_home.joinpath("auth.json").write_text(
@@ -690,8 +690,8 @@ else:
     return executable
 
 
-@pytest.fixture
-def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture
+def fake_claude(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     # AOP seeds Claude runs from $HOME/.claude; never copy the host's live state.
     home = tmp_path / "claude-source-home"
     (home / ".claude").mkdir(parents=True)
@@ -790,8 +790,8 @@ print(json.dumps({{
     return executable
 
 
-@pytest.fixture
-def fake_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture
+def fake_cursor(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     executable = tmp_path / "agent"
     cursor_home = tmp_path / "cursor-home"
     cursor_home.mkdir()
@@ -886,8 +886,8 @@ print(json.dumps({{
     return executable
 
 
-@pytest.fixture
-def fake_devin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture
+def fake_devin(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     executable = tmp_path / "devin"
     source_data = tmp_path / "devin-data"
     source_data.mkdir()
@@ -1026,8 +1026,8 @@ print(message, flush=True)
     return executable
 
 
-@pytest.fixture
-def fake_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture
+def fake_opencode(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     executable = tmp_path / "opencode"
     source_config = tmp_path / "opencode-config"
     source_config.mkdir()
@@ -1178,8 +1178,8 @@ if prompt != "OPENCODE_ERROR":
     return executable
 
 
-@pytest.fixture
-def fake_agy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture
+def fake_agy(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     executable = tmp_path / "agy"
     source_dir = tmp_path / "agy-source"
     source_dir.mkdir()
@@ -1316,8 +1316,8 @@ print(json.dumps({{"event": "result", "result": result}}), flush=True)
     return executable
 
 
-@pytest.fixture
-def fake_hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture
+def fake_hermes(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     executable = tmp_path / "hermes"
     hermes_home = tmp_path / "hermes-home"
     hermes_home.mkdir()
@@ -1463,8 +1463,8 @@ if prompt == "FAIL":
     return executable
 
 
-@pytest.fixture
-def fake_dsh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture
+def fake_dsh(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     source_home = tmp_path / "dsh-home"
     source_home.mkdir()
     source_home.joinpath(".credentials.yaml").write_text(
@@ -1588,8 +1588,8 @@ print(json.dumps({{
     return executable
 
 
-@pytest.fixture
-def fake_grok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@fixture
+def fake_grok(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     source_home = tmp_path / "grok-home"
     source_home.mkdir()
     source_home.joinpath("auth.json").write_text(

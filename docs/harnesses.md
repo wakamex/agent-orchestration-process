@@ -227,7 +227,7 @@ The adapter targets dsh `0.1.5-rc.1` and uses its public `Session.snapshotEvents
 
 Use Node.js 22.19 or newer within 22.x, or Node.js 24 or newer. The `host` profile inherits PATH; AOP rejects an unsupported Node version before dispatch. On this host, NVM's Node 22.14 failed to start the driver, while `/usr/bin/node` 22.22.2 passed. Set `PATH="/usr/bin:$PATH"` when running `host` with the system Node, or select a supported Node through your runtime manager. Isolated profiles use the Node visible inside the AOP sandbox.
 
-Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`. Run native integration checks with `AOP_TEST_DSH_BIN=/path/to/dsh uv run --locked pytest tests/test_dsh_native.py`. These use a local inference server and test authentication projection, tools, artifacts, usage, and exact resume under all four profiles without real API credentials. Historical session-format migration remains owned by dsh; these tests exercise sessions created by the installed version.
+Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`. Run native integration checks with `AOP_TEST_DSH_BIN=/path/to/dsh uv run --locked python -m unittest discover -s tests -p test_dsh_native.py`. These use a local inference server and test authentication projection, tools, artifacts, usage, and exact resume under all four profiles without real API credentials. Historical session-format migration remains owned by dsh; these tests exercise sessions created by the installed version.
 
 ### Zcode
 

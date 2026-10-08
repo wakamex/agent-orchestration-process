@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-import pytest
+from support import AOPTestCase, raises
 
 from agent_orchestration_process.integration import (
     CheckpointManager,
@@ -17,7 +17,7 @@ from agent_orchestration_process.locks import task_lock_path
 from agent_orchestration_process.runner import AgentRunner, CodexAdapter, HermesAdapter
 from agent_orchestration_process.worktrees import AOPError, WorktreeManager
 
-from conftest import git
+from fixtures import git
 
 
 def commit_aop_ignore(repository: Path) -> None:
@@ -32,152 +32,151 @@ def author_runner(manager: WorktreeManager, fake_codex: Path, task: str) -> Agen
     return runner
 
 
-def test_checkpoint_and_integrate_linear_task(
-    repository: Path, fake_codex: Path
-) -> None:
-    manager = WorktreeManager.discover(repository)
-    worktree = manager.create("feature")
-    runner = author_runner(manager, fake_codex, "feature")
-    commit_aop_ignore(repository)
-    (worktree.path / "feature.txt").write_text("done\n")
+class IntegrationTest(AOPTestCase):
+    def test_checkpoint_and_integrate_linear_task(
+        self,
+        repository: Path, fake_codex: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        worktree = manager.create("feature")
+        runner = author_runner(manager, fake_codex, "feature")
+        commit_aop_ignore(repository)
+        (worktree.path / "feature.txt").write_text("done\n")
 
-    checkpoint = CheckpointManager(manager).checkpoint("feature", "Add feature")
-    result = IntegrationManager(manager, runner).integrate("feature")
+        checkpoint = CheckpointManager(manager).checkpoint("feature", "Add feature")
+        result = IntegrationManager(manager, runner).integrate("feature")
 
-    assert git(worktree.path, "status", "--porcelain") == ""
-    assert checkpoint.commit == result.source_commits[0]
-    assert len(result.integrated_commits) == 1
-    assert (repository / "feature.txt").read_text() == "done\n"
-    record = json.loads(result.record_path.read_text())
-    assert record["task"] == "feature"
-    assert record["source_commits"] == [checkpoint.commit]
-    assert record["validation_run_id"] == result.author_run.run_id
-    assert result.author_run.command[0] == "bwrap"
-    validation_request = json.loads(
-        (
-            repository / ".aop" / "runs" / result.author_run.run_id / "request.json"
-        ).read_text()
-    )
-    assert validation_request["profile"] == "edit"
-    assert result.resolution_run_ids == []
-    assert manager.metadata("feature").base_commit == result.integrated_head
+        assert git(worktree.path, "status", "--porcelain") == ""
+        assert checkpoint.commit == result.source_commits[0]
+        assert len(result.integrated_commits) == 1
+        assert (repository / "feature.txt").read_text() == "done\n"
+        record = json.loads(result.record_path.read_text())
+        assert record["task"] == "feature"
+        assert record["source_commits"] == [checkpoint.commit]
+        assert record["validation_run_id"] == result.author_run.run_id
+        assert result.author_run.command[0] == "bwrap"
+        validation_request = json.loads(
+            (
+                repository / ".aop" / "runs" / result.author_run.run_id / "request.json"
+            ).read_text()
+        )
+        assert validation_request["profile"] == "edit"
+        assert result.resolution_run_ids == []
+        assert manager.metadata("feature").base_commit == result.integrated_head
 
+    def test_participant_runs_are_not_treated_as_authoring_provenance(
+        self,
+        repository: Path,
+        fake_codex: Path,
+        fake_hermes: Path,
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        author = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+            task="mixed-purpose",
+            prompt="author",
+            timeout_seconds=5,
+        )
+        participant = AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes))).run(
+            task="mixed-purpose",
+            prompt="participant",
+            mode="participant",
+            profile="review",
+            timeout_seconds=5,
+        )
 
-def test_participant_runs_are_not_treated_as_authoring_provenance(
-    repository: Path,
-    fake_codex: Path,
-    fake_hermes: Path,
-) -> None:
-    manager = WorktreeManager.discover(repository)
-    author = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
-        task="mixed-purpose",
-        prompt="author",
-        timeout_seconds=5,
-    )
-    participant = AgentRunner(manager, HermesAdapter(os.fspath(fake_hermes))).run(
-        task="mixed-purpose",
-        prompt="participant",
-        mode="participant",
-        profile="review",
-        timeout_seconds=5,
-    )
+        assert author.succeeded
+        assert participant.succeeded
+        assert _latest_resumable_run_id(manager.state_dir, "mixed-purpose") == (
+            author.run_id
+        )
+        assert _source_run_ids(manager.state_dir, "mixed-purpose") == [author.run_id]
 
-    assert author.succeeded
-    assert participant.succeeded
-    assert _latest_resumable_run_id(manager.state_dir, "mixed-purpose") == (
-        author.run_id
-    )
-    assert _source_run_ids(manager.state_dir, "mixed-purpose") == [author.run_id]
+    def test_integration_can_remove_worktree(self, repository: Path, fake_codex: Path) -> None:
+        manager = WorktreeManager.discover(repository)
+        worktree = manager.create("remove-me")
+        runner = author_runner(manager, fake_codex, "remove-me")
+        commit_aop_ignore(repository)
+        (worktree.path / "change.txt").write_text("change\n")
+        CheckpointManager(manager).checkpoint("remove-me", "Make change")
 
+        IntegrationManager(manager, runner).integrate("remove-me", remove_worktree=True)
 
-def test_integration_can_remove_worktree(repository: Path, fake_codex: Path) -> None:
-    manager = WorktreeManager.discover(repository)
-    worktree = manager.create("remove-me")
-    runner = author_runner(manager, fake_codex, "remove-me")
-    commit_aop_ignore(repository)
-    (worktree.path / "change.txt").write_text("change\n")
-    CheckpointManager(manager).checkpoint("remove-me", "Make change")
+        assert not worktree.path.exists()
+        assert manager.list() == []
 
-    IntegrationManager(manager, runner).integrate("remove-me", remove_worktree=True)
+    def test_integration_refuses_dirty_main_without_moving_head(
+        self,
+        repository: Path, fake_codex: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        worktree = manager.create("feature")
+        runner = author_runner(manager, fake_codex, "feature")
+        commit_aop_ignore(repository)
+        (worktree.path / "feature.txt").write_text("done\n")
+        CheckpointManager(manager).checkpoint("feature", "Add feature")
+        before = git(repository, "rev-parse", "HEAD")
+        (repository / "local.txt").write_text("not committed\n")
 
-    assert not worktree.path.exists()
-    assert manager.list() == []
+        with raises(AOPError, match="main worktree must be clean"):
+            IntegrationManager(manager, runner).integrate("feature")
 
+        assert git(repository, "rev-parse", "HEAD") == before
 
-def test_integration_refuses_dirty_main_without_moving_head(
-    repository: Path, fake_codex: Path
-) -> None:
-    manager = WorktreeManager.discover(repository)
-    worktree = manager.create("feature")
-    runner = author_runner(manager, fake_codex, "feature")
-    commit_aop_ignore(repository)
-    (worktree.path / "feature.txt").write_text("done\n")
-    CheckpointManager(manager).checkpoint("feature", "Add feature")
-    before = git(repository, "rev-parse", "HEAD")
-    (repository / "local.txt").write_text("not committed\n")
+    def test_integration_refuses_dirty_task(self, repository: Path, fake_codex: Path) -> None:
+        manager = WorktreeManager.discover(repository)
+        worktree = manager.create("feature")
+        runner = author_runner(manager, fake_codex, "feature")
+        commit_aop_ignore(repository)
+        (worktree.path / "feature.txt").write_text("done\n")
+        CheckpointManager(manager).checkpoint("feature", "Add feature")
+        (worktree.path / "later.txt").write_text("not committed\n")
 
-    with pytest.raises(AOPError, match="main worktree must be clean"):
-        IntegrationManager(manager, runner).integrate("feature")
+        with raises(AOPError, match="task worktree feature must be clean"):
+            IntegrationManager(manager, runner).integrate("feature")
 
-    assert git(repository, "rev-parse", "HEAD") == before
+    def test_authoring_agent_resolves_rebase_conflict(
+        self,
+        repository: Path, fake_codex: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        worktree = manager.create("conflict")
+        runner = author_runner(manager, fake_codex, "conflict")
+        commit_aop_ignore(repository)
+        (worktree.path / "README.md").write_text("task version\n")
+        CheckpointManager(manager).checkpoint("conflict", "Edit from task")
 
+        (repository / "README.md").write_text("main version\n")
+        git(repository, "add", "README.md")
+        git(repository, "commit", "-m", "Edit on main")
+        result = IntegrationManager(manager, runner).integrate("conflict")
 
-def test_integration_refuses_dirty_task(repository: Path, fake_codex: Path) -> None:
-    manager = WorktreeManager.discover(repository)
-    worktree = manager.create("feature")
-    runner = author_runner(manager, fake_codex, "feature")
-    commit_aop_ignore(repository)
-    (worktree.path / "feature.txt").write_text("done\n")
-    CheckpointManager(manager).checkpoint("feature", "Add feature")
-    (worktree.path / "later.txt").write_text("not committed\n")
+        assert git(repository, "rev-parse", "HEAD") == result.integrated_head
+        assert git(worktree.path, "rev-parse", "HEAD") == result.integrated_head
+        assert git(repository, "status", "--porcelain") == ""
+        assert (repository / "README.md").read_text() == "main version\ntask version\n"
+        assert len(result.resolution_run_ids) == 1
+        resolution_result = json.loads(
+            (
+                repository / ".aop" / "runs" / result.resolution_run_ids[0] / "result.json"
+            ).read_text()
+        )
+        command = resolution_result["command"]
+        assert command[0] == "bwrap"
+        resolution_request = json.loads(
+            (
+                repository / ".aop" / "runs" / result.resolution_run_ids[0] / "request.json"
+            ).read_text()
+        )
+        assert resolution_request["profile"] == "edit"
 
-    with pytest.raises(AOPError, match="task worktree feature must be clean"):
-        IntegrationManager(manager, runner).integrate("feature")
+    def test_checkpoint_refuses_an_active_task(self, repository: Path) -> None:
+        manager = WorktreeManager.discover(repository)
+        worktree = manager.create("busy")
+        (worktree.path / "feature.txt").write_text("done\n")
+        lock_path = task_lock_path(manager.state_dir, "busy")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-
-def test_authoring_agent_resolves_rebase_conflict(
-    repository: Path, fake_codex: Path
-) -> None:
-    manager = WorktreeManager.discover(repository)
-    worktree = manager.create("conflict")
-    runner = author_runner(manager, fake_codex, "conflict")
-    commit_aop_ignore(repository)
-    (worktree.path / "README.md").write_text("task version\n")
-    CheckpointManager(manager).checkpoint("conflict", "Edit from task")
-
-    (repository / "README.md").write_text("main version\n")
-    git(repository, "add", "README.md")
-    git(repository, "commit", "-m", "Edit on main")
-    result = IntegrationManager(manager, runner).integrate("conflict")
-
-    assert git(repository, "rev-parse", "HEAD") == result.integrated_head
-    assert git(worktree.path, "rev-parse", "HEAD") == result.integrated_head
-    assert git(repository, "status", "--porcelain") == ""
-    assert (repository / "README.md").read_text() == "main version\ntask version\n"
-    assert len(result.resolution_run_ids) == 1
-    resolution_result = json.loads(
-        (
-            repository / ".aop" / "runs" / result.resolution_run_ids[0] / "result.json"
-        ).read_text()
-    )
-    command = resolution_result["command"]
-    assert command[0] == "bwrap"
-    resolution_request = json.loads(
-        (
-            repository / ".aop" / "runs" / result.resolution_run_ids[0] / "request.json"
-        ).read_text()
-    )
-    assert resolution_request["profile"] == "edit"
-
-
-def test_checkpoint_refuses_an_active_task(repository: Path) -> None:
-    manager = WorktreeManager.discover(repository)
-    worktree = manager.create("busy")
-    (worktree.path / "feature.txt").write_text("done\n")
-    lock_path = task_lock_path(manager.state_dir, "busy")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with lock_path.open("a+") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with pytest.raises(AOPError, match="task busy is busy"):
-            CheckpointManager(manager).checkpoint("busy", "Add feature")
+        with lock_path.open("a+") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with raises(AOPError, match="task busy is busy"):
+                CheckpointManager(manager).checkpoint("busy", "Add feature")

@@ -23,6 +23,6 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - run: uv --no-config lock --check
-      - run: uv --no-config run --locked pytest
+      - run: uv --no-config run --locked python -m unittest discover -s tests
       - run: uv --no-config run --locked ruff check src tests
       - run: uv --no-config build --no-sources

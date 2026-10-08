@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import model_prices
-import pytest
+from support import AOPTestCase, mark, parametrize, raises
 
 from agent_orchestration_process.pricing import (
     CalculatedCost,
@@ -30,340 +30,322 @@ def cost_at(model, usage, at, *, provider="openai", finished_at=None, requests=N
     )
 
 
-@pytest.mark.parametrize(
-    ("at", "expected"),
-    [(BEFORE_SOL_CUT, 0.01055), (AFTER_SOL_CUT, 0.00764)],
-)
-def test_cost_uses_rates_in_effect_when_the_run_happened(at, expected) -> None:
-    usage = TokenUsage(
-        input_tokens=1_000,
-        cached_input_tokens=100,
-        output_tokens=200,
-        reasoning_output_tokens=50,
+class PricingTest(AOPTestCase):
+    @parametrize(
+        ("at", "expected"),
+        [(BEFORE_SOL_CUT, 0.01055), (AFTER_SOL_CUT, 0.00764)],
     )
+    def test_cost_uses_rates_in_effect_when_the_run_happened(self, at, expected) -> None:
+        usage = TokenUsage(
+            input_tokens=1_000,
+            cached_input_tokens=100,
+            output_tokens=200,
+            reasoning_output_tokens=50,
+        )
 
-    estimate = cost_at("gpt-5.6-sol", usage, at)
+        estimate = cost_at("gpt-5.6-sol", usage, at)
 
-    assert estimate is not None
-    assert estimate.amount_usd == expected
-    assert estimate.priced_as == "openai/gpt-5.6-sol"
-    assert estimate.pricing_basis == model_prices.pricing_basis()
-    assert estimate.pricing_version.startswith("model-prices-")
-    assert estimate.pricing_period is None
-    assert estimate.long_context_pricing is False
-    assert CalculatedCost.from_dict(estimate.to_dict()) == estimate
+        assert estimate is not None
+        assert estimate.amount_usd == expected
+        assert estimate.priced_as == "openai/gpt-5.6-sol"
+        assert estimate.pricing_basis == model_prices.pricing_basis()
+        assert estimate.pricing_version.startswith("model-prices-")
+        assert estimate.pricing_period is None
+        assert estimate.long_context_pricing is False
+        assert CalculatedCost.from_dict(estimate.to_dict()) == estimate
 
+    def test_run_spanning_a_price_change_without_request_times_is_unpriced(self) -> None:
+        usage = TokenUsage(input_tokens=1_000, output_tokens=10)
 
-def test_run_spanning_a_price_change_without_request_times_is_unpriced() -> None:
-    usage = TokenUsage(input_tokens=1_000, output_tokens=10)
+        assert (
+            cost_at("gpt-5.6-sol", usage, BEFORE_SOL_CUT, finished_at=AFTER_SOL_CUT) is None
+        )
 
-    assert (
-        cost_at("gpt-5.6-sol", usage, BEFORE_SOL_CUT, finished_at=AFTER_SOL_CUT) is None
+    def test_same_prices_from_a_new_source_are_not_a_price_change(self) -> None:
+        # A correction ends where models.dev recorded the same price.
+        usage = TokenUsage(input_tokens=1_000, output_tokens=10)
+
+        estimate = cost_at(
+            "gpt-5.6-sol",
+            usage,
+            "2026-08-25T04:00:00+00:00",
+            finished_at="2026-08-25T05:00:00+00:00",
+        )
+
+        assert estimate is not None
+        assert estimate.amount_usd == 0.0042
+
+    @parametrize(
+        ("at", "period", "expected"),
+        [(DEEPSEEK_PEAK, "peak", 0.0005106), (DEEPSEEK_OFF_PEAK, "off_peak", 0.0002553)],
     )
+    def test_deepseek_time_of_day_pricing(self, at, period, expected) -> None:
+        estimate = cost_at(
+            "deepseek-flash", TokenUsage(1000, 100, 200), at, provider="deepseek"
+        )
 
+        assert estimate is not None
+        assert estimate.amount_usd == expected
+        assert estimate.pricing_period == period
 
-def test_same_prices_from_a_new_source_are_not_a_price_change() -> None:
-    # A correction ends where models.dev recorded the same price.
-    usage = TokenUsage(input_tokens=1_000, output_tokens=10)
+    def test_run_crossing_a_peak_window_is_priced_only_per_request(self) -> None:
+        usage = TokenUsage(1000, 100, 200)
+        start, finish = "2026-09-30T00:50:00+00:00", "2026-09-30T01:10:00+00:00"
 
-    estimate = cost_at(
-        "gpt-5.6-sol",
-        usage,
-        "2026-08-25T04:00:00+00:00",
-        finished_at="2026-08-25T05:00:00+00:00",
-    )
-
-    assert estimate is not None
-    assert estimate.amount_usd == 0.0042
-
-
-@pytest.mark.parametrize(
-    ("at", "period", "expected"),
-    [(DEEPSEEK_PEAK, "peak", 0.0005106), (DEEPSEEK_OFF_PEAK, "off_peak", 0.0002553)],
-)
-def test_deepseek_time_of_day_pricing(at, period, expected) -> None:
-    estimate = cost_at(
-        "deepseek-flash", TokenUsage(1000, 100, 200), at, provider="deepseek"
-    )
-
-    assert estimate is not None
-    assert estimate.amount_usd == expected
-    assert estimate.pricing_period == period
-
-
-def test_run_crossing_a_peak_window_is_priced_only_per_request() -> None:
-    usage = TokenUsage(1000, 100, 200)
-    start, finish = "2026-09-30T00:50:00+00:00", "2026-09-30T01:10:00+00:00"
-
-    assert (
-        cost_at("deepseek-flash", usage, start, provider="deepseek", finished_at=finish)
-        is None
-    )
-    # A run covering a whole peak window has off-peak endpoints but is still unpriced.
-    assert (
-        cost_at(
+        assert (
+            cost_at("deepseek-flash", usage, start, provider="deepseek", finished_at=finish)
+            is None
+        )
+        # A run covering a whole peak window has off-peak endpoints but is still unpriced.
+        assert (
+            cost_at(
+                "deepseek-flash",
+                usage,
+                "2026-09-30T00:30:00+00:00",
+                provider="deepseek",
+                finished_at="2026-09-30T04:30:00+00:00",
+            )
+            is None
+        )
+        first, second = TokenUsage(400, 0, 100), TokenUsage(600, 100, 100)
+        estimate = cost_at(
             "deepseek-flash",
             usage,
-            "2026-09-30T00:30:00+00:00",
+            start,
             provider="deepseek",
-            finished_at="2026-09-30T04:30:00+00:00",
+            finished_at=finish,
+            requests=[(first, "2026-09-30T00:55:00Z"), (second, "2026-09-30T01:05:00Z")],
         )
-        is None
-    )
-    first, second = TokenUsage(400, 0, 100), TokenUsage(600, 100, 100)
-    estimate = cost_at(
-        "deepseek-flash",
-        usage,
-        start,
-        provider="deepseek",
-        finished_at=finish,
-        requests=[(first, "2026-09-30T00:55:00Z"), (second, "2026-09-30T01:05:00Z")],
-    )
-    assert estimate is not None
-    assert estimate.pricing_period == "mixed"
-    assert estimate.amount_usd == round(
-        model_prices.cost(
-            "deepseek-flash",
-            input_tokens=400,
-            output_tokens=100,
-            at="2026-09-30T00:55:00Z",
+        assert estimate is not None
+        assert estimate.pricing_period == "mixed"
+        assert estimate.amount_usd == round(
+            model_prices.cost(
+                "deepseek-flash",
+                input_tokens=400,
+                output_tokens=100,
+                at="2026-09-30T00:55:00Z",
+            )
+            + model_prices.cost(
+                "deepseek-flash",
+                input_tokens=500,
+                cache_read_tokens=100,
+                output_tokens=100,
+                at="2026-09-30T01:05:00Z",
+            ),
+            8,
         )
-        + model_prices.cost(
-            "deepseek-flash",
-            input_tokens=500,
-            cache_read_tokens=100,
-            output_tokens=100,
-            at="2026-09-30T01:05:00Z",
-        ),
-        8,
-    )
 
-
-def test_reasoning_tokens_are_not_double_counted() -> None:
-    without_reasoning = cost_at(
-        "gpt-5.6-sol", TokenUsage(input_tokens=100, output_tokens=100), AFTER_SOL_CUT
-    )
-    with_reasoning = cost_at(
-        "gpt-5.6-sol",
-        TokenUsage(input_tokens=100, output_tokens=100, reasoning_output_tokens=80),
-        AFTER_SOL_CUT,
-    )
-
-    assert without_reasoning is not None
-    assert with_reasoning is not None
-    assert with_reasoning.amount_usd == without_reasoning.amount_usd
-
-
-def test_total_tokens_contains_only_input_and_output_totals() -> None:
-    usage = TokenUsage(
-        input_tokens=100,
-        cached_input_tokens=80,
-        output_tokens=50,
-        reasoning_output_tokens=40,
-    )
-
-    assert usage.total_tokens == 150
-
-
-def test_harness_model_names_resolve_to_the_lab_price() -> None:
-    estimate = cost_at(
-        "gemini-3.5-flash-low",
-        TokenUsage(
-            input_tokens=400,
-            cached_input_tokens=300,
-            output_tokens=20,
-            reasoning_output_tokens=7,
-        ),
-        AFTER_SOL_CUT,
-        provider="google",
-    )
-
-    assert estimate is not None
-    assert estimate.amount_usd == 0.000375
-    assert estimate.model == "gemini-3.5-flash-low"
-    assert estimate.priced_as == "google/gemini-3.5-flash"
-    assert estimate.removed_suffix == "-low"
-
-
-def test_zai_flash_uses_the_sourced_correction() -> None:
-    estimate = cost_at(
-        "glm-5.3-flash",
-        TokenUsage(1000, 100, 200),
-        "2026-09-12T00:00:00+00:00",
-        provider="zai",
-    )
-
-    assert estimate is not None
-    assert estimate.amount_usd == 0.000238
-    assert estimate.pricing_source == "https://docs.z.ai/guides/overview/pricing"
-
-
-def test_token_usage_rejects_overlapping_subsets_larger_than_totals() -> None:
-    with pytest.raises(ValueError, match="cached_input_tokens"):
-        TokenUsage(input_tokens=10, cached_input_tokens=11)
-    with pytest.raises(ValueError, match="reasoning_output_tokens"):
-        TokenUsage(output_tokens=10, reasoning_output_tokens=11)
-
-
-def test_long_context_tier_is_applied_per_request() -> None:
-    long_request = TokenUsage(
-        input_tokens=300_000, cached_input_tokens=100_000, output_tokens=1_000
-    )
-
-    estimate = cost_at("gpt-5.5", long_request, AFTER_SOL_CUT)
-
-    assert estimate is not None
-    assert estimate.long_context_pricing is True
-    assert estimate.amount_usd == 2.145
-
-
-def test_repeated_short_requests_do_not_trigger_long_context_tier() -> None:
-    request = TokenUsage(
-        input_tokens=150_000, cached_input_tokens=100_000, output_tokens=1_000
-    )
-    aggregate = TokenUsage(
-        input_tokens=300_000, cached_input_tokens=200_000, output_tokens=2_000
-    )
-
-    estimate = cost_at(
-        "gpt-5.5",
-        aggregate,
-        AFTER_SOL_CUT,
-        requests=[(request, None), (request, None)],
-    )
-
-    assert estimate is not None
-    assert estimate.long_context_pricing is False
-    assert estimate.amount_usd == 0.66
-
-
-def test_mixed_context_tiers_are_priced_per_request() -> None:
-    requests = [
-        (
-            TokenUsage(
-                input_tokens=100_000, cached_input_tokens=20_000, output_tokens=1_000
-            ),
-            None,
-        ),
-        (
-            TokenUsage(
-                input_tokens=300_000, cached_input_tokens=100_000, output_tokens=1_000
-            ),
-            None,
-        ),
-    ]
-    aggregate = TokenUsage(
-        input_tokens=400_000, cached_input_tokens=120_000, output_tokens=2_000
-    )
-
-    estimate = cost_at("gpt-5.5", aggregate, AFTER_SOL_CUT, requests=requests)
-
-    assert estimate is not None
-    assert estimate.long_context_pricing is True
-    assert estimate.amount_usd == 2.585
-
-
-def test_request_usage_must_match_aggregate_usage() -> None:
-    with pytest.raises(ValueError, match="request usage does not match"):
-        cost_at(
-            "gpt-5.5",
-            TokenUsage(input_tokens=10),
+    def test_reasoning_tokens_are_not_double_counted(self) -> None:
+        without_reasoning = cost_at(
+            "gpt-5.6-sol", TokenUsage(input_tokens=100, output_tokens=100), AFTER_SOL_CUT
+        )
+        with_reasoning = cost_at(
+            "gpt-5.6-sol",
+            TokenUsage(input_tokens=100, output_tokens=100, reasoning_output_tokens=80),
             AFTER_SOL_CUT,
-            requests=[(TokenUsage(input_tokens=9), None)],
         )
 
+        assert without_reasoning is not None
+        assert with_reasoning is not None
+        assert with_reasoning.amount_usd == without_reasoning.amount_usd
 
-def test_zero_measured_requests_still_require_a_known_model() -> None:
-    estimate = cost_at("gpt-5.5", TokenUsage(), AFTER_SOL_CUT, requests=[])
+    def test_total_tokens_contains_only_input_and_output_totals(self) -> None:
+        usage = TokenUsage(
+            input_tokens=100,
+            cached_input_tokens=80,
+            output_tokens=50,
+            reasoning_output_tokens=40,
+        )
 
-    assert estimate is not None
-    assert estimate.amount_usd == 0
-    assert cost_at("future-model", TokenUsage(), AFTER_SOL_CUT, requests=[]) is None
+        assert usage.total_tokens == 150
 
+    def test_harness_model_names_resolve_to_the_lab_price(self) -> None:
+        estimate = cost_at(
+            "gemini-3.5-flash-low",
+            TokenUsage(
+                input_tokens=400,
+                cached_input_tokens=300,
+                output_tokens=20,
+                reasoning_output_tokens=7,
+            ),
+            AFTER_SOL_CUT,
+            provider="google",
+        )
 
-def test_unknown_or_implicit_model_has_no_cost_estimate() -> None:
-    usage = TokenUsage(input_tokens=100, output_tokens=10)
+        assert estimate is not None
+        assert estimate.amount_usd == 0.000375
+        assert estimate.model == "gemini-3.5-flash-low"
+        assert estimate.priced_as == "google/gemini-3.5-flash"
+        assert estimate.removed_suffix == "-low"
 
-    assert cost_at(None, usage, AFTER_SOL_CUT) is None
-    assert cost_at("future-model", usage, AFTER_SOL_CUT) is None
+    def test_zai_flash_uses_the_sourced_correction(self) -> None:
+        estimate = cost_at(
+            "glm-5.3-flash",
+            TokenUsage(1000, 100, 200),
+            "2026-09-12T00:00:00+00:00",
+            provider="zai",
+        )
 
+        assert estimate is not None
+        assert estimate.amount_usd == 0.000238
+        assert estimate.pricing_source == "https://docs.z.ai/guides/overview/pricing"
 
-def test_listing_shows_current_rates_and_time_of_day_period() -> None:
-    from agent_orchestration_process import model_listing
-    from agent_orchestration_process.model_catalog import ModelCatalog
+    def test_token_usage_rejects_overlapping_subsets_larger_than_totals(self) -> None:
+        with raises(ValueError, match="cached_input_tokens"):
+            TokenUsage(input_tokens=10, cached_input_tokens=11)
+        with raises(ValueError, match="reasoning_output_tokens"):
+            TokenUsage(output_tokens=10, reasoning_output_tokens=11)
 
-    row = model_listing._record(
-        "dsh",
-        "deepseek-flash",
-        "Flash",
-        "installed-default",
-        "api-equivalent",
-        ModelCatalog({}, 0, "", ""),
-        "deepseek",
-        "deepseek-flash",
-    )
-    rates = model_prices.rates("deepseek-flash", provider="deepseek")
+    def test_long_context_tier_is_applied_per_request(self) -> None:
+        long_request = TokenUsage(
+            input_tokens=300_000, cached_input_tokens=100_000, output_tokens=1_000
+        )
 
-    assert (
-        row.input_per_million_usd,
-        row.cached_input_per_million_usd,
-        row.output_per_million_usd,
-    ) == (rates.input, rates.cache_read, rates.output)
-    assert row.price_scope == f"api-equivalent-{rates.period.replace('_', '-')}"
-    assert row.pricing_source == rates.source
+        estimate = cost_at("gpt-5.5", long_request, AFTER_SOL_CUT)
 
+        assert estimate is not None
+        assert estimate.long_context_pricing is True
+        assert estimate.amount_usd == 2.145
 
-def test_legacy_calculated_cost_records_still_load() -> None:
-    legacy = {
-        "amount_usd": 0.1,
-        "currency": "USD",
-        "model": "deepseek-flash",
-        "priced_as": "deepseek-flash",
-        "pricing_version": "deepseek-official-2026-09-10-peak",
-        "pricing_source": "https://api-docs.deepseek.com/quick_start/pricing/",
-        "long_context_pricing": False,
-        "pricing_retrieved_at": 1789000000.0,
-        "pricing_basis": "peak",
-    }
+    def test_repeated_short_requests_do_not_trigger_long_context_tier(self) -> None:
+        request = TokenUsage(
+            input_tokens=150_000, cached_input_tokens=100_000, output_tokens=1_000
+        )
+        aggregate = TokenUsage(
+            input_tokens=300_000, cached_input_tokens=200_000, output_tokens=2_000
+        )
 
-    loaded = CalculatedCost.from_dict(legacy)
+        estimate = cost_at(
+            "gpt-5.5",
+            aggregate,
+            AFTER_SOL_CUT,
+            requests=[(request, None), (request, None)],
+        )
 
-    assert loaded is not None
-    assert loaded.to_dict() == {
-        **legacy,
-        "pricing_period": None,
-        "removed_suffix": None,
-    }
+        assert estimate is not None
+        assert estimate.long_context_pricing is False
+        assert estimate.amount_usd == 0.66
 
+    def test_mixed_context_tiers_are_priced_per_request(self) -> None:
+        requests = [
+            (
+                TokenUsage(
+                    input_tokens=100_000, cached_input_tokens=20_000, output_tokens=1_000
+                ),
+                None,
+            ),
+            (
+                TokenUsage(
+                    input_tokens=300_000, cached_input_tokens=100_000, output_tokens=1_000
+                ),
+                None,
+            ),
+        ]
+        aggregate = TokenUsage(
+            input_tokens=400_000, cached_input_tokens=120_000, output_tokens=2_000
+        )
 
-@pytest.mark.real_price_refresh
-def test_failed_price_refresh_keeps_local_data_and_reports_once(monkeypatch):
-    import warnings
+        estimate = cost_at("gpt-5.5", aggregate, AFTER_SOL_CUT, requests=requests)
 
-    from agent_orchestration_process import pricing
+        assert estimate is not None
+        assert estimate.long_context_pricing is True
+        assert estimate.amount_usd == 2.585
 
-    monkeypatch.setattr(model_prices, "SNAPSHOT_URL", "http://127.0.0.1:9/")
-    monkeypatch.setattr(pricing, "PRICE_DATA_STALE_AFTER", timedelta(days=100_000))
+    def test_request_usage_must_match_aggregate_usage(self) -> None:
+        with raises(ValueError, match="request usage does not match"):
+            cost_at(
+                "gpt-5.5",
+                TokenUsage(input_tokens=10),
+                AFTER_SOL_CUT,
+                requests=[(TokenUsage(input_tokens=9), None)],
+            )
 
-    with warnings.catch_warnings(record=True) as raised:
-        warnings.simplefilter("always")
-        found = pricing.refresh_prices(force=True)
+    def test_zero_measured_requests_still_require_a_known_model(self) -> None:
+        estimate = cost_at("gpt-5.5", TokenUsage(), AFTER_SOL_CUT, requests=[])
 
-    assert raised == []
-    assert len(found) == 1
-    assert found[0].startswith("could not fetch price data from http://127.0.0.1:9/")
-    assert model_prices.pricing_basis().startswith("model-prices-")
+        assert estimate is not None
+        assert estimate.amount_usd == 0
+        assert cost_at("future-model", TokenUsage(), AFTER_SOL_CUT, requests=[]) is None
 
+    def test_unknown_or_implicit_model_has_no_cost_estimate(self) -> None:
+        usage = TokenUsage(input_tokens=100, output_tokens=10)
 
-@pytest.mark.real_price_refresh
-def test_price_data_older_than_the_limit_warns(monkeypatch):
-    from agent_orchestration_process import pricing
+        assert cost_at(None, usage, AFTER_SOL_CUT) is None
+        assert cost_at("future-model", usage, AFTER_SOL_CUT) is None
 
-    monkeypatch.setattr(pricing, "PRICE_DATA_MAX_AGE", None)
-    monkeypatch.setattr(pricing, "PRICE_DATA_STALE_AFTER", timedelta(0))
+    def test_listing_shows_current_rates_and_time_of_day_period(self) -> None:
+        from agent_orchestration_process import model_listing
+        from agent_orchestration_process.model_catalog import ModelCatalog
 
-    found = pricing.refresh_prices()
+        row = model_listing._record(
+            "dsh",
+            "deepseek-flash",
+            "Flash",
+            "installed-default",
+            "api-equivalent",
+            ModelCatalog({}, 0, "", ""),
+            "deepseek",
+            "deepseek-flash",
+        )
+        rates = model_prices.rates("deepseek-flash", provider="deepseek")
 
-    assert len(found) == 1
-    assert "price data was last confirmed current" in found[0]
-    assert model_prices.pricing_basis() in found[0]
+        assert (
+            row.input_per_million_usd,
+            row.cached_input_per_million_usd,
+            row.output_per_million_usd,
+        ) == (rates.input, rates.cache_read, rates.output)
+        assert row.price_scope == f"api-equivalent-{rates.period.replace('_', '-')}"
+        assert row.pricing_source == rates.source
+
+    def test_legacy_calculated_cost_records_still_load(self) -> None:
+        legacy = {
+            "amount_usd": 0.1,
+            "currency": "USD",
+            "model": "deepseek-flash",
+            "priced_as": "deepseek-flash",
+            "pricing_version": "deepseek-official-2026-09-10-peak",
+            "pricing_source": "https://api-docs.deepseek.com/quick_start/pricing/",
+            "long_context_pricing": False,
+            "pricing_retrieved_at": 1789000000.0,
+            "pricing_basis": "peak",
+        }
+
+        loaded = CalculatedCost.from_dict(legacy)
+
+        assert loaded is not None
+        assert loaded.to_dict() == {
+            **legacy,
+            "pricing_period": None,
+            "removed_suffix": None,
+        }
+
+    @mark("real_price_refresh")
+    def test_failed_price_refresh_keeps_local_data_and_reports_once(self, monkeypatch):
+        import warnings
+
+        from agent_orchestration_process import pricing
+
+        monkeypatch.setattr(model_prices, "SNAPSHOT_URL", "http://127.0.0.1:9/")
+        monkeypatch.setattr(pricing, "PRICE_DATA_STALE_AFTER", timedelta(days=100_000))
+
+        with warnings.catch_warnings(record=True) as raised:
+            warnings.simplefilter("always")
+            found = pricing.refresh_prices(force=True)
+
+        assert raised == []
+        assert len(found) == 1
+        assert found[0].startswith("could not fetch price data from http://127.0.0.1:9/")
+        assert model_prices.pricing_basis().startswith("model-prices-")
+
+    @mark("real_price_refresh")
+    def test_price_data_older_than_the_limit_warns(self, monkeypatch):
+        from agent_orchestration_process import pricing
+
+        monkeypatch.setattr(pricing, "PRICE_DATA_MAX_AGE", None)
+        monkeypatch.setattr(pricing, "PRICE_DATA_STALE_AFTER", timedelta(0))
+
+        found = pricing.refresh_prices()
+
+        assert len(found) == 1
+        assert "price data was last confirmed current" in found[0]
+        assert model_prices.pricing_basis() in found[0]

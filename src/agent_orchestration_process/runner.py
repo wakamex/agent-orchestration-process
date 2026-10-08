@@ -879,6 +879,9 @@ class CodexAdapter:
                         self._stop_process(process)
             stdout_reader.join(timeout=self._SHUTDOWN_GRACE_SECONDS)
             stderr_reader.join(timeout=self._SHUTDOWN_GRACE_SECONDS)
+            _close_finished_streams(
+                (stdout_reader, process.stdout), (stderr_reader, process.stderr)
+            )
 
         stdout = "".join(stdout_parts)
         stderr = "".join(stderr_parts)
@@ -1143,6 +1146,9 @@ def _capture_process(
     finally:
         stdout_reader.join(timeout=5)
         stderr_reader.join(timeout=5)
+        _close_finished_streams(
+            (stdout_reader, process.stdout), (stderr_reader, process.stderr)
+        )
     return _ProcessCapture(
         stdout="".join(stdout_parts),
         stderr="".join(stderr_parts),
@@ -1152,6 +1158,17 @@ def _capture_process(
         first_event_seconds=_rounded(first_event_seconds),
         first_response_seconds=_rounded(first_response_seconds),
     )
+
+
+def _close_finished_streams(*pairs: tuple[threading.Thread, Any]) -> None:
+    """Close each pipe whose reader thread finished.
+
+    A reader still blocked on a pipe that an orphaned child holds open keeps
+    the stream locked, so closing it then could hang.
+    """
+    for reader, stream in pairs:
+        if stream is not None and not reader.is_alive():
+            stream.close()
 
 
 def _launch_environment(
@@ -4143,7 +4160,8 @@ def _prompt_runtime_command(
     if executable is None:
         return command
     resolved = Path(executable).resolve()
-    header = resolved.open("rb").readline(4096).decode(errors="replace").strip()
+    with resolved.open("rb") as handle:
+        header = handle.readline(4096).decode(errors="replace").strip()
     if request.provider == "hermes" and request.profile == "host":
         runtime = _hermes_wrapper_runtime(resolved, command[1:])
         if runtime is not None:
@@ -4253,7 +4271,8 @@ def _provider_runtime(
             if sibling.exists():
                 mounts.append((os.fspath(sibling), os.fspath(guest / name)))
     try:
-        first_line = resolved.open("rb").readline(4096).decode(errors="ignore").strip()
+        with resolved.open("rb") as handle:
+            first_line = handle.readline(4096).decode(errors="ignore").strip()
     except OSError:
         first_line = ""
     if first_line.startswith("#!"):

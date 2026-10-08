@@ -267,40 +267,42 @@ def _codex_config_read(
         )
     except OSError as error:
         raise AOPError(f"could not start Codex config discovery: {error}") from error
-    assert process.stdin is not None
-    try:
-        _write_line(
-            process.stdin,
-            {
-                "method": "initialize",
-                "id": 1,
-                "params": {
-                    "clientInfo": {
-                        "name": "aop",
-                        "title": "AOP",
-                        "version": "0.1.0",
-                    }
-                },
-            },
-        )
-        _read_response(process, 1)
-        _write_line(process.stdin, {"method": "initialized", "params": {}})
-        _write_line(
-            process.stdin,
-            {
-                "method": "config/read",
-                "id": 2,
-                "params": {"cwd": os.fspath(cwd), "includeLayers": True},
-            },
-        )
-        return _read_response(process, 2)
-    finally:
-        process.terminate()
+    # Leaving the block closes the pipes after the process is stopped.
+    with process:
+        assert process.stdin is not None
         try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+            _write_line(
+                process.stdin,
+                {
+                    "method": "initialize",
+                    "id": 1,
+                    "params": {
+                        "clientInfo": {
+                            "name": "aop",
+                            "title": "AOP",
+                            "version": "0.1.0",
+                        }
+                    },
+                },
+            )
+            _read_response(process, 1)
+            _write_line(process.stdin, {"method": "initialized", "params": {}})
+            _write_line(
+                process.stdin,
+                {
+                    "method": "config/read",
+                    "id": 2,
+                    "params": {"cwd": os.fspath(cwd), "includeLayers": True},
+                },
+            )
+            return _read_response(process, 2)
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 def _write_line(stream: Any, value: object) -> None:

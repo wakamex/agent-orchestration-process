@@ -92,13 +92,9 @@ aop profile explain sealed --agent codex --json
 aop run study-arm --profile sealed --prompt "Answer using only declared inputs" --dry-run
 ```
 
-All profiles currently retain native network connectivity because the supported provider CLIs need
-it. See [Execution profiles](docs/profiles.md) for the exact filesystem, instruction, environment,
-credential, input, and output boundaries.
+Profiles retain native network connectivity because the supported provider CLIs need it, except under `--no-web`. See [Execution profiles](docs/profiles.md) for the exact filesystem, instruction, environment, credential, input, and output boundaries.
 
-Use `--no-web` to deny model-controlled external retrieval while retaining the harness's inference
-connection. AOP records the effective tool policy and rejects harnesses that cannot enforce the
-boundary. See [CLI guide](docs/cli.md#disable-model-controlled-web-access) for current support.
+Use `--no-web` to deny model-controlled external retrieval while retaining the harness's inference connection. AOP restricts the harness's own web tools and, in sandboxed profiles, gives the run a network namespace whose only way out is a proxy allowing the harness's inference and login endpoints. AOP records the effective policy and every connection attempt, and rejects harnesses that cannot enforce the boundary. See [CLI guide](docs/cli.md#disable-model-controlled-web-access) for current support.
 
 Codex `--no-web` uses the canonical top-level `web_search = "disabled"` mode introduced in Codex 0.82.0. AOP's current Codex app-server integration targets Codex 0.150.1 or newer.
 
@@ -110,6 +106,8 @@ timing, token usage, cost evidence, logs, and declared artifacts. See
 and cost calculation rules.
 
 Results distinguish complete accounting from partial or unavailable deadline accounting. Codex deadlines use native app-server interruption to retain per-turn usage and an API-equivalent cost when available. If any harness terminates before reporting usage, `usage` and cost fields remain null instead of being reported as measured zero.
+
+AOP reads only current run records. After upgrading from a version that wrote older records, run `aop migrate-results` once; it converts them in place and keeps each original beside it. See [Token usage and pricing](docs/token-usage.md#migrating-older-run-records).
 
 ## Development
 

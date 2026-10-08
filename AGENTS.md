@@ -28,3 +28,11 @@
   migration command that is documented in `docs/`, preserves each original file beside the
   rewritten one, records the conversion it applied in the rewritten record, and is idempotent. After
   a migration, readers accept only the current format instead of converting old formats in memory.
+
+## Release policy exceptions
+
+- Validation uses this repository's `.github/workflows/validation.yml` instead of the shared
+  `python-validation.yml`. AOP's tests run harnesses inside bubblewrap, so the job installs
+  bubblewrap and allows unprivileged user namespaces before running the same
+  `python -m unittest discover -s tests` command, and it also runs `ruff check`. Publishing and
+  GitHub Releases use the shared actions.

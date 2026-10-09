@@ -5,11 +5,13 @@ import json
 import os
 from pathlib import Path
 
-from support import AOPTestCase, MonkeyPatch, parametrize, raises
+from support import AOPTestCase, Capture, MonkeyPatch, parametrize, raises
 import yaml
 from shared_fixtures import api_cost
 
 from agent_orchestration_process import runner as runner_module
+from agent_orchestration_process.cli import main
+from agent_orchestration_process.models import PromptPart
 from agent_orchestration_process.pricing import TokenUsage
 from agent_orchestration_process.runner import (
     AgyAdapter,
@@ -2578,3 +2580,76 @@ class ProvidersTest(AOPTestCase):
             AgentRunner(
                 WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
             ).run(task="codex", prompt="x", thinking_display="summarized")
+
+    def test_claude_prompt_parts_become_content_blocks_with_one_cache_mark(
+        self,
+        repository: Path,
+        fake_claude: Path,
+        monkeypatch: MonkeyPatch,
+        capsys: Capture,
+    ) -> None:
+        monkeypatch.chdir(repository)
+        monkeypatch.setenv("AOP_CLAUDE_BIN", os.fspath(fake_claude))
+        parts = repository.parent / "parts.json"
+        parts.write_text(
+            json.dumps(
+                [
+                    {"text": "view 1\n", "cache": False},
+                    {"text": "view 2\n", "cache": True},
+                    {"text": "question"},
+                ]
+            )
+        )
+
+        def check(arguments: list[str]) -> str:
+            assert main([*arguments, "--prompt-parts", os.fspath(parts), "--json"]) == 0
+            result = json.loads(capsys.readouterr().out)
+            assert result["succeeded"], result["error"]
+            flag = result["command"].index("--input-format")
+            assert result["command"][flag + 1] == "stream-json"
+            # The fake Claude answers with the stdin it received.
+            sent = json.loads(result["final_message"].removeprefix("answer:"))
+            assert sent["message"]["content"] == [
+                {"type": "text", "text": "view 1\n"},
+                {
+                    "type": "text",
+                    "text": "view 2\n",
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                },
+                {"type": "text", "text": "question"},
+            ]
+            request = json.loads(
+                (repository / ".aop" / "runs" / result["run_id"] / "request.json").read_text()
+            )
+            assert request["prompt"] == "view 1\nview 2\nquestion"
+            assert request["prompt_parts"] == [
+                {"chars": 7, "cache": False},
+                {"chars": 7, "cache": True},
+                {"chars": 8, "cache": False},
+            ]
+            return result["run_id"]
+
+        run_id = check(["run", "--agent", "claude", "parts"])
+        check(["resume", run_id])
+
+    def test_prompt_parts_are_claude_only_with_at_most_one_cache_mark(
+        self,
+        repository: Path, fake_claude: Path, fake_codex: Path
+    ) -> None:
+        claude = AgentRunner(
+            WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+        )
+        with raises(AOPError, match="one cached prompt part"):
+            claude.run(
+                task="marks",
+                prompt="ab",
+                prompt_parts=[PromptPart(1, cache=True), PromptPart(1, cache=True)],
+            )
+        with raises(AOPError, match="do not add up"):
+            claude.run(task="sum", prompt="abc", prompt_parts=[PromptPart(2)])
+        with raises(AOPError, match="none of them empty"):
+            claude.run(task="empty", prompt="a", prompt_parts=[PromptPart(0), PromptPart(1)])
+        with raises(AOPError, match="does not support --prompt-parts"):
+            AgentRunner(
+                WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+            ).run(task="codex", prompt="a", prompt_parts=[PromptPart(1)])

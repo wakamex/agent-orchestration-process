@@ -58,6 +58,15 @@ class InferenceRoute:
 
 
 @dataclass(frozen=True)
+class PromptPart:
+    """One content block of a prompt; `cache` asks Claude to cache the prompt
+    up to and including this block. The text itself stays in RunRequest.prompt."""
+
+    chars: int
+    cache: bool = False
+
+
+@dataclass(frozen=True)
 class RunRequest:
     run_id: str
     provider: str
@@ -90,6 +99,9 @@ class RunRequest:
     allowed_urls: tuple[str, ...] = ()
     # A sealed run's private, initially empty /workspace is writable.
     writable_workspace: bool = False
+    # The prompt split into content blocks, in order; their lengths add up to
+    # len(prompt). None sends the prompt as one block.
+    prompt_parts: tuple[PromptPart, ...] | None = None
     # How `aop migrate-results` converted an older record, if it did.
     migration: dict[str, Any] | None = None
 
@@ -106,6 +118,10 @@ class RunRequest:
         if fields.get("tools") is not None:
             fields["tools"] = tuple(fields["tools"])
         fields["allowed_urls"] = tuple(fields.get("allowed_urls", ()))
+        if fields.get("prompt_parts") is not None:
+            fields["prompt_parts"] = tuple(
+                PromptPart(**part) for part in fields["prompt_parts"]
+            )
         fields["inputs"] = tuple(
             InputSnapshot.from_dict(item) for item in fields["inputs"]
         )

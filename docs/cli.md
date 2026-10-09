@@ -26,7 +26,7 @@ Resume the exact harness session with the AOP run ID:
 aop resume <run-id> --prompt "Address the review findings"
 ```
 
-Use `--prompt-file` for a prompt stored on disk and `--timeout` to set a wall-clock deadline. Model,
+Use `--prompt-file` for a prompt stored on disk, `--prompt-parts` for a Claude prompt split into cacheable blocks, and `--timeout` to set a wall-clock deadline. Model,
 effort, inference-provider, and resume behavior vary by harness. See
 [Harness adapters](harnesses.md).
 

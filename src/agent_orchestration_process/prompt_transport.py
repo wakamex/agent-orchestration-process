@@ -1,10 +1,13 @@
 """Prompt transport independent of the OS argument and environment limits."""
 
+from collections.abc import Sequence
 from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import tempfile
+
+from .models import PromptPart
 
 
 # Native protocols remain in their adapters. Runtime-file is only for CLIs
@@ -45,6 +48,28 @@ def stdin_prompt(provider: str, prompt: str) -> str | None:
             + "\n"
         )
     return None
+
+
+def claude_message(prompt: str, parts: Sequence[PromptPart]) -> str:
+    """A stream-json user message whose content blocks follow `parts`.
+
+    Claude Code marks its own system blocks and the context it appends after
+    the prompt with one-hour cache marks, and a five-minute mark must not
+    precede a one-hour one, so a caller's mark uses one hour too.
+    """
+    content = []
+    start = 0
+    for part in parts:
+        block: dict[str, object] = {
+            "type": "text",
+            "text": prompt[start : start + part.chars],
+        }
+        if part.cache:
+            block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+        content.append(block)
+        start += part.chars
+    message = {"type": "user", "message": {"role": "user", "content": content}}
+    return json.dumps(message) + "\n"
 
 
 @contextmanager

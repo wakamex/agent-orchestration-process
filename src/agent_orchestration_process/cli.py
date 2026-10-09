@@ -22,7 +22,7 @@ from .isolation import PROFILES, explain_profile, resolve_policy
 from .locks import exclusive_lock, task_lock_path
 from .model_catalog import ModelCatalog, ensure_catalog_fresh
 from .model_listing import AGENTS, AvailableModel, list_models
-from .models import RunRequest, RunResult
+from .models import PromptPart, RunRequest, RunResult
 from .runner import AgentRunner, RunStore, adapter_for, provider_runtime_record
 from .migration import migrate_runs, migration_roots, print_counts
 from .worktrees import (
@@ -409,9 +409,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     prefix="aop: ",
                     stream=sys.stderr,
                 )
+            prompt, prompt_parts = _read_prompt(args)
             result = AgentRunner(manager, adapter_for(args.agent)).run(
                 task=task,
-                prompt=_read_prompt(args),
+                prompt=prompt,
+                prompt_parts=prompt_parts,
                 base=args.base,
                 model=args.model,
                 inference_provider=args.inference_provider,
@@ -432,9 +434,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _report_run(result, manager, json_output=args.json)
 
         if args.command == "resume":
+            prompt, prompt_parts = _read_prompt(args)
             result = AgentRunner(manager).resume(
                 run_id=args.run_id,
-                prompt=_read_prompt(args),
+                prompt=prompt,
+                prompt_parts=prompt_parts,
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
                 input_paths=args.input_paths,
@@ -472,6 +476,13 @@ def _add_prompt_arguments(parser: argparse.ArgumentParser) -> None:
     prompts = parser.add_mutually_exclusive_group(required=True)
     prompts.add_argument("--prompt")
     prompts.add_argument("--prompt-file", type=Path)
+    prompts.add_argument(
+        "--prompt-parts",
+        type=Path,
+        metavar="PATH",
+        help='JSON list of prompt blocks, each {"text": ..., "cache": true|false}; '
+        "Claude caches the prompt through the one cached block (claude only)",
+    )
 
 
 def _add_artifact_arguments(parser: argparse.ArgumentParser) -> None:
@@ -520,15 +531,36 @@ def _read_system_prompt(args: argparse.Namespace) -> str | None:
         ) from error
 
 
-def _read_prompt(args: argparse.Namespace) -> str:
+def _read_prompt(args: argparse.Namespace) -> tuple[str, tuple[PromptPart, ...] | None]:
     if args.prompt is not None:
-        return args.prompt
+        return args.prompt, None
+    path = args.prompt_file or args.prompt_parts
     try:
-        return args.prompt_file.read_text()
+        text = path.read_text()
     except OSError as error:
+        raise AOPError(f"could not read prompt file {path}: {error}") from error
+    if args.prompt_file is not None:
+        return text, None
+    try:
+        blocks = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise AOPError(f"prompt parts file {path} is not JSON: {error}") from error
+    if not isinstance(blocks, list) or not all(
+        isinstance(block, dict)
+        and set(block) <= {"text", "cache"}
+        and isinstance(block.get("text"), str)
+        and isinstance(block.get("cache", False), bool)
+        for block in blocks
+    ):
         raise AOPError(
-            f"could not read prompt file {args.prompt_file}: {error}"
-        ) from error
+            f"prompt parts file {path} must be a list of "
+            '{"text": string, "cache": boolean} objects'
+        )
+    parts = tuple(
+        PromptPart(chars=len(block["text"]), cache=block.get("cache", False))
+        for block in blocks
+    )
+    return "".join(block["text"] for block in blocks), parts
 
 
 def _report_policy(

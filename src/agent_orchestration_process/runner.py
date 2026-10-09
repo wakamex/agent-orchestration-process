@@ -39,6 +39,7 @@ from .models import (
     InputFile,
     InputSnapshot,
     InferenceRoute,
+    PromptPart,
     RunArtifact,
     RunRequest,
     RunResult,
@@ -1221,7 +1222,11 @@ class ClaudeAdapter:
             command,
             cwd=worktree.path,
             environment=environment,
-            prompt=prompt_transport.stdin_prompt(self.provider, request.prompt),
+            prompt=(
+                prompt_transport.claude_message(request.prompt, request.prompt_parts)
+                if request.prompt_parts is not None
+                else prompt_transport.stdin_prompt(self.provider, request.prompt)
+            ),
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
         )
@@ -1396,6 +1401,8 @@ class ClaudeAdapter:
             command.extend(["--system-prompt", request.system_prompt])
         if request.thinking_display is not None:
             command.extend(["--thinking-display", request.thinking_display])
+        if request.prompt_parts is not None:
+            command.extend(["--input-format", "stream-json"])
         if request.session_id:
             command.extend(["--resume", request.session_id])
         else:
@@ -5778,8 +5785,10 @@ class AgentRunner:
         allowed_urls: Sequence[str] = (),
         writable_workspace: bool = False,
         thinking_display: str | None = None,
+        prompt_parts: Sequence[PromptPart] | None = None,
     ) -> RunResult:
         self._validate_mode(mode)
+        prompt_parts = self._validated_prompt_parts(prompt, prompt_parts)
         if writable_workspace and profile != "sealed":
             raise AOPError("--writable-workspace applies only to the sealed profile")
         if thinking_display is not None:
@@ -5825,6 +5834,7 @@ class AgentRunner:
             allowed_urls=allowed_urls,
             writable_workspace=writable_workspace,
             thinking_display=thinking_display,
+            prompt_parts=prompt_parts,
         )
         worktree = (
             self._create_sealed_workspace(request.run_id)
@@ -5857,6 +5867,7 @@ class AgentRunner:
         timeout_seconds: float | None = None,
         artifacts: Sequence[str] = (),
         input_paths: Sequence[str | os.PathLike[str]] | None = None,
+        prompt_parts: Sequence[PromptPart] | None = None,
         _task_lock_held: bool = False,
     ) -> RunResult:
         parent_request = self.store.load_request(run_id)
@@ -5868,6 +5879,7 @@ class AgentRunner:
                 )
             self.adapter = adapter_for(parent_request.provider)
         self._validate_mode(parent_request.mode)
+        prompt_parts = self._validated_prompt_parts(prompt, prompt_parts)
         self._validate_no_web(
             parent_request.no_web, parent_request.mode, parent_request.profile
         )
@@ -5955,6 +5967,7 @@ class AgentRunner:
             allowed_urls=parent_request.allowed_urls,
             writable_workspace=parent_request.writable_workspace,
             thinking_display=parent_request.thinking_display,
+            prompt_parts=prompt_parts,
         )
         return self._execute(
             request,
@@ -6311,6 +6324,7 @@ class AgentRunner:
         allowed_urls: tuple[str, ...] = (),
         writable_workspace: bool = False,
         thinking_display: str | None = None,
+        prompt_parts: tuple[PromptPart, ...] | None = None,
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -6338,6 +6352,7 @@ class AgentRunner:
             allowed_urls=allowed_urls,
             writable_workspace=writable_workspace,
             thinking_display=thinking_display,
+            prompt_parts=prompt_parts,
         )
 
     def _validate_provider_base_url(self, url: str | None, profile: str) -> None:
@@ -6358,6 +6373,27 @@ class AgentRunner:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise AOPError(f"--provider-base-url must be an http(s) URL: {url!r}")
+
+    def _validated_prompt_parts(
+        self, prompt: str, parts: Sequence[PromptPart] | None
+    ) -> tuple[PromptPart, ...] | None:
+        if parts is None:
+            return None
+        if self.adapter.provider != "claude":
+            raise AOPError(f"{self.adapter.provider} does not support --prompt-parts")
+        parts = tuple(parts)
+        if not parts or any(part.chars <= 0 for part in parts):
+            raise AOPError("--prompt-parts needs at least one part, none of them empty")
+        if sum(part.chars for part in parts) != len(prompt):
+            raise AOPError("prompt parts do not add up to the prompt")
+        # Anthropic accepts four cache marks per request, and Claude Code
+        # places three: two on its system prompt and one on the context it
+        # appends after the prompt.
+        if sum(part.cache for part in parts) > 1:
+            raise AOPError(
+                "Claude allows one cached prompt part; Claude Code uses the other marks"
+            )
+        return parts
 
     def _validated_framing(
         self, system_prompt: str | None, tools: Sequence[str] | None, no_web: bool

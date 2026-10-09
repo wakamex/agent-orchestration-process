@@ -128,6 +128,8 @@ only. Repository access is constrained by the selected AOP profile.
 aop run --agent claude --profile sealed --system-prompt '' --tools Bash,Read,Write,Edit --prompt-file prompt.txt
 ```
 
+`--prompt-parts PATH` sends the prompt as separate content blocks so that Anthropic's [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) can reuse a long shared prefix across runs. PATH holds a JSON list such as `[{"text": "...", "cache": true}, {"text": "..."}]`; the blocks are sent in order, and marking one with `"cache": true` places a cache mark on it, so a later request that starts with the same blocks reads them from cache. Anthropic allows four marks per request and Claude Code already places three (two on its system prompt and one on the context it appends after the prompt), so a prompt can mark one block. The mark uses Claude Code's one-hour cache lifetime, because the API rejects a five-minute mark placed before a one-hour one. A request finds a cached prefix only at a mark or up to 20 blocks before it, so a caller that grows a long shared prefix splits it into small blocks and marks the last block that later prompts will repeat. In two sealed Haiku runs whose shared prefix grew by 10 blocks between calls, the second read 92% of its input from cache. `request.json` keeps the joined text as `prompt` and the block lengths and marks as `prompt_parts`. `aop resume` accepts `--prompt-parts` for its new prompt; other harnesses reject the option.
+
 ### Cursor Agent
 
 For `edit` and `review`, AOP seeds CLI configuration, skills, plugins, policies, and authentication

@@ -4212,7 +4212,7 @@ def _isolated_root_command(bwrap: str) -> list[str]:
         "--tmpfs",
         "/tmp",
     ]
-    for path in ("/usr", "/bin", "/lib", "/lib64"):
+    for path in ("/usr", "/bin", "/sbin", "/lib", "/lib64"):
         source = Path(path)
         if source.exists():
             command.extend(["--ro-bind", path, path])

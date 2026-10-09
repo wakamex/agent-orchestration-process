@@ -157,7 +157,7 @@ def resolve_policy(
         host={
             "access": selected.host_access,
             "runtime_paths": (
-                ["/usr", "/bin", "/lib", "/lib64", "/etc runtime files"]
+                ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc runtime files"]
                 if selected.host_access == "runtime-only"
                 else ["/"]
             ),

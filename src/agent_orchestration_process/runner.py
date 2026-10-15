@@ -1251,7 +1251,17 @@ class ClaudeAdapter:
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
-        parsed = self._parse(capture.stdout)
+        previous_total_cost_usd = (
+            self._reported_total_cost_usd(
+                run_dir.parent / request.parent_run_id / "events.jsonl"
+            )
+            if request.session_id and request.parent_run_id
+            else None
+        )
+        parsed = self._parse(
+            capture.stdout,
+            previous_total_cost_usd=previous_total_cost_usd,
+        )
         final_message = parsed["final_message"]
         if final_message is not None:
             _atomic_write(run_dir / "last-message.txt", final_message)
@@ -1287,24 +1297,35 @@ class ClaudeAdapter:
             error = "Claude did not emit a terminal result event"
         else:
             error = None
+        effective_model = parsed["model"] or request.model
+        finished_at = _now()
+        calculated_cost = parsed["cost"]
+        if calculated_cost is None and parsed["usage_observed"]:
+            calculated_cost = estimate_api_cost(
+                effective_model,
+                parsed["usage"],
+                provider="anthropic",
+                started_at=started_at,
+                finished_at=finished_at,
+            )
         billing = self._billing_provenance(worktree.path, environment)
         accounting = _finalize_accounting(
             timed_out=capture.timed_out,
             usage=parsed["usage"],
             usage_observed=parsed["usage_observed"],
-            calculated_cost=parsed["cost"],
+            calculated_cost=calculated_cost,
         )
         return RunResult(
             run_id=request.run_id,
             provider=self.provider,
             mode=request.mode,
             task=request.task,
-            model=parsed["model"] or request.model,
+            model=effective_model,
             effort=request.effort,
             session_id=session_id,
             command=_recorded_command(command),
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             duration_seconds=capture.duration_seconds,
             time_to_first_event_seconds=capture.first_event_seconds,
             time_to_first_response_seconds=capture.first_response_seconds,
@@ -1446,13 +1467,65 @@ class ClaudeAdapter:
         )
 
     @staticmethod
-    def _parse(output: str) -> dict[str, object]:
+    def _reported_total_cost_usd(events_path: Path) -> float | None:
+        try:
+            lines = events_path.read_text().splitlines()
+        except OSError:
+            return None
+        amount = None
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("type") != "result":
+                continue
+            raw_amount = event.get("total_cost_usd")
+            if isinstance(raw_amount, (int, float)) and not isinstance(
+                raw_amount, bool
+            ):
+                amount = float(raw_amount)
+        return amount
+
+    @staticmethod
+    def _is_cumulative_model_usage(
+        model_usage: object,
+        model: str | None,
+        *,
+        uncached: int,
+        cached: int,
+        created: int,
+        output: int,
+    ) -> bool:
+        if not isinstance(model_usage, dict):
+            return False
+        entry = model_usage.get(model) if isinstance(model, str) else None
+        if not isinstance(entry, dict) and len(model_usage) == 1:
+            only = next(iter(model_usage.values()))
+            if isinstance(only, dict):
+                entry = only
+        if not isinstance(entry, dict):
+            return False
+        return (
+            _token_count(entry.get("inputTokens")) > uncached
+            or _token_count(entry.get("cacheReadInputTokens")) > cached
+            or _token_count(entry.get("cacheCreationInputTokens")) > created
+            or _token_count(entry.get("outputTokens")) > output
+        )
+
+    @staticmethod
+    def _parse(
+        output: str,
+        *,
+        previous_total_cost_usd: float | None = None,
+    ) -> dict[str, object]:
         session_id = None
         model = None
         final_message = None
         error = None
         usage = TokenUsage()
         cost = None
+        cost_is_cumulative = False
         has_result = False
         usage_observed = False
         for line in output.splitlines():
@@ -1476,26 +1549,54 @@ class ClaudeAdapter:
             raw_usage = event.get("usage")
             usage_observed = isinstance(raw_usage, dict)
             raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
-            uncached = int(raw_usage.get("input_tokens", 0) or 0)
-            cached = int(raw_usage.get("cache_read_input_tokens", 0) or 0)
-            created = int(raw_usage.get("cache_creation_input_tokens", 0) or 0)
+            uncached = _token_count(raw_usage.get("input_tokens"))
+            cached = _token_count(raw_usage.get("cache_read_input_tokens"))
+            created = _token_count(raw_usage.get("cache_creation_input_tokens"))
+            cache_creation = raw_usage.get("cache_creation")
+            created_1h = min(
+                _token_count(cache_creation.get("ephemeral_1h_input_tokens"))
+                if isinstance(cache_creation, dict)
+                else 0,
+                created,
+            )
+            output_tokens = _token_count(raw_usage.get("output_tokens"))
             usage = TokenUsage(
                 input_tokens=uncached + cached + created,
                 cached_input_tokens=cached,
-                output_tokens=int(raw_usage.get("output_tokens", 0) or 0),
+                output_tokens=output_tokens,
+                cache_write_input_tokens=created,
+                cache_write_1h_input_tokens=created_1h,
+            )
+            cost_is_cumulative = ClaudeAdapter._is_cumulative_model_usage(
+                event.get("modelUsage"),
+                model,
+                uncached=uncached,
+                cached=cached,
+                created=created,
+                output=output_tokens,
             )
             amount = event.get("total_cost_usd")
             if isinstance(amount, (int, float)) and not isinstance(amount, bool):
-                priced_as = model or "claude"
-                cost = CalculatedCost(
-                    amount_usd=round(float(amount), 8),
-                    currency="USD",
-                    model=priced_as,
-                    priced_as=priced_as,
-                    pricing_version="claude-cli-reported",
-                    pricing_source="Claude Code result event",
-                    long_context_pricing=False,
-                )
+                turn_amount: float | None = float(amount)
+                if cost_is_cumulative:
+                    turn_amount = (
+                        max(turn_amount - previous_total_cost_usd, 0.0)
+                        if previous_total_cost_usd is not None
+                        else None
+                    )
+                if turn_amount is not None:
+                    priced_as = model or "claude"
+                    cost = CalculatedCost(
+                        amount_usd=round(turn_amount, 8),
+                        currency="USD",
+                        model=priced_as,
+                        priced_as=priced_as,
+                        pricing_version="claude-cli-reported",
+                        pricing_source="Claude Code result event",
+                        long_context_pricing=False,
+                    )
+                else:
+                    cost = None
         return {
             "session_id": session_id,
             "model": model,
@@ -1503,6 +1604,7 @@ class ClaudeAdapter:
             "error": error,
             "usage": usage,
             "cost": cost,
+            "cost_is_cumulative": cost_is_cumulative,
             "has_result": has_result,
             "usage_observed": usage_observed,
         }
@@ -2078,6 +2180,15 @@ class GrokAdapter:
                 created = GrokAdapter._integer(
                     raw_usage.get("cache_creation_input_tokens")
                 )
+                cache_creation = raw_usage.get("cache_creation")
+                created_1h = min(
+                    GrokAdapter._integer(
+                        cache_creation.get("ephemeral_1h_input_tokens")
+                    )
+                    if isinstance(cache_creation, dict)
+                    else 0,
+                    created,
+                )
                 total_output = GrokAdapter._integer(raw_usage.get("output_tokens"))
                 reasoning = GrokAdapter._integer(raw_usage.get("reasoning_tokens"))
                 usage = TokenUsage(
@@ -2085,6 +2196,8 @@ class GrokAdapter:
                     cached_input_tokens=cached,
                     output_tokens=total_output,
                     reasoning_output_tokens=reasoning,
+                    cache_write_input_tokens=created,
+                    cache_write_1h_input_tokens=created_1h,
                 )
             event_session_id = event.get("sessionId")
             if isinstance(event_session_id, str) and event_session_id:
@@ -2380,6 +2493,7 @@ class CursorAdapter:
                     ),
                     "cached_input_tokens": raw_usage.get("cacheReadTokens"),
                     "output_tokens": raw_usage.get("outputTokens"),
+                    "cache_write_input_tokens": raw_usage.get("cacheWriteTokens"),
                 }
             )
             duration_ms = event.get("duration_api_ms")
@@ -2895,6 +3009,7 @@ class OpenCodeAdapter:
         usage_observed = False
         input_tokens = 0
         cached_input_tokens = 0
+        cache_write_input_tokens = 0
         output_tokens = 0
         reasoning_output_tokens = 0
         requests = []
@@ -2952,12 +3067,14 @@ class OpenCodeAdapter:
                         + cache_read
                         + cache_write,
                         cached_input_tokens=cache_read,
+                        cache_write_input_tokens=cache_write,
                         output_tokens=OpenCodeAdapter._integer(tokens.get("output"))
                         + reasoning_output,
                         reasoning_output_tokens=reasoning_output,
                     )
                     input_tokens += step_usage.input_tokens
                     cached_input_tokens += step_usage.cached_input_tokens
+                    cache_write_input_tokens += step_usage.cache_write_input_tokens
                     output_tokens += step_usage.output_tokens
                     reasoning_output_tokens += step_usage.reasoning_output_tokens
                     finished = (
@@ -2975,6 +3092,7 @@ class OpenCodeAdapter:
         usage = TokenUsage(
             input_tokens=input_tokens,
             cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
             output_tokens=output_tokens,
             reasoning_output_tokens=reasoning_output_tokens,
         )
@@ -3550,6 +3668,7 @@ class HermesAdapter:
             usage=TokenUsage(
                 input_tokens=uncached_input + cached_input + cache_write,
                 cached_input_tokens=cached_input,
+                cache_write_input_tokens=cache_write,
                 output_tokens=visible_output + reasoning_output,
                 reasoning_output_tokens=reasoning_output,
             ),
@@ -3616,6 +3735,11 @@ class HermesAdapter:
             input_tokens=max(after.usage.input_tokens - previous.input_tokens, 0),
             cached_input_tokens=max(
                 after.usage.cached_input_tokens - previous.cached_input_tokens, 0
+            ),
+            cache_write_input_tokens=max(
+                after.usage.cache_write_input_tokens
+                - previous.cache_write_input_tokens,
+                0,
             ),
             output_tokens=max(after.usage.output_tokens - previous.output_tokens, 0),
             reasoning_output_tokens=max(
@@ -3960,6 +4084,7 @@ class DeepSeekHarnessAdapter:
         usage = TokenUsage(
             input_tokens=uncached_input + cached_input + cache_write,
             cached_input_tokens=cached_input,
+            cache_write_input_tokens=cache_write,
             output_tokens=_token_count(raw_usage.get("output_tokens")),
             reasoning_output_tokens=_token_count(
                 raw_usage.get("reasoning_output_tokens")

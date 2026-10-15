@@ -7,19 +7,22 @@ The invariant is:
 - `input_tokens` is all processed input, including cached input and cache creation or writes when
   the provider reports them.
 - `cached_input_tokens` is the cache-read subset of `input_tokens`.
+- `cache_write_input_tokens` is the cache-creation or cache-write subset of `input_tokens`.
+- `cache_write_1h_input_tokens` is the 1-hour TTL subset of `cache_write_input_tokens`.
 - `output_tokens` is all processed output, including reasoning output.
 - `reasoning_output_tokens` is the reasoning subset of `output_tokens`.
-- `cached_input_tokens <= input_tokens`.
+- `cached_input_tokens + cache_write_input_tokens <= input_tokens`.
+- `cache_write_1h_input_tokens <= cache_write_input_tokens`.
 - `reasoning_output_tokens <= output_tokens`.
 - `total_tokens = input_tokens + output_tokens`.
-- Consumers never add either subset to `input_tokens`, `output_tokens`, or `total_tokens`.
+- Consumers never add any subset to `input_tokens`, `output_tokens`, or `total_tokens`.
 
-The four persisted counters are non-negative. AOP rejects a newly constructed normalized value when
+The six persisted counters are non-negative. AOP rejects a newly constructed normalized value when
 a subset exceeds its total.
 
 ## Deadline accounting
 
-Every result records an `accounting_status` of `complete`, `partial`, or `unavailable`. A normally terminated invocation is `complete`, and its `usage` object may legitimately contain four measured zero counters. A timed-out invocation is `partial` when AOP captured provider usage or monetary evidence before terminating it. A timed-out invocation is `unavailable` when the provider emitted no accounting evidence, in which case `usage`, `calculated_cost`, and `provider_reported_cost` are null rather than measured zero.
+Every result records an `accounting_status` of `complete`, `partial`, or `unavailable`. A normally terminated invocation is `complete`, and its `usage` object may legitimately contain six measured zero counters. A timed-out invocation is `partial` when AOP captured provider usage or monetary evidence before terminating it. A timed-out invocation is `unavailable` when the provider emitted no accounting evidence, in which case `usage`, `calculated_cost`, and `provider_reported_cost` are null rather than measured zero.
 
 Calculated cost is retained for a partial result only when token usage was observed. Provider-reported cost can be retained independently because it is direct monetary evidence. These rules are adapter-neutral; each adapter only identifies whether its native event or session export contained usage evidence.
 
@@ -37,15 +40,15 @@ sign means the provider reports disjoint buckets that AOP combines into a normal
 | Adapter | Provider input shape | Normalized input | Provider output shape | Normalized output |
 | --- | --- | --- | --- | --- |
 | Agy | each `step_update` carries usage where `input_tokens` is uncached and `cache_read_tokens` is disjoint | sum over this invocation's steps of input + cache read | `output_tokens` includes `thinking_tokens` | sum of output, with thinking as subset |
-| Claude | input, cache read, and cache creation are disjoint | input + cache read + cache creation | output is total | output |
+| Claude | input, cache read, and cache creation are disjoint | input + cache read + cache creation, with cache read and cache creation (including 1h TTL) as subsets | output is total | output |
 | Codex | input already includes `cached_input_tokens` | input | output already includes reasoning | output |
-| Cursor | input, cache read, and cache write are disjoint | input + cache read + cache write | output is total | output |
+| Cursor | input, cache read, and cache write are disjoint | input + cache read + cache write, with cache read and cache write as subsets | output is total | output |
 | Devin | ATIF `prompt_tokens` is total and `cached_tokens` is its subset | prompt | ATIF completion is total | completion |
-| DeepSeek Harness | Harness input, cache read, and cache write are disjoint for every inference provider | input + cache read + cache write | Harness output includes reasoning | output, with reasoning as subset |
-| Grok | input, cache read, and cache creation are disjoint | input + cache read + cache creation | output includes reasoning | output, with reasoning as subset |
-| Hermes | session input, cache read, and cache write are disjoint cumulative counters | invocation delta of their sum | session visible output and reasoning are disjoint cumulative counters | invocation delta of visible output + reasoning |
-| OpenCode | input, cache read, and cache write are disjoint | input + cache read + cache write | output and reasoning are disjoint | output + reasoning, with reasoning as subset |
-| Zcode | Native `inputTokens` includes `cacheReadTokens` | input, with cache read as subset | Native `outputTokens` includes `reasoningTokens` | output, with reasoning as subset |
+| DeepSeek Harness | Harness input, cache read, and cache write are disjoint for every inference provider | input + cache read + cache write, with cache read and cache write as subsets | Harness output includes reasoning | output, with reasoning as subset |
+| Grok | input, cache read, and cache creation are disjoint | input + cache read + cache creation, with cache read and cache creation (including 1h TTL) as subsets | output includes reasoning | output, with reasoning as subset |
+| Hermes | session input, cache read, and cache write are disjoint cumulative counters | invocation delta of their sum, with cache read and cache write deltas as subsets | session visible output and reasoning are disjoint cumulative counters | invocation delta of visible output + reasoning |
+| OpenCode | input, cache read, and cache write are disjoint | input + cache read + cache write, with cache read and cache write as subsets | output and reasoning are disjoint | output + reasoning, with reasoning as subset |
+| Zcode | Native `inputTokens` includes `cacheReadTokens` and `cacheWriteTokens` | input, with cache read and cache write as subsets | Native `outputTokens` includes `reasoningTokens` | output, with reasoning as subset |
 
 Hermes exports cumulative session counters. AOP snapshots the session before and after an invocation
 and persists only the component-wise invocation delta. For a Devin resume, AOP selects only agent
@@ -56,17 +59,15 @@ session total.
 
 ## Pricing
 
-Pricing receives normalized usage only. It prices `input_tokens - cached_input_tokens` at the normal
-input rate, `cached_input_tokens` at the cache rate, and `output_tokens` at the output rate. It never
+Pricing receives normalized usage only. It prices `input_tokens - cached_input_tokens - cache_write_input_tokens` at the normal
+input rate, `cached_input_tokens` at the cache-read rate, `cache_write_input_tokens - cache_write_1h_input_tokens` at the 5-minute cache-write rate, `cache_write_1h_input_tokens` at the 1-hour cache-write rate, and `output_tokens` at the output rate. It never
 adds `reasoning_output_tokens` to output. This is algebraically equivalent to the former additive
 cache calculation for Agy and direct DeepSeek Harness runs, but no provider-specific pricing flag is
 needed.
 
 DeepSeek Harness runs use the same calculation for every inference route.
 
-Cache creation and cache writes count toward total processed input. AOP currently has only a cached
-read subset and no separate persisted cache-write pricing bucket, so calculated cost continues to use
-the normal input rate for those tokens. Provider-reported monetary cost remains separate.
+Cache creation and cache writes count toward total processed input and are priced through `cache_write_input_tokens` and `cache_write_1h_input_tokens`. Provider-reported monetary cost remains separate. On resumed Claude Code runs where the CLI reports cumulative session `modelUsage` and `total_cost_usd`, AOP subtracts the parent run's reported session cost (or falls back to `model-prices` when parent event data is unavailable) so `calculated_cost` reflects only the current turn.
 
 `calculated_cost` is an API-equivalent USD comparison based on normalized tokens and the first-party API rates that the model-prices package records as in effect when each request ran. It does not claim that a subscription account was billed that amount. `provider_reported_cost` remains null unless the harness or provider emits monetary cost evidence for the invocation. The result records billing route evidence separately as `subscription`, `provider-credits`, `metered-api`, `local`, or `unknown` rather than inferring billing from the calculated comparison.
 
@@ -104,14 +105,16 @@ Results convert as follows:
 | Unversioned and `aop-token-usage-v1` results | accounting status derived from the record: a run that did not time out becomes `complete`; a timed-out run becomes `partial` when it has usage or a provider-reported cost, and `unavailable` otherwise |
 | `aop-token-usage-v2` results of providers other than Agy | marker changed to v3; usage unchanged |
 | Every Agy result before v3 | usage recomputed from the `step_update` usage in the run's own `events.jsonl`, because Agy's terminal `result` event reports the conversation's running total across every run that resumed it; without usage events, usage and costs become unavailable |
+| Claude, Cursor, DeepSeek Harness, Grok, and OpenCode results with cache writes in `events.jsonl` | `cache_write_input_tokens` and `cache_write_1h_input_tokens` recovered from `events.jsonl` when `result.json` predates those fields |
+| Resumed Claude results with cumulative `modelUsage` in `events.jsonl` | `calculated_cost` recomputed as the single-turn delta from the parent run's reported session cost (or `model-prices` when parent events are absent) |
 | `api_equivalent_cost`, `billing.actual_cost_known`, `calculated_cost.estimated`, `read_paths` | folded into `calculated_cost` or `provider_reported_cost`, removed, or renamed to `inputs` |
 
-When a conversion changes a result's usage, the migration reprices `calculated_cost` with model-prices at the run's own time and records the price data in `pricing_basis`. A run the model-prices data cannot price for that whole span gets a null cost. Results whose usage is unchanged keep their stored cost. Historical Cursor results did not retain cache-write tokens, and historical DeepSeek Harness results did not retain the optional Harness cache-write bucket, so those writes stay unrecoverable.
+When a conversion changes a result's usage, the migration reprices `calculated_cost` with model-prices at the run's own time and records the price data in `pricing_basis`. A run the model-prices data cannot price for that whole span gets a null cost. Results whose usage is unchanged keep their stored cost.
 
 Requests convert `sandbox` to `profile` and `read_paths` to `inputs`, and fill fields added after they were written with their defaults: `mode: "agent"`, `no_web: false`, an empty `effective_policy`, `artifacts`, and `inputs`, and null inference provider and route. A `sandbox` value is a Codex sandbox mode that no execution profile resolves, so resuming such a run fails while cleanup works.
 
 ## Downstream consumer rule
 
-Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v3"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the four counters as stored and calculate total tokens as `input_tokens + output_tokens`. Never add cached input or reasoning output. Each result records only its own invocation's usage, so results can be summed across runs. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Records with other schema markers should be migrated with `aop migrate-results` rather than converted by the consumer. To find every AOP run directory on a machine, read `$XDG_STATE_HOME/aop/state-roots` and look in each listed directory's `runs`.
+Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v3"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the six counters as stored and calculate uncached input as `input_tokens - cached_input_tokens - cache_write_input_tokens` and total tokens as `input_tokens + output_tokens`. Never add cached input, cache writes, or reasoning output to `input_tokens`, `output_tokens`, or `total_tokens`. Each result records only its own invocation's usage, so results can be summed across runs. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Records with other schema markers should be migrated with `aop migrate-results` rather than converted by the consumer. To find every AOP run directory on a machine, read `$XDG_STATE_HOME/aop/state-roots` and look in each listed directory's `runs`.
 
 Zcode uses the native terminal `usage` summary for the current turn. If the terminal summary is missing, it sums observed `model_request_completed` measurements for that turn, deduplicated by request and attempt, and marks accounting partial. Timeouts retain these measurements. Cumulative session projection totals are never substituted for per-turn usage. For the canonical Z.ai Coding Plan route, AOP calculates API-equivalent cost for each measured model request at its completion time, including compaction and lite-model calls. A cost is available only when all measured models have prices and the measurements reconcile with reported turn usage. Native credential provenance identifies the subscription route separately; provider-reported monetary cost remains unavailable.

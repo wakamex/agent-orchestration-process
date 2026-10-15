@@ -193,8 +193,51 @@ class PricingTest(AOPTestCase):
     def test_token_usage_rejects_overlapping_subsets_larger_than_totals(self) -> None:
         with raises(ValueError, match="cached_input_tokens"):
             TokenUsage(input_tokens=10, cached_input_tokens=11)
+        with raises(ValueError, match="cached_input_tokens and cache_write_input_tokens"):
+            TokenUsage(
+                input_tokens=10,
+                cached_input_tokens=6,
+                cache_write_input_tokens=5,
+            )
+        with raises(ValueError, match="cache_write_1h_input_tokens"):
+            TokenUsage(
+                input_tokens=10,
+                cache_write_input_tokens=4,
+                cache_write_1h_input_tokens=5,
+            )
         with raises(ValueError, match="reasoning_output_tokens"):
             TokenUsage(output_tokens=10, reasoning_output_tokens=11)
+
+    def test_cache_write_and_1h_subsets_are_priced_at_their_rates(self) -> None:
+        usage = TokenUsage(
+            input_tokens=1_000,
+            cached_input_tokens=200,
+            cache_write_input_tokens=500,
+            cache_write_1h_input_tokens=300,
+            output_tokens=100,
+        )
+
+        estimate = cost_at(
+            "claude-sonnet-4-6",
+            usage,
+            AFTER_SOL_CUT,
+            provider="anthropic",
+        )
+
+        assert estimate is not None
+        assert estimate.amount_usd == round(
+            model_prices.cost(
+                "claude-sonnet-4-6",
+                provider="anthropic",
+                input_tokens=300,
+                cache_read_tokens=200,
+                cache_write_tokens=200,
+                cache_write_1h_tokens=300,
+                output_tokens=100,
+                at=AFTER_SOL_CUT,
+            ),
+            8,
+        )
 
     def test_long_context_tier_is_applied_per_request(self) -> None:
         long_request = TokenUsage(

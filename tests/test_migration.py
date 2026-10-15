@@ -70,10 +70,20 @@ def agy_step(input_tokens: int, cache_read: int, output: int, thinking: int) -> 
     }
 
 
-def usage(input_tokens: int, cached: int, output: int, reasoning: int) -> dict:
+def usage(
+    input_tokens: int,
+    cached: int,
+    output: int,
+    reasoning: int,
+    *,
+    cache_write: int = 0,
+    cache_write_1h: int = 0,
+) -> dict:
     return {
         "input_tokens": input_tokens,
         "cached_input_tokens": cached,
+        "cache_write_input_tokens": cache_write,
+        "cache_write_1h_input_tokens": cache_write_1h,
         "output_tokens": output,
         "reasoning_output_tokens": reasoning,
     }
@@ -299,3 +309,124 @@ class MigrationTest(AOPTestCase):
         assert "result.json: v2-schema" in capsys.readouterr().out
         assert (runs.parent).resolve() in registered_state_roots()
         assert RunStore(runs).load_result(RUN_ID).usage_schema == TOKEN_USAGE_SCHEMA
+
+    def test_v3_claude_results_recover_cache_write_and_resumed_turn_cost(
+        self, tmp_path
+    ):
+        runs = tmp_path / "runs"
+        parent_id = "f1e2d3c4-0000-4000-8000-000000000000"
+        parent_dir = runs / parent_id
+        parent_dir.mkdir(parents=True)
+        (parent_dir / "events.jsonl").write_text(
+            json.dumps({"type": "result", "total_cost_usd": 0.30}) + "\n"
+        )
+        v3_result = result(
+            "claude",
+            {
+                "input_tokens": 710,
+                "cached_input_tokens": 500,
+                "output_tokens": 40,
+                "reasoning_output_tokens": 0,
+            },
+            mode="agent",
+            model="claude-haiku-5-5",
+            effort=None,
+            time_to_first_event_seconds=0.1,
+            time_to_first_response_seconds=0.2,
+            provider_duration_seconds=None,
+            provider_status=None,
+            provider_error=None,
+            inference_provider=None,
+            provider_reported_cost=None,
+            accounting_status="complete",
+            usage_schema=TOKEN_USAGE_SCHEMA,
+            billing={
+                "route": "subscription",
+                "credential_source": "claude-oauth",
+                "detected_by": "claude auth status",
+            },
+            inputs=[],
+            artifacts=[],
+            migration=None,
+            calculated_cost={
+                "amount_usd": 0.45,
+                "currency": "USD",
+                "model": "claude-haiku-5-5",
+                "priced_as": "claude-haiku-5-5",
+                "pricing_version": "claude-cli-reported",
+                "pricing_source": "Claude Code result event",
+                "long_context_pricing": False,
+                "pricing_retrieved_at": None,
+                "pricing_basis": None,
+                "pricing_period": None,
+                "removed_suffix": None,
+            },
+        )
+        events = [
+            {"type": "system", "subtype": "init", "model": "claude-haiku-5-5"},
+            {
+                "type": "result",
+                "subtype": "success",
+                "session_id": "session",
+                "result": "answer",
+                "total_cost_usd": 0.45,
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 500,
+                    "output_tokens": 40,
+                    "cache_creation": {
+                        "ephemeral_1h_input_tokens": 200,
+                        "ephemeral_5m_input_tokens": 0,
+                    },
+                },
+                "modelUsage": {
+                    "claude-haiku-5-5": {
+                        "inputTokens": 20,
+                        "cacheCreationInputTokens": 400,
+                        "cacheReadInputTokens": 500,
+                        "outputTokens": 90,
+                        "costUSD": 0.45,
+                    }
+                },
+            },
+        ]
+        request = {
+            "run_id": RUN_ID,
+            "provider": "claude",
+            "mode": "agent",
+            "task": "task",
+            "prompt": "hello",
+            "base": "HEAD",
+            "model": "claude-haiku-5-5",
+            "effort": None,
+            "profile": "workspace-write",
+            "inference_provider": None,
+            "inference_route": None,
+            "no_web": False,
+            "effective_policy": {},
+            "artifacts": [],
+            "inputs": [],
+            "timeout_seconds": None,
+            "session_id": "session",
+            "parent_run_id": parent_id,
+            "created_at": "2026-08-30T07:09:00+00:00",
+        }
+        run_dir = write_run(runs, v3_result, request=request, events=events)
+
+        counts = migrate_runs(runs)
+
+        assert counts == {
+            "request.json: current": 1,
+            "result.json: cache-write-usage+claude-resume-cost (usage changed)": 1,
+        }
+        migrated = json.loads((run_dir / "result.json").read_text())
+        assert migrated["usage"] == usage(
+            710,
+            500,
+            40,
+            0,
+            cache_write=200,
+            cache_write_1h=200,
+        )
+        assert migrated["calculated_cost"]["amount_usd"] == 0.15

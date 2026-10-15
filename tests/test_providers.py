@@ -943,6 +943,7 @@ class ProvidersTest(AOPTestCase):
         assert result.usage == TokenUsage(
             input_tokens=8,
             cached_input_tokens=3,
+            cache_write_input_tokens=4,
             output_tokens=3,
             reasoning_output_tokens=1,
         )

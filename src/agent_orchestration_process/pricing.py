@@ -22,6 +22,8 @@ class TokenUsage:
     cached_input_tokens: int = 0
     output_tokens: int = 0
     reasoning_output_tokens: int = 0
+    cache_write_input_tokens: int = 0
+    cache_write_1h_input_tokens: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -30,12 +32,24 @@ class TokenUsage:
                 self.cached_input_tokens,
                 self.output_tokens,
                 self.reasoning_output_tokens,
+                self.cache_write_input_tokens,
+                self.cache_write_1h_input_tokens,
             )
             < 0
         ):
             raise ValueError("token counts cannot be negative")
         if self.cached_input_tokens > self.input_tokens:
             raise ValueError("cached_input_tokens cannot exceed input_tokens")
+        if self.cache_write_input_tokens > self.input_tokens:
+            raise ValueError("cache_write_input_tokens cannot exceed input_tokens")
+        if self.cached_input_tokens + self.cache_write_input_tokens > self.input_tokens:
+            raise ValueError(
+                "cached_input_tokens and cache_write_input_tokens cannot exceed input_tokens"
+            )
+        if self.cache_write_1h_input_tokens > self.cache_write_input_tokens:
+            raise ValueError(
+                "cache_write_1h_input_tokens cannot exceed cache_write_input_tokens"
+            )
         if self.reasoning_output_tokens > self.output_tokens:
             raise ValueError("reasoning_output_tokens cannot exceed output_tokens")
 
@@ -56,6 +70,12 @@ class TokenUsage:
             output_tokens=_nonnegative_integer(value.get("output_tokens")),
             reasoning_output_tokens=_nonnegative_integer(
                 value.get("reasoning_output_tokens")
+            ),
+            cache_write_input_tokens=_nonnegative_integer(
+                value.get("cache_write_input_tokens")
+            ),
+            cache_write_1h_input_tokens=_nonnegative_integer(
+                value.get("cache_write_1h_input_tokens")
             ),
         )
 
@@ -116,8 +136,17 @@ def estimate_api_cost(
         if rates is None:
             return None
         breakdown = rates.breakdown(
-            input_tokens=request_usage.input_tokens - request_usage.cached_input_tokens,
+            input_tokens=(
+                request_usage.input_tokens
+                - request_usage.cached_input_tokens
+                - request_usage.cache_write_input_tokens
+            ),
             cache_read_tokens=request_usage.cached_input_tokens,
+            cache_write_tokens=(
+                request_usage.cache_write_input_tokens
+                - request_usage.cache_write_1h_input_tokens
+            ),
+            cache_write_1h_tokens=request_usage.cache_write_1h_input_tokens,
             output_tokens=request_usage.output_tokens,
         )
         amount += breakdown.total
@@ -194,6 +223,12 @@ def _sum_usage(usages: Sequence[TokenUsage]) -> TokenUsage:
         cached_input_tokens=sum(usage.cached_input_tokens for usage in usages),
         output_tokens=sum(usage.output_tokens for usage in usages),
         reasoning_output_tokens=sum(usage.reasoning_output_tokens for usage in usages),
+        cache_write_input_tokens=sum(
+            usage.cache_write_input_tokens for usage in usages
+        ),
+        cache_write_1h_input_tokens=sum(
+            usage.cache_write_1h_input_tokens for usage in usages
+        ),
     )
 
 

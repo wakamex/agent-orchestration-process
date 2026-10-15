@@ -158,6 +158,7 @@ def token_usage(raw: Any) -> TokenUsage | None:
             "cacheReadTokens",
             "outputTokens",
             "reasoningTokens",
+            "cacheWriteTokens",
         )
     ]
     if not all(
@@ -180,6 +181,8 @@ def sum_usage(usages: list[TokenUsage]) -> TokenUsage:
                 "cached_input_tokens",
                 "output_tokens",
                 "reasoning_output_tokens",
+                "cache_write_input_tokens",
+                "cache_write_1h_input_tokens",
             )
         )
     )

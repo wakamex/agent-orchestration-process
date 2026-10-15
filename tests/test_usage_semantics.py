@@ -182,6 +182,10 @@ class UsageSemanticsTest(AOPTestCase):
                 "cache_creation_input_tokens": 11_802,
                 "cache_read_input_tokens": 15_190,
                 "output_tokens": 58,
+                "cache_creation": {
+                    "ephemeral_1h_input_tokens": 10_000,
+                    "ephemeral_5m_input_tokens": 1_802,
+                },
             },
         }
 
@@ -189,6 +193,44 @@ class UsageSemanticsTest(AOPTestCase):
 
         assert isinstance(usage, TokenUsage)
         assert _usage_tuple(usage) == (26_994, 15_190, 58, 0)
+        assert usage.cache_write_input_tokens == 11_802
+        assert usage.cache_write_1h_input_tokens == 10_000
+
+    def test_claude_resumed_cumulative_model_usage_subtracts_parent_cost(self) -> None:
+        events = [
+            {"type": "system", "subtype": "init", "model": "claude-haiku-5-5"},
+            {
+                "type": "result",
+                "subtype": "success",
+                "session_id": "session",
+                "result": "answer",
+                "total_cost_usd": 0.45,
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 500,
+                    "output_tokens": 40,
+                },
+                "modelUsage": {
+                    "claude-haiku-5-5": {
+                        "inputTokens": 20,
+                        "cacheCreationInputTokens": 400,
+                        "cacheReadInputTokens": 500,
+                        "outputTokens": 90,
+                        "costUSD": 0.45,
+                    }
+                },
+            },
+        ]
+        raw = "\n".join(map(json.dumps, events))
+
+        with_parent = ClaudeAdapter._parse(raw, previous_total_cost_usd=0.30)
+        without_parent = ClaudeAdapter._parse(raw)
+
+        assert with_parent["cost_is_cumulative"] is True
+        assert with_parent["cost"].amount_usd == 0.15
+        assert without_parent["cost_is_cumulative"] is True
+        assert without_parent["cost"] is None
 
     def test_agy_usage_is_this_invocations_steps_with_disjoint_cache(self) -> None:
         def step(input_tokens: int, cache_read: int, output: int, thinking: int) -> dict:
@@ -247,6 +289,7 @@ class UsageSemanticsTest(AOPTestCase):
 
         assert isinstance(usage, TokenUsage)
         assert _usage_tuple(usage) == (74_665, 66_529, 2_294, 0)
+        assert usage.cache_write_input_tokens == 11
 
     def test_devin_retained_atif_metrics_use_prompt_total_and_cached_subset(
         self,
@@ -344,10 +387,13 @@ class UsageSemanticsTest(AOPTestCase):
         )
 
         assert parsed["requests"] == [
-            (TokenUsage(8, 3, 3, 1), "2026-09-10T00:26:40+00:00"),
+            (
+                TokenUsage(8, 3, 3, 1, cache_write_input_tokens=4),
+                "2026-09-10T00:26:40+00:00",
+            ),
             (TokenUsage(47, 7, 6, 1), "2026-09-10T00:26:40.500000+00:00"),
         ]
-        assert parsed["usage"] == TokenUsage(55, 10, 9, 2)
+        assert parsed["usage"] == TokenUsage(55, 10, 9, 2, cache_write_input_tokens=4)
         assert parsed["duration_seconds"] == 0.5
 
     def test_grok_terminal_usage_has_total_output_and_disjoint_input_cache(self) -> None:
@@ -368,6 +414,7 @@ class UsageSemanticsTest(AOPTestCase):
 
         assert isinstance(usage, TokenUsage)
         assert _usage_tuple(usage) == (55, 10, 20, 7)
+        assert usage.cache_write_input_tokens == 5
 
     def test_dsh_disjoint_harness_usage_is_normalized(self) -> None:
         event = {
@@ -382,14 +429,13 @@ class UsageSemanticsTest(AOPTestCase):
                 "output_tokens": 4,
                 "reasoning_output_tokens": 2,
             },
-            "completed": True,
-            "error": None,
         }
 
         usage = DeepSeekHarnessAdapter._parse(json.dumps(event))["usage"]
 
         assert isinstance(usage, TokenUsage)
         assert _usage_tuple(usage) == (7_491, 7_424, 4, 2)
+        assert usage.cache_write_input_tokens == 3
 
     def test_versioned_result_round_trips_without_renormalization(self) -> None:
         raw = _result_dict(
@@ -397,6 +443,8 @@ class UsageSemanticsTest(AOPTestCase):
             {
                 "input_tokens": 40,
                 "cached_input_tokens": 30,
+                "cache_write_input_tokens": 5,
+                "cache_write_1h_input_tokens": 2,
                 "output_tokens": 20,
                 "reasoning_output_tokens": 7,
             },
@@ -411,6 +459,8 @@ class UsageSemanticsTest(AOPTestCase):
         assert serialized["usage_schema"] == TOKEN_USAGE_SCHEMA
         assert round_tripped == result
         assert _usage_tuple(round_tripped.usage) == (40, 30, 20, 7)
+        assert round_tripped.usage.cache_write_input_tokens == 5
+        assert round_tripped.usage.cache_write_1h_input_tokens == 2
 
     def test_versioned_complete_result_preserves_measured_zero_usage(self) -> None:
         raw = _result_dict("codex", {})
@@ -424,6 +474,8 @@ class UsageSemanticsTest(AOPTestCase):
         assert result.to_dict()["usage"] == {
             "input_tokens": 0,
             "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "cache_write_1h_input_tokens": 0,
             "output_tokens": 0,
             "reasoning_output_tokens": 0,
         }

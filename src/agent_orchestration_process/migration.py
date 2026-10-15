@@ -17,13 +17,24 @@ from typing import Any
 
 from .models import TOKEN_USAGE_SCHEMA, RunRequest, RunResult
 from .pricing import TokenUsage, estimate_api_cost
-from .runner import AgyAdapter, DeepSeekHarnessAdapter, RunStore
+from .runner import (
+    AgyAdapter,
+    ClaudeAdapter,
+    CursorAdapter,
+    DeepSeekHarnessAdapter,
+    GrokAdapter,
+    OpenCodeAdapter,
+    RunStore,
+)
 
 ORIGINAL_SUFFIX = ".pre-v3.json"
 LEGACY_TOKEN_USAGE_SCHEMA = "aop-token-usage-v1"
 # v2 is v3's convention, except that Agy runs recorded Agy's result usage, the
 # conversation's running total across every invocation that resumed it.
 PREVIOUS_TOKEN_USAGE_SCHEMA = "aop-token-usage-v2"
+_CACHE_WRITE_EVENT_PROVIDERS = frozenset(
+    {"claude", "cursor", "dsh", "grok", "opencode"}
+)
 _DERIVED_RESULT_FIELDS = (
     "execution_completed",
     "response_available",
@@ -104,11 +115,12 @@ def _upgraded_result(
     raw: dict[str, Any], run_dir: Path
 ) -> tuple[dict[str, Any], str] | None:
     try:
-        RunResult.from_dict(raw)
-        return None
+        current = RunResult.from_dict(raw)
+        return _upgraded_v3_result(raw, current, run_dir)
     except (TypeError, ValueError, KeyError):
         pass
     schema = raw.get("usage_schema")
+    previous_usage = _raw_usage_counts(raw.get("usage"))
     fields = {
         key: value for key, value in raw.items() if key not in _DERIVED_RESULT_FIELDS
     }
@@ -150,12 +162,136 @@ def _upgraded_result(
     fields["usage_schema"] = TOKEN_USAGE_SCHEMA
     fields["migration"] = _record(schema, conversions, "result.json")
     result = RunResult.from_dict(fields)
+    recovered, event_conversions = _recover_event_accounting(result, run_dir)
+    if event_conversions:
+        conversions.extend(event_conversions)
+        result = replace(
+            recovered,
+            migration=_record(schema, conversions, "result.json"),
+        )
     outcome = "+".join(conversions) or "normalized"
-    usage = None if result.usage is None else result.usage.to_dict()
-    if usage != raw.get("usage"):
-        result = _repriced(result)
+    if result.usage != previous_usage:
+        if "claude-resume-cost" not in event_conversions:
+            result = _repriced(result)
         outcome += " (usage changed)"
     return result.to_dict(), outcome
+
+
+def _upgraded_v3_result(
+    raw: dict[str, Any], current: RunResult, run_dir: Path
+) -> tuple[dict[str, Any], str] | None:
+    raw_usage = raw.get("usage")
+    if (
+        current.usage is None
+        or not isinstance(raw_usage, dict)
+        or "cache_write_input_tokens" in raw_usage
+        or current.provider not in _CACHE_WRITE_EVENT_PROVIDERS
+    ):
+        return None
+    recovered, conversions = _recover_event_accounting(current, run_dir)
+    if not conversions:
+        return None
+    usage_changed = recovered.usage != current.usage
+    if usage_changed and "claude-resume-cost" not in conversions:
+        recovered = _repriced(recovered)
+    recovered = replace(
+        recovered,
+        migration=_record(TOKEN_USAGE_SCHEMA, conversions, "result.json"),
+    )
+    outcome = "+".join(conversions)
+    if usage_changed:
+        outcome += " (usage changed)"
+    return recovered.to_dict(), outcome
+
+
+def _recover_event_accounting(
+    result: RunResult, run_dir: Path
+) -> tuple[RunResult, list[str]]:
+    if result.usage is None or result.provider not in _CACHE_WRITE_EVENT_PROVIDERS:
+        return result, []
+    try:
+        events_text = (run_dir / "events.jsonl").read_text()
+    except OSError:
+        return result, []
+    conversions: list[str] = []
+    new_usage = result.usage
+    new_cost = result.calculated_cost
+    if result.provider == "claude":
+        parent_run_id = _parent_run_id(run_dir)
+        previous_total_cost_usd = (
+            ClaudeAdapter._reported_total_cost_usd(
+                run_dir.parent / parent_run_id / "events.jsonl"
+            )
+            if parent_run_id
+            else None
+        )
+        parsed = ClaudeAdapter._parse(
+            events_text,
+            previous_total_cost_usd=previous_total_cost_usd,
+        )
+        if not parsed["usage_observed"]:
+            return result, []
+        event_usage = parsed["usage"]
+        if (
+            event_usage.cache_write_input_tokens > 0
+            and result.usage.cached_input_tokens + event_usage.cache_write_input_tokens
+            <= result.usage.input_tokens
+        ):
+            new_usage = replace(
+                result.usage,
+                cache_write_input_tokens=event_usage.cache_write_input_tokens,
+                cache_write_1h_input_tokens=event_usage.cache_write_1h_input_tokens,
+            )
+        if parsed["cost_is_cumulative"]:
+            new_cost = parsed["cost"]
+            if new_cost is None and result.model:
+                new_cost = estimate_api_cost(
+                    result.model,
+                    new_usage,
+                    provider="anthropic",
+                    started_at=result.started_at,
+                    finished_at=result.finished_at,
+                )
+    else:
+        if result.provider == "grok":
+            parsed = GrokAdapter._parse(events_text, result.model)
+        elif result.provider == "cursor":
+            parsed = CursorAdapter._parse(events_text)
+        elif result.provider == "opencode":
+            parsed = OpenCodeAdapter._parse(events_text, result.model)
+        else:
+            parsed = DeepSeekHarnessAdapter._parse(events_text)
+        if not parsed["usage_observed"]:
+            return result, []
+        event_usage = parsed["usage"]
+        if (
+            event_usage.cache_write_input_tokens > 0
+            and result.usage.cached_input_tokens + event_usage.cache_write_input_tokens
+            <= result.usage.input_tokens
+        ):
+            new_usage = replace(
+                result.usage,
+                cache_write_input_tokens=event_usage.cache_write_input_tokens,
+                cache_write_1h_input_tokens=event_usage.cache_write_1h_input_tokens,
+            )
+    if new_usage != result.usage:
+        conversions.append("cache-write-usage")
+    if new_cost != result.calculated_cost:
+        conversions.append("claude-resume-cost")
+    if not conversions:
+        return result, []
+    return replace(result, usage=new_usage, calculated_cost=new_cost), conversions
+
+
+def _parent_run_id(run_dir: Path) -> str | None:
+    try:
+        raw_request = json.loads((run_dir / "request.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw_request, dict):
+        return None
+    parent_run_id = raw_request.get("parent_run_id")
+    return parent_run_id if isinstance(parent_run_id, str) and parent_run_id else None
 
 
 def _record(schema: str | None, conversions: list[str], name: str) -> dict[str, Any]:
@@ -193,6 +329,28 @@ def _fold_legacy_costs(fields: dict[str, Any], conversions: list[str]) -> None:
         }
 
 
+def _raw_usage_counts(raw: object) -> TokenUsage | None:
+    if not isinstance(raw, dict):
+        return None
+    counts = {
+        key: max(value, 0)
+        if isinstance(value := raw.get(key), int) and not isinstance(value, bool)
+        else 0
+        for key in (
+            "input_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "cache_write_1h_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        )
+    }
+    try:
+        return TokenUsage(**counts)
+    except ValueError:
+        return None
+
+
 def _legacy_usage(fields: dict[str, Any]) -> TokenUsage:
     raw = fields.get("usage") if isinstance(fields.get("usage"), dict) else {}
     counts = {
@@ -202,6 +360,8 @@ def _legacy_usage(fields: dict[str, Any]) -> TokenUsage:
         for key in (
             "input_tokens",
             "cached_input_tokens",
+            "cache_write_input_tokens",
+            "cache_write_1h_input_tokens",
             "output_tokens",
             "reasoning_output_tokens",
         )
@@ -209,7 +369,9 @@ def _legacy_usage(fields: dict[str, Any]) -> TokenUsage:
     # These adapters persisted their provider's disjoint uncached input
     # bucket; OpenCode persisted visible output without its reasoning.
     if fields.get("provider") in {"agy", "cursor", "dsh"}:
-        counts["input_tokens"] += counts["cached_input_tokens"]
+        counts["input_tokens"] += (
+            counts["cached_input_tokens"] + counts["cache_write_input_tokens"]
+        )
     if fields.get("provider") == "opencode":
         counts["output_tokens"] += counts["reasoning_output_tokens"]
     return TokenUsage(**counts)
@@ -251,11 +413,19 @@ def _agy_step_usage(fields: dict[str, Any], run_dir: Path) -> None:
 
 def _repriced(result: RunResult) -> RunResult:
     """Price changed usage at the rates in effect when the run happened."""
+    if (
+        result.provider == "claude"
+        and result.calculated_cost is not None
+        and result.calculated_cost.pricing_version == "claude-cli-reported"
+    ):
+        return result
     provider = {
         "agy": "google",
+        "claude": "anthropic",
         "dsh": DeepSeekHarnessAdapter.pricing_provider(result.inference_provider),
+        "grok": "xai",
     }.get(result.provider)
-    priced = result.provider in {"agy", "dsh", "opencode"}
+    priced = result.provider in {"agy", "claude", "dsh", "grok", "opencode"}
     cost = (
         estimate_api_cost(
             result.model,

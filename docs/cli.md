@@ -129,8 +129,18 @@ aop run analysis \
 AOP copies accepted inputs into private controller-owned storage beneath `.aop/snapshots`, hashes
 them, and mounts the snapshots read-only beneath `/inputs` for isolated profiles. The `host` profile
 uses the same point-in-time copies but retains native host access. The harness does not receive the
-inputs' original host paths. Missing paths, symlinks, special files, and duplicate basenames are
-rejected before launch.
+inputs' original host paths.
+
+AOP checks every input before it creates any run state, and `--dry-run` runs the same check, so a dry run that passes will not fail later on an input. It prints each input's file count, size, excluded paths and symlinks. Missing paths, special files, an input that is itself a symlink, and duplicate basenames fail the check. Inside an input directory:
+
+- A symlink whose target lies inside the same input, such as `CLAUDE.md -> AGENTS.md`, is copied as its target's contents.
+- A symlink that points outside the input, or nowhere, fails the run. `--skip-external-links` leaves such links out instead.
+- `--input-exclude GLOB` leaves matching paths out of every input directory, and can be repeated. A pattern without `/`, such as `*.pt`, matches names at any depth; one with `/`, such as `runs/*/net-*.pt`, matches paths from the input's root.
+- AOP's own state directories, such as `.aop` when the input is the directory AOP runs from, are always left out, so a snapshot never copies itself.
+
+Each snapshot records its followed and skipped links and its excluded paths in `input-manifest.json`, and the run's `request.json` keeps `input_excludes` and `skip_external_links` so resumes apply them again.
+
+While a harness runs, its output grows in `events.jsonl` and `stderr.log` in the run directory, so `tail -f .aop/runs/RUN_ID/events.jsonl` shows its tool calls and messages as they happen. Codex and ZCode, which AOP drives through their own protocols, write these files when the run ends.
 
 An exact `sealed` resume inherits the parent run's snapshots unless new `--input` arguments replace
 them. Other profiles snapshot the recorded source paths again, so they receive the current files.

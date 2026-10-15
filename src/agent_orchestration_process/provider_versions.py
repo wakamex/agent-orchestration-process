@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 
@@ -24,6 +25,11 @@ def require_supported_agy(binary: str) -> str:
             capture_output=True,
             timeout=5,
         )
+    except FileNotFoundError as error:
+        raise AOPError(
+            f"{binary} not found on PATH ({os.environ.get('PATH', '')}); set "
+            "AOP_AGY_BIN to its absolute path"
+        ) from error
     except OSError as error:
         raise AOPError(f"could not query Agy version: {error}") from error
     except subprocess.TimeoutExpired as error:

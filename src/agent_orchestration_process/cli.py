@@ -23,7 +23,13 @@ from .locks import exclusive_lock, task_lock_path
 from .model_catalog import ModelCatalog, ensure_catalog_fresh
 from .model_listing import AGENTS, AvailableModel, list_models
 from .models import PromptPart, RunRequest, RunResult
-from .runner import AgentRunner, RunStore, adapter_for, provider_runtime_record
+from .runner import (
+    AgentRunner,
+    RunStore,
+    adapter_for,
+    plan_inputs,
+    provider_runtime_record,
+)
 from .migration import migrate_runs, migration_roots, print_counts
 from .worktrees import (
     AOPError,
@@ -396,6 +402,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 input_names=tuple(Path(path).name for path in args.input_paths),
             ).to_dict()
             preview["provider"] = args.agent
+            planned = plan_inputs(
+                args.input_paths,
+                excludes=args.input_excludes,
+                skip_external_links=args.skip_external_links,
+                protected=(manager.state_dir, manager.sealed_runtime_dir),
+            )
+            preview["inputs"]["planned"] = [
+                {
+                    "name": plan.alias,
+                    "source": os.fspath(plan.source),
+                    "files": len(plan.entries) if plan.entries else 1,
+                    "size_bytes": sum(path.stat().st_size for _, path in plan.entries)
+                    if plan.source.is_dir()
+                    else plan.source.stat().st_size,
+                    "excluded": list(plan.excluded),
+                    "links": list(plan.links),
+                }
+                for plan in planned
+            ]
             preview["provider_runtime"] = provider_runtime_record(
                 adapter_for(args.agent)
             )
@@ -424,6 +449,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
                 input_paths=args.input_paths,
+                input_excludes=args.input_excludes,
+                skip_external_links=args.skip_external_links,
                 system_prompt=_read_system_prompt(args),
                 tools=args.tools,
                 provider_base_url=args.provider_base_url,
@@ -465,7 +492,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"aop: {error}", file=sys.stderr)
         return 2
     except FileNotFoundError as error:
-        print(f"aop: command not found: {error.filename}", file=sys.stderr)
+        print(
+            f"aop: command not found: {error.filename} "
+            f"(PATH={os.environ.get('PATH', '')})",
+            file=sys.stderr,
+        )
         return 127
     except KeyboardInterrupt:
         print("aop: interrupted", file=sys.stderr)
@@ -513,6 +544,25 @@ def _add_input_arguments(
         dest="input_paths",
         metavar="PATH",
         help=help_text,
+    )
+    if resume:
+        return
+    parser.add_argument(
+        "--input-exclude",
+        action="append",
+        default=[],
+        dest="input_excludes",
+        metavar="GLOB",
+        help="leave matching paths out of every input directory; a pattern "
+        "without '/' matches names at any depth, one with '/' matches paths "
+        "from the input's root; repeat for more",
+    )
+    parser.add_argument(
+        "--skip-external-links",
+        action="store_true",
+        help="leave out symlinks that point outside their input instead of "
+        "failing; links that stay inside an input are always copied as their "
+        "targets",
     )
 
 
@@ -606,6 +656,15 @@ def _report_policy(
         f"{prefix}inputs: {inputs['mode']} ({len(inputs.get('names', []))} declared)",
         file=stream,
     )
+    for item in inputs.get("planned", []):
+        skipped = sum(link["action"] == "skipped" for link in item["links"])
+        print(
+            f"{prefix}  {item['name']}: {item['files']} files, "
+            f"{item['size_bytes'] / 1e6:.1f} MB; {len(item['excluded'])} paths "
+            f"excluded; {len(item['links']) - skipped} symlinks followed, "
+            f"{skipped} skipped",
+            file=stream,
+        )
     print(
         f"{prefix}inherited local instructions: {instructions['inherited_local']}; "
         f"provider built-in prompt: {instructions['provider_builtin']}; "

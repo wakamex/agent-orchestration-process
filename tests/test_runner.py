@@ -8,7 +8,9 @@ import selectors
 import shutil
 import socket
 import subprocess
+import sys
 import time
+import threading
 from pathlib import Path
 
 import model_prices
@@ -24,6 +26,7 @@ from agent_orchestration_process.runner import (
     AgentRunner,
     CodexAdapter,
     CursorAdapter,
+    _capture_process,
     _codex_no_web_config,
     _filtered_environment,
     _isolated_root_command,
@@ -817,6 +820,162 @@ class RunnerTest(AOPTestCase):
             input_paths=[first],
         )
         assert host_result.inputs
+
+    def test_directory_input_follows_inside_links_and_skips_external_ones(
+        self,
+        repository: Path,
+        fake_codex: Path,
+        tmp_path: Path,
+    ) -> None:
+        project = tmp_path / "source-project"
+        (project / "sub").mkdir(parents=True)
+        (project / "big").mkdir()
+        (project / "AGENTS.md").write_text("rules\n")
+        (project / "CLAUDE.md").symlink_to("AGENTS.md")
+        (project / "sub" / "keep.txt").write_text("keep\n")
+        (project / "big" / "net.pt").write_text("weights\n")
+        outside = tmp_path / "toolchain"
+        outside.mkdir()
+        (outside / "lib.zig").write_text("lib\n")
+        (project / "sub" / "runtime").symlink_to(outside)
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+
+        with raises(AOPError, match="symlink that leaves it.*--skip-external-links"):
+            runner.run(task="links", prompt="read", input_paths=[project])
+        # The check runs before any run state is created.
+        assert not (manager.state_dir / "runs").exists() or not any(
+            (manager.state_dir / "runs").iterdir()
+        )
+
+        result = runner.run(
+            task="links",
+            prompt="read",
+            input_paths=[project],
+            input_excludes=["*.pt"],
+            skip_external_links=True,
+        )
+
+        assert result.succeeded, result.error
+        snapshot = result.inputs[0]
+        assert [item.relative_path for item in snapshot.files] == [
+            "AGENTS.md",
+            "CLAUDE.md",
+            "sub/keep.txt",
+        ]
+        assert snapshot.excluded == ("big/net.pt",)
+        assert snapshot.links == (
+            {"path": "CLAUDE.md", "target": "AGENTS.md", "action": "followed"},
+            {"path": "sub/runtime", "target": os.fspath(outside), "action": "skipped"},
+        )
+        request = runner.store.load_request(result.run_id)
+        assert request.input_excludes == ("*.pt",)
+        assert request.skip_external_links
+        resumed = runner.resume(run_id=result.run_id, prompt="again")
+        assert resumed.succeeded, resumed.error
+        assert resumed.inputs[0].excluded == ("big/net.pt",)
+
+    def test_input_containing_aop_state_leaves_that_state_out(
+        self,
+        fake_codex: Path,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        project = tmp_path / "source-project"
+        project.mkdir()
+        (project / "notes.md").write_text("notes\n")
+        monkeypatch.chdir(project)
+        manager = WorktreeManager.standalone(project)
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+
+        result = runner.run(
+            task="self", prompt="read", profile="sealed", input_paths=[project]
+        )
+
+        assert result.succeeded, result.error
+        assert ".aop" in result.inputs[0].excluded
+        assert [item.relative_path for item in result.inputs[0].files] == ["notes.md"]
+        with raises(AOPError, match="inside AOP's state directory"):
+            runner.run(
+                task="state",
+                prompt="read",
+                profile="sealed",
+                input_paths=[manager.state_dir],
+            )
+
+    def test_dry_run_reports_the_input_plan_and_its_errors(
+        self,
+        repository: Path,
+        fake_codex: Path,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+        capsys: Capture,
+    ) -> None:
+        project = tmp_path / "source-project"
+        project.mkdir()
+        (project / "notes.md").write_text("notes\n")
+        (project / "outside").symlink_to(tmp_path)
+        monkeypatch.chdir(repository)
+        monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+        command = ["run", "dry", "--input", os.fspath(project), "--prompt", "x", "--dry-run"]
+
+        assert main(command) == 2
+        assert "symlink that leaves it" in capsys.readouterr().err
+        assert main([*command, "--skip-external-links", "--json"]) == 0
+        planned = json.loads(capsys.readouterr().out)["inputs"]["planned"]
+        assert planned == [
+            {
+                "name": "source-project",
+                "source": os.fspath(project.resolve()),
+                "files": 1,
+                "size_bytes": 6,
+                "excluded": [],
+                "links": [
+                    {"path": "outside", "target": os.fspath(tmp_path), "action": "skipped"}
+                ],
+            }
+        ]
+
+    def test_harness_output_grows_in_the_run_directory_while_it_runs(
+        self, tmp_path: Path
+    ) -> None:
+        release = tmp_path / "release"
+        script = (
+            "import pathlib, sys, time\n"
+            "print('first', flush=True)\n"
+            "print('warming up', file=sys.stderr, flush=True)\n"
+            f"while not pathlib.Path({os.fspath(release)!r}).exists():\n"
+            "    time.sleep(0.01)\n"
+            "print('second', flush=True)\n"
+        )
+        seen: list[str] = []
+
+        def watch() -> None:
+            deadline = time.monotonic() + 10
+            events = tmp_path / "events.jsonl"
+            while time.monotonic() < deadline:
+                if events.exists() and events.read_text() == "first\n":
+                    seen.append((tmp_path / "stderr.log").read_text())
+                    break
+                time.sleep(0.01)
+            release.touch()
+
+        watcher = threading.Thread(target=watch)
+        watcher.start()
+        capture = _capture_process(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+            environment=dict(os.environ),
+            prompt=None,
+            timeout_seconds=10,
+            is_response=lambda line: True,
+            live_dir=tmp_path,
+        )
+        watcher.join()
+
+        assert seen == ["warming up\n"]
+        assert capture.stdout == "first\nsecond\n"
+        assert (tmp_path / "events.jsonl").read_text() == "first\nsecond\n"
 
     @parametrize("profile", ["review", "edit", "host"])
     def test_codex_uses_private_runtime_state_with_read_only_global_profile(

@@ -28,11 +28,19 @@ class InputSnapshot:
     size_bytes: int
     sha256: str
     files: tuple[InputFile, ...]
+    # Paths left out of the snapshot, relative to the input: matches of the
+    # run's input excludes and AOP's own state directories.
+    excluded: tuple[str, ...] = ()
+    # Symlinks found in the input: {"path", "target", "action"}, where action
+    # is "followed" for a target inside the input and "skipped" otherwise.
+    links: tuple[dict[str, str], ...] = ()
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> InputSnapshot:
         fields = dict(value)
         fields["files"] = tuple(InputFile(**item) for item in fields.get("files", ()))
+        fields["excluded"] = tuple(fields.get("excluded", ()))
+        fields["links"] = tuple(fields.get("links", ()))
         return cls(**fields)
 
 
@@ -102,6 +110,10 @@ class RunRequest:
     # The prompt split into content blocks, in order; their lengths add up to
     # len(prompt). None sends the prompt as one block.
     prompt_parts: tuple[PromptPart, ...] | None = None
+    # Glob patterns left out of every input directory, and whether symlinks
+    # that leave their input are skipped instead of failing the run.
+    input_excludes: tuple[str, ...] = ()
+    skip_external_links: bool = False
     # How `aop migrate-results` converted an older record, if it did.
     migration: dict[str, Any] | None = None
 
@@ -118,6 +130,7 @@ class RunRequest:
         if fields.get("tools") is not None:
             fields["tools"] = tuple(fields["tools"])
         fields["allowed_urls"] = tuple(fields.get("allowed_urls", ()))
+        fields["input_excludes"] = tuple(fields.get("input_excludes", ()))
         if fields.get("prompt_parts") is not None:
             fields["prompt_parts"] = tuple(
                 PromptPart(**part) for part in fields["prompt_parts"]

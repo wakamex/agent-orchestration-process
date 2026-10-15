@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import fnmatch
 import hashlib
 import json
 import os
@@ -1075,7 +1076,10 @@ def _capture_process(
     prompt: str | None,
     timeout_seconds: float | None,
     is_response: Callable[[str], bool],
+    live_dir: Path | None = None,
 ) -> _ProcessCapture:
+    """Run a harness to completion; with `live_dir`, its stdout and stderr also
+    grow in live_dir/events.jsonl and live_dir/stderr.log while it runs."""
     started = time.monotonic()
     timed_out = False
     first_event_seconds = None
@@ -1106,6 +1110,11 @@ def _capture_process(
 
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
+    live = contextlib.ExitStack()
+    live_stdout = live_stderr = None
+    if live_dir is not None:
+        live_stdout = live.enter_context((live_dir / "events.jsonl").open("w"))
+        live_stderr = live.enter_context((live_dir / "stderr.log").open("w"))
 
     def read_stdout() -> None:
         nonlocal first_event_seconds, first_response_seconds
@@ -1117,10 +1126,17 @@ def _capture_process(
             if first_response_seconds is None and is_response(line):
                 first_response_seconds = elapsed
             stdout_parts.append(line)
+            if live_stdout is not None:
+                live_stdout.write(line)
+                live_stdout.flush()
 
     def read_stderr() -> None:
         assert process.stderr is not None
-        stderr_parts.extend(process.stderr)
+        for line in process.stderr:
+            stderr_parts.append(line)
+            if live_stderr is not None:
+                live_stderr.write(line)
+                live_stderr.flush()
 
     stdout_reader = threading.Thread(target=read_stdout, daemon=True)
     stderr_reader = threading.Thread(target=read_stderr, daemon=True)
@@ -1150,6 +1166,8 @@ def _capture_process(
         _close_finished_streams(
             (stdout_reader, process.stdout), (stderr_reader, process.stderr)
         )
+        if not (stdout_reader.is_alive() or stderr_reader.is_alive()):
+            live.close()
     return _ProcessCapture(
         stdout="".join(stdout_parts),
         stderr="".join(stderr_parts),
@@ -1229,6 +1247,7 @@ class ClaudeAdapter:
             ),
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
+            live_dir=run_dir,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
@@ -1868,6 +1887,7 @@ class GrokAdapter:
             prompt=None,
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
+            live_dir=run_dir,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
@@ -2201,6 +2221,7 @@ class CursorAdapter:
             prompt=prompt_transport.stdin_prompt(self.provider, request.prompt),
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
+            live_dir=run_dir,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
@@ -2419,6 +2440,7 @@ class DevinAdapter:
             prompt=None,
             timeout_seconds=request.timeout_seconds,
             is_response=lambda line: bool(line.strip()),
+            live_dir=run_dir,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
@@ -2680,6 +2702,7 @@ class OpenCodeAdapter:
             prompt=prompt_transport.stdin_prompt(self.provider, request.prompt),
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
+            live_dir=run_dir,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
@@ -3040,6 +3063,7 @@ class AgyAdapter:
             prompt=prompt_transport.stdin_prompt(self.provider, request.prompt),
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
+            live_dir=run_dir,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
@@ -3324,6 +3348,7 @@ class HermesAdapter:
             prompt=None,
             timeout_seconds=request.timeout_seconds,
             is_response=lambda line: bool(line.strip()),
+            live_dir=run_dir,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
@@ -3772,6 +3797,7 @@ class DeepSeekHarnessAdapter:
             prompt=None,
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
+            live_dir=run_dir,
         )
         _atomic_write(run_dir / "events.jsonl", capture.stdout)
         _atomic_write(run_dir / "stderr.log", capture.stderr)
@@ -5786,9 +5812,19 @@ class AgentRunner:
         writable_workspace: bool = False,
         thinking_display: str | None = None,
         prompt_parts: Sequence[PromptPart] | None = None,
+        input_excludes: Sequence[str] = (),
+        skip_external_links: bool = False,
     ) -> RunResult:
         self._validate_mode(mode)
         prompt_parts = self._validated_prompt_parts(prompt, prompt_parts)
+        input_excludes = tuple(input_excludes)
+        # Every input problem fails here, before any state is created.
+        plan_inputs(
+            input_paths,
+            excludes=input_excludes,
+            skip_external_links=skip_external_links,
+            protected=self._state_roots(),
+        )
         if writable_workspace and profile != "sealed":
             raise AOPError("--writable-workspace applies only to the sealed profile")
         if thinking_display is not None:
@@ -5835,6 +5871,8 @@ class AgentRunner:
             writable_workspace=writable_workspace,
             thinking_display=thinking_display,
             prompt_parts=prompt_parts,
+            input_excludes=input_excludes,
+            skip_external_links=skip_external_links,
         )
         worktree = (
             self._create_sealed_workspace(request.run_id)
@@ -5968,6 +6006,8 @@ class AgentRunner:
             writable_workspace=parent_request.writable_workspace,
             thinking_display=parent_request.thinking_display,
             prompt_parts=prompt_parts,
+            input_excludes=parent_request.input_excludes,
+            skip_external_links=parent_request.skip_external_links,
         )
         return self._execute(
             request,
@@ -6084,7 +6124,12 @@ class AgentRunner:
             cache_dir = self.manager.cache_dir
             cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         declared_inputs = _prepare_inputs(
-            input_paths,
+            plan_inputs(
+                input_paths,
+                excludes=request.input_excludes,
+                skip_external_links=request.skip_external_links,
+                protected=self._state_roots() if input_provenance is None else (),
+            ),
             input_dir,
             guest_paths=request.profile != "host",
             provenance=input_provenance,
@@ -6325,6 +6370,8 @@ class AgentRunner:
         writable_workspace: bool = False,
         thinking_display: str | None = None,
         prompt_parts: tuple[PromptPart, ...] | None = None,
+        input_excludes: tuple[str, ...] = (),
+        skip_external_links: bool = False,
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -6353,7 +6400,13 @@ class AgentRunner:
             writable_workspace=writable_workspace,
             thinking_display=thinking_display,
             prompt_parts=prompt_parts,
+            input_excludes=input_excludes,
+            skip_external_links=skip_external_links,
         )
+
+    def _state_roots(self) -> tuple[Path, ...]:
+        """AOP's own state, which no input snapshot may copy into itself."""
+        return (self.manager.state_dir, self.manager.sealed_runtime_dir)
 
     def _validate_provider_base_url(self, url: str | None, profile: str) -> None:
         variable = PROVIDER_BASE_URL_VARIABLES.get(self.adapter.provider)
@@ -6617,18 +6670,39 @@ def normalize_artifacts(artifacts: Sequence[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
-def _prepare_inputs(
+@dataclass(frozen=True)
+class InputPlan:
+    """One declared input, checked and resolved before anything is copied."""
+
+    source: Path
+    alias: str
+    # (path relative to the input, host file to copy); empty for a file input.
+    entries: tuple[tuple[str, Path], ...]
+    excluded: tuple[str, ...]
+    links: tuple[dict[str, str], ...]
+
+
+def plan_inputs(
     values: Sequence[str | os.PathLike[str]],
-    input_dir: Path,
     *,
-    guest_paths: bool = True,
-    provenance: Sequence[str] | None = None,
-) -> tuple[InputSnapshot, ...]:
-    if provenance is not None and len(provenance) != len(values):
-        raise AOPError("input provenance does not match the input snapshot set")
-    prepared: list[InputSnapshot] = []
+    excludes: Sequence[str] = (),
+    skip_external_links: bool = False,
+    protected: Sequence[Path] = (),
+) -> tuple[InputPlan, ...]:
+    """Check every input as a run would, without copying.
+
+    Directories under `protected` (AOP's own state) are left out of any input
+    that contains them. A symlink whose target lies inside its input is copied
+    as the target's contents; one that leaves the input, or is dangling, fails
+    the run unless `skip_external_links` is set.
+    """
+    for pattern in excludes:
+        if not pattern or "\0" in pattern or pattern.startswith("/"):
+            raise AOPError(f"input exclude must be a relative glob pattern: {pattern!r}")
+    protected = tuple(path.resolve() for path in protected)
+    plans: list[InputPlan] = []
     aliases: set[str] = set()
-    for index, value in enumerate(values):
+    for value in values:
         raw = os.fspath(value)
         if not raw or "\0" in raw:
             raise AOPError("input path must be a non-empty filesystem path")
@@ -6648,44 +6722,134 @@ def _prepare_inputs(
         if alias in aliases:
             raise AOPError(f"input paths have the same basename: {alias}")
         aliases.add(alias)
-
-        mounted = input_dir / alias
+        if any(source == root or source.is_relative_to(root) for root in protected):
+            raise AOPError(f"input path is inside AOP's state directory: {source}")
         if source.is_dir():
-            _copy_input_directory(source, mounted)
+            plans.append(
+                _plan_directory(source, alias, excludes, skip_external_links, protected)
+            )
+        elif source.is_file():
+            plans.append(InputPlan(source, alias, (), (), ()))
         else:
-            shutil.copyfile(source, mounted)
+            raise AOPError(f"input path is not a regular file or directory: {source}")
+    return tuple(plans)
+
+
+def _plan_directory(
+    root: Path,
+    alias: str,
+    excludes: Sequence[str],
+    skip_external_links: bool,
+    protected: tuple[Path, ...],
+) -> InputPlan:
+    entries: list[tuple[str, Path]] = []
+    excluded: list[str] = []
+    links: list[dict[str, str]] = []
+
+    def is_excluded(relative: str) -> bool:
+        name = relative.rsplit("/", 1)[-1]
+        return any(
+            fnmatch.fnmatchcase(relative, pattern)
+            or ("/" not in pattern and fnmatch.fnmatchcase(name, pattern))
+            for pattern in excludes
+        )
+
+    def is_protected(path: Path) -> bool:
+        return any(path == item or path.is_relative_to(item) for item in protected)
+
+    def walk(directory: Path, relative: PurePosixPath, chain: tuple[Path, ...]) -> None:
+        try:
+            children = sorted(directory.iterdir(), key=lambda child: child.name)
+        except OSError as error:
+            raise AOPError(
+                f"could not read input directory {directory}: {error}"
+            ) from error
+        for child in children:
+            logical = (relative / child.name).as_posix()
+            if is_excluded(logical):
+                excluded.append(logical)
+                continue
+            status = child.lstat()
+            path = child
+            if stat.S_ISLNK(status.st_mode):
+                target = child.resolve()
+                inside = target.is_relative_to(root) and target.exists()
+                if not inside:
+                    if not skip_external_links:
+                        raise AOPError(
+                            f"input contains a symlink that leaves it: {child} -> "
+                            f"{os.readlink(child)}; pass --skip-external-links "
+                            "to leave such links out, or --input-exclude to "
+                            "exclude them"
+                        )
+                    links.append(
+                        {"path": logical, "target": os.readlink(child), "action": "skipped"}
+                    )
+                    continue
+                if target in chain:
+                    raise AOPError(f"input contains a symlink loop: {child}")
+                links.append(
+                    {"path": logical, "target": os.readlink(child), "action": "followed"}
+                )
+                path = target
+                status = target.stat()
+            if stat.S_ISDIR(status.st_mode):
+                resolved = path.resolve()
+                if is_protected(resolved):
+                    excluded.append(logical)
+                elif resolved in chain:
+                    raise AOPError(f"input contains a symlink loop: {child}")
+                else:
+                    walk(path, PurePosixPath(logical), (*chain, resolved))
+            elif stat.S_ISREG(status.st_mode):
+                entries.append((logical, path))
+            else:
+                raise AOPError(f"read path contains a special file: {child}")
+
+    walk(root, PurePosixPath(), (root,))
+    return InputPlan(root, alias, tuple(entries), tuple(excluded), tuple(links))
+
+
+def _prepare_inputs(
+    plans: Sequence[InputPlan],
+    input_dir: Path,
+    *,
+    guest_paths: bool = True,
+    provenance: Sequence[str] | None = None,
+) -> tuple[InputSnapshot, ...]:
+    if provenance is not None and len(provenance) != len(plans):
+        raise AOPError("input provenance does not match the input snapshot set")
+    prepared: list[InputSnapshot] = []
+    for index, plan in enumerate(plans):
+        mounted = input_dir / plan.alias
+        if plan.source.is_dir():
+            mounted.mkdir()
+            for relative, path in plan.entries:
+                target = mounted / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+        else:
+            shutil.copyfile(plan.source, mounted)
         kind, files = _inspect_read_path(mounted)
-        size_bytes = sum(item.size_bytes for item in files)
         prepared.append(
             InputSnapshot(
                 source_path=(
-                    provenance[index] if provenance is not None else os.fspath(source)
+                    provenance[index]
+                    if provenance is not None
+                    else os.fspath(plan.source)
                 ),
                 mounted_path=(
-                    f"/inputs/{alias}" if guest_paths else os.fspath(mounted)
+                    f"/inputs/{plan.alias}" if guest_paths else os.fspath(mounted)
                 ),
                 kind=kind,
-                size_bytes=size_bytes,
+                size_bytes=sum(item.size_bytes for item in files),
                 sha256=_read_path_digest(kind, files),
                 files=files,
+                excluded=plan.excluded,
+                links=plan.links,
             )
         )
     return tuple(prepared)
-
-
-def _copy_input_directory(source: Path, destination: Path) -> None:
-    destination.mkdir()
-    for child in sorted(source.iterdir(), key=lambda item: item.name):
-        status = child.lstat()
-        target = destination / child.name
-        if stat.S_ISLNK(status.st_mode):
-            raise AOPError(f"read path contains a symlink: {child}")
-        if stat.S_ISDIR(status.st_mode):
-            _copy_input_directory(child, target)
-        elif stat.S_ISREG(status.st_mode):
-            shutil.copyfile(child, target)
-        else:
-            raise AOPError(f"read path contains a special file: {child}")
 
 
 def _make_snapshot_private(root: Path) -> None:

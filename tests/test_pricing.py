@@ -9,6 +9,9 @@ from agent_orchestration_process.pricing import (
     CalculatedCost,
     TokenUsage,
     estimate_api_cost,
+    nonnegative_float,
+    nonnegative_int,
+    sum_usage,
 )
 
 # GPT-5.6 Sol cost $5/$30 until 2026-08-22 and $4/$20 after.
@@ -207,6 +210,46 @@ class PricingTest(AOPTestCase):
             )
         with raises(ValueError, match="reasoning_output_tokens"):
             TokenUsage(output_tokens=10, reasoning_output_tokens=11)
+
+    def test_from_disjoint_normalizes_buckets_and_reasoning_mode(self) -> None:
+        inclusive = TokenUsage.from_disjoint(
+            uncached_input_tokens=10,
+            cached_input_tokens=20,
+            cache_write_input_tokens=30,
+            cache_write_1h_input_tokens=50,
+            output_tokens=15,
+            reasoning_output_tokens=5,
+        )
+        disjoint_reasoning = TokenUsage.from_disjoint(
+            uncached_input_tokens=10,
+            cached_input_tokens=20,
+            cache_write_input_tokens=30,
+            output_tokens=15,
+            reasoning_output_tokens=5,
+            reasoning_in_output=False,
+        )
+
+        assert inclusive == TokenUsage(
+            input_tokens=60,
+            cached_input_tokens=20,
+            cache_write_input_tokens=30,
+            cache_write_1h_input_tokens=30,
+            output_tokens=15,
+            reasoning_output_tokens=5,
+        )
+        assert disjoint_reasoning.output_tokens == 20
+        assert sum_usage([inclusive, disjoint_reasoning]) == TokenUsage(
+            input_tokens=120,
+            cached_input_tokens=40,
+            cache_write_input_tokens=60,
+            cache_write_1h_input_tokens=30,
+            output_tokens=35,
+            reasoning_output_tokens=10,
+        )
+        assert nonnegative_int(True) == 0
+        assert nonnegative_int(-3) == 0
+        assert nonnegative_float(False) is None
+        assert nonnegative_float(-1.5) == 0.0
 
     def test_cache_write_and_1h_subsets_are_priced_at_their_rates(self) -> None:
         usage = TokenUsage(

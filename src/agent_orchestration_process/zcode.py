@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from .pricing import (
-    TokenUsage,
     CalculatedCost,
+    TokenUsage,
     estimate_api_cost,
     merge_periods,
     merge_suffixes,
+    sum_usage,
 )
 from .worktrees import AOPError
 
@@ -170,22 +171,6 @@ def token_usage(raw: Any) -> TokenUsage | None:
         return TokenUsage(*counts)
     except ValueError as error:
         raise ValueError("Zcode reported inconsistent token usage") from error
-
-
-def sum_usage(usages: list[TokenUsage]) -> TokenUsage:
-    return TokenUsage(
-        *(
-            sum(getattr(usage, name) for usage in usages)
-            for name in (
-                "input_tokens",
-                "cached_input_tokens",
-                "output_tokens",
-                "reasoning_output_tokens",
-                "cache_write_input_tokens",
-                "cache_write_1h_input_tokens",
-            )
-        )
-    )
 
 
 def calculate_cost(

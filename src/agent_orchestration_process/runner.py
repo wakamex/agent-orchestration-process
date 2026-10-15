@@ -48,7 +48,14 @@ from .models import (
 )
 from .locks import exclusive_lock, task_lock_path
 from .isolation import PROFILES, resolve_policy
-from .pricing import CalculatedCost, TokenUsage, estimate_api_cost
+from .pricing import (
+    CalculatedCost,
+    TokenUsage,
+    estimate_api_cost,
+    nonnegative_float,
+    nonnegative_int,
+    sum_usage,
+)
 from .provider_versions import require_supported_agy
 from . import egress
 from .worktrees import AOPError, Worktree, WorktreeManager, register_state_root
@@ -86,12 +93,6 @@ def _now() -> str:
 
 def _rounded(value: float | None) -> float | None:
     return round(value, 6) if value is not None else None
-
-
-def _token_count(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
-    return max(value, 0)
 
 
 @dataclass(frozen=True)
@@ -960,22 +961,17 @@ class CodexAdapter:
                 if isinstance(last, dict):
                     usage_observed = True
                     request_usage = TokenUsage(
-                        input_tokens=_token_count(last.get("inputTokens")),
-                        cached_input_tokens=_token_count(last.get("cachedInputTokens")),
-                        output_tokens=_token_count(last.get("outputTokens")),
-                        reasoning_output_tokens=_token_count(
+                        input_tokens=nonnegative_int(last.get("inputTokens")),
+                        cached_input_tokens=nonnegative_int(
+                            last.get("cachedInputTokens")
+                        ),
+                        output_tokens=nonnegative_int(last.get("outputTokens")),
+                        reasoning_output_tokens=nonnegative_int(
                             last.get("reasoningOutputTokens")
                         ),
                     )
                     request_usages.append(request_usage)
-                    usage = TokenUsage(
-                        input_tokens=usage.input_tokens + request_usage.input_tokens,
-                        cached_input_tokens=usage.cached_input_tokens
-                        + request_usage.cached_input_tokens,
-                        output_tokens=usage.output_tokens + request_usage.output_tokens,
-                        reasoning_output_tokens=usage.reasoning_output_tokens
-                        + request_usage.reasoning_output_tokens,
-                    )
+                    usage = sum_usage(request_usages)
             elif method == "item/completed" and params.get("turnId") == turn_id:
                 item = params.get("item")
                 if (
@@ -1507,10 +1503,10 @@ class ClaudeAdapter:
         if not isinstance(entry, dict):
             return False
         return (
-            _token_count(entry.get("inputTokens")) > uncached
-            or _token_count(entry.get("cacheReadInputTokens")) > cached
-            or _token_count(entry.get("cacheCreationInputTokens")) > created
-            or _token_count(entry.get("outputTokens")) > output
+            nonnegative_int(entry.get("inputTokens")) > uncached
+            or nonnegative_int(entry.get("cacheReadInputTokens")) > cached
+            or nonnegative_int(entry.get("cacheCreationInputTokens")) > created
+            or nonnegative_int(entry.get("outputTokens")) > output
         )
 
     @staticmethod
@@ -1549,23 +1545,21 @@ class ClaudeAdapter:
             raw_usage = event.get("usage")
             usage_observed = isinstance(raw_usage, dict)
             raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
-            uncached = _token_count(raw_usage.get("input_tokens"))
-            cached = _token_count(raw_usage.get("cache_read_input_tokens"))
-            created = _token_count(raw_usage.get("cache_creation_input_tokens"))
+            uncached = nonnegative_int(raw_usage.get("input_tokens"))
+            cached = nonnegative_int(raw_usage.get("cache_read_input_tokens"))
+            created = nonnegative_int(raw_usage.get("cache_creation_input_tokens"))
             cache_creation = raw_usage.get("cache_creation")
-            created_1h = min(
-                _token_count(cache_creation.get("ephemeral_1h_input_tokens"))
-                if isinstance(cache_creation, dict)
-                else 0,
-                created,
-            )
-            output_tokens = _token_count(raw_usage.get("output_tokens"))
-            usage = TokenUsage(
-                input_tokens=uncached + cached + created,
+            output_tokens = nonnegative_int(raw_usage.get("output_tokens"))
+            usage = TokenUsage.from_disjoint(
+                uncached_input_tokens=uncached,
                 cached_input_tokens=cached,
-                output_tokens=output_tokens,
                 cache_write_input_tokens=created,
-                cache_write_1h_input_tokens=created_1h,
+                cache_write_1h_input_tokens=(
+                    cache_creation.get("ephemeral_1h_input_tokens")
+                    if isinstance(cache_creation, dict)
+                    else 0
+                ),
+                output_tokens=output_tokens,
             )
             cost_is_cumulative = ClaudeAdapter._is_cumulative_model_usage(
                 event.get("modelUsage"),
@@ -1575,9 +1569,8 @@ class ClaudeAdapter:
                 created=created,
                 output=output_tokens,
             )
-            amount = event.get("total_cost_usd")
-            if isinstance(amount, (int, float)) and not isinstance(amount, bool):
-                turn_amount: float | None = float(amount)
+            turn_amount = nonnegative_float(event.get("total_cost_usd"))
+            if turn_amount is not None:
                 if cost_is_cumulative:
                     turn_amount = (
                         max(turn_amount - previous_total_cost_usd, 0.0)
@@ -2175,29 +2168,20 @@ class GrokAdapter:
             raw_usage = event.get("usage")
             if isinstance(raw_usage, dict):
                 usage_observed = True
-                uncached = GrokAdapter._integer(raw_usage.get("input_tokens"))
-                cached = GrokAdapter._integer(raw_usage.get("cache_read_input_tokens"))
-                created = GrokAdapter._integer(
-                    raw_usage.get("cache_creation_input_tokens")
-                )
                 cache_creation = raw_usage.get("cache_creation")
-                created_1h = min(
-                    GrokAdapter._integer(
+                usage = TokenUsage.from_disjoint(
+                    uncached_input_tokens=raw_usage.get("input_tokens"),
+                    cached_input_tokens=raw_usage.get("cache_read_input_tokens"),
+                    cache_write_input_tokens=raw_usage.get(
+                        "cache_creation_input_tokens"
+                    ),
+                    cache_write_1h_input_tokens=(
                         cache_creation.get("ephemeral_1h_input_tokens")
-                    )
-                    if isinstance(cache_creation, dict)
-                    else 0,
-                    created,
-                )
-                total_output = GrokAdapter._integer(raw_usage.get("output_tokens"))
-                reasoning = GrokAdapter._integer(raw_usage.get("reasoning_tokens"))
-                usage = TokenUsage(
-                    input_tokens=uncached + cached + created,
-                    cached_input_tokens=cached,
-                    output_tokens=total_output,
-                    reasoning_output_tokens=reasoning,
-                    cache_write_input_tokens=created,
-                    cache_write_1h_input_tokens=created_1h,
+                        if isinstance(cache_creation, dict)
+                        else 0
+                    ),
+                    output_tokens=raw_usage.get("output_tokens"),
+                    reasoning_output_tokens=raw_usage.get("reasoning_tokens"),
                 )
             event_session_id = event.get("sessionId")
             if isinstance(event_session_id, str) and event_session_id:
@@ -2210,7 +2194,7 @@ class GrokAdapter:
                     only_model = next(iter(model_usage))
                     if isinstance(only_model, str) and only_model:
                         model = only_model
-            amount = GrokAdapter._number(event.get("total_cost_usd"))
+            amount = nonnegative_float(event.get("total_cost_usd"))
             if amount is not None:
                 reported_cost = ProviderReportedCost(
                     amount_usd=round(amount, 8),
@@ -2284,18 +2268,6 @@ class GrokAdapter:
             credential_source="external-auth" if modes == {"external"} else None,
             detected_by="Grok authentication metadata" if modes else None,
         )
-
-    @staticmethod
-    def _integer(value: object) -> int:
-        if isinstance(value, bool) or not isinstance(value, int):
-            return 0
-        return max(value, 0)
-
-    @staticmethod
-    def _number(value: object) -> float | None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        return max(float(value), 0.0)
 
 
 class CursorAdapter:
@@ -2484,17 +2456,11 @@ class CursorAdapter:
             raw_usage = event.get("usage")
             usage_observed = isinstance(raw_usage, dict)
             raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
-            usage = TokenUsage.from_dict(
-                {
-                    "input_tokens": (
-                        _token_count(raw_usage.get("inputTokens"))
-                        + _token_count(raw_usage.get("cacheReadTokens"))
-                        + _token_count(raw_usage.get("cacheWriteTokens"))
-                    ),
-                    "cached_input_tokens": raw_usage.get("cacheReadTokens"),
-                    "output_tokens": raw_usage.get("outputTokens"),
-                    "cache_write_input_tokens": raw_usage.get("cacheWriteTokens"),
-                }
+            usage = TokenUsage.from_disjoint(
+                uncached_input_tokens=raw_usage.get("inputTokens"),
+                cached_input_tokens=raw_usage.get("cacheReadTokens"),
+                cache_write_input_tokens=raw_usage.get("cacheWriteTokens"),
+                output_tokens=raw_usage.get("outputTokens"),
             )
             duration_ms = event.get("duration_api_ms")
             if isinstance(duration_ms, (int, float)) and not isinstance(
@@ -2747,10 +2713,7 @@ class DevinAdapter:
     @staticmethod
     def _metric(step: dict[str, object], name: str) -> int:
         metrics = step.get("metrics")
-        value = metrics.get(name) if isinstance(metrics, dict) else None
-        if isinstance(value, bool) or not isinstance(value, int):
-            return 0
-        return max(value, 0)
+        return nonnegative_int(metrics.get(name) if isinstance(metrics, dict) else None)
 
     @staticmethod
     def _invalid_export(error: str) -> dict[str, object]:
@@ -3007,11 +2970,6 @@ class OpenCodeAdapter:
         status = None
         has_finish = False
         usage_observed = False
-        input_tokens = 0
-        cached_input_tokens = 0
-        cache_write_input_tokens = 0
-        output_tokens = 0
-        reasoning_output_tokens = 0
         requests = []
         cost_usd = 0.0
         has_reported_cost = False
@@ -3059,24 +3017,14 @@ class OpenCodeAdapter:
                     usage_observed = True
                     cache = tokens.get("cache")
                     cache = cache if isinstance(cache, dict) else {}
-                    cache_read = OpenCodeAdapter._integer(cache.get("read"))
-                    cache_write = OpenCodeAdapter._integer(cache.get("write"))
-                    reasoning_output = OpenCodeAdapter._integer(tokens.get("reasoning"))
-                    step_usage = TokenUsage(
-                        input_tokens=OpenCodeAdapter._integer(tokens.get("input"))
-                        + cache_read
-                        + cache_write,
-                        cached_input_tokens=cache_read,
-                        cache_write_input_tokens=cache_write,
-                        output_tokens=OpenCodeAdapter._integer(tokens.get("output"))
-                        + reasoning_output,
-                        reasoning_output_tokens=reasoning_output,
+                    step_usage = TokenUsage.from_disjoint(
+                        uncached_input_tokens=tokens.get("input"),
+                        cached_input_tokens=cache.get("read"),
+                        cache_write_input_tokens=cache.get("write"),
+                        output_tokens=tokens.get("output"),
+                        reasoning_output_tokens=tokens.get("reasoning"),
+                        reasoning_in_output=False,
                     )
-                    input_tokens += step_usage.input_tokens
-                    cached_input_tokens += step_usage.cached_input_tokens
-                    cache_write_input_tokens += step_usage.cache_write_input_tokens
-                    output_tokens += step_usage.output_tokens
-                    reasoning_output_tokens += step_usage.reasoning_output_tokens
                     finished = (
                         datetime.fromtimestamp(timestamp / 1000, UTC).isoformat()
                         if isinstance(timestamp, (int, float))
@@ -3084,18 +3032,12 @@ class OpenCodeAdapter:
                         else None
                     )
                     requests.append((step_usage, finished))
-                amount = part.get("cost")
-                if isinstance(amount, (int, float)) and not isinstance(amount, bool):
-                    cost_usd += max(float(amount), 0.0)
+                amount = nonnegative_float(part.get("cost"))
+                if amount is not None:
+                    cost_usd += amount
                     has_reported_cost = True
 
-        usage = TokenUsage(
-            input_tokens=input_tokens,
-            cached_input_tokens=cached_input_tokens,
-            cache_write_input_tokens=cache_write_input_tokens,
-            output_tokens=output_tokens,
-            reasoning_output_tokens=reasoning_output_tokens,
-        )
+        usage = sum_usage(step_usage for step_usage, _ in requests)
         reported_cost = None
         if has_finish and has_reported_cost:
             reported_cost = ProviderReportedCost(
@@ -3134,12 +3076,6 @@ class OpenCodeAdapter:
                     return candidate
             return json.dumps(value, sort_keys=True)
         return "OpenCode turn failed"
-
-    @staticmethod
-    def _integer(value: object) -> int:
-        if isinstance(value, bool) or not isinstance(value, int):
-            return 0
-        return max(value, 0)
 
 
 class AgyAdapter:
@@ -3380,8 +3316,7 @@ class AgyAdapter:
 
 def _agy_invocation_usage(output: str) -> tuple[TokenUsage, bool]:
     """Sum the usage Agy reports on each step of this invocation."""
-    totals = [0, 0, 0, 0]
-    observed = False
+    steps: list[TokenUsage] = []
     for line in output.splitlines():
         try:
             event = json.loads(line)
@@ -3391,18 +3326,15 @@ def _agy_invocation_usage(output: str) -> tuple[TokenUsage, bool]:
         raw = step.get("usage") if isinstance(step, dict) else None
         if not isinstance(raw, dict):
             continue
-        observed = True
-        cache_read = _token_count(raw.get("cache_read_tokens"))
-        for index, value in enumerate(
-            (
-                _token_count(raw.get("input_tokens")) + cache_read,
-                cache_read,
-                _token_count(raw.get("output_tokens")),
-                _token_count(raw.get("thinking_tokens")),
+        steps.append(
+            TokenUsage.from_disjoint(
+                uncached_input_tokens=raw.get("input_tokens"),
+                cached_input_tokens=raw.get("cache_read_tokens"),
+                output_tokens=raw.get("output_tokens"),
+                reasoning_output_tokens=raw.get("thinking_tokens"),
             )
-        ):
-            totals[index] += value
-    return TokenUsage(*totals), observed
+        )
+    return sum_usage(steps), bool(steps)
 
 
 @dataclass(frozen=True)
@@ -3632,13 +3564,8 @@ class HermesAdapter:
         if not isinstance(raw, dict) or raw.get("id") != session_id:
             return None
 
-        uncached_input = self._integer(raw.get("input_tokens"))
-        cached_input = self._integer(raw.get("cache_read_tokens"))
-        cache_write = self._integer(raw.get("cache_write_tokens"))
-        visible_output = self._integer(raw.get("output_tokens"))
-        reasoning_output = self._integer(raw.get("reasoning_tokens"))
-        actual_cost = self._number(raw.get("actual_cost_usd"))
-        estimated_cost = self._number(raw.get("estimated_cost_usd"))
+        actual_cost = nonnegative_float(raw.get("actual_cost_usd"))
+        estimated_cost = nonnegative_float(raw.get("estimated_cost_usd"))
         source = raw.get("cost_source")
         billing_provider = raw.get("billing_provider")
         version = raw.get("pricing_version")
@@ -3665,12 +3592,13 @@ class HermesAdapter:
             ),
             final_message=final_message,
             last_assistant_id=last_assistant_id,
-            usage=TokenUsage(
-                input_tokens=uncached_input + cached_input + cache_write,
-                cached_input_tokens=cached_input,
-                cache_write_input_tokens=cache_write,
-                output_tokens=visible_output + reasoning_output,
-                reasoning_output_tokens=reasoning_output,
+            usage=TokenUsage.from_disjoint(
+                uncached_input_tokens=raw.get("input_tokens"),
+                cached_input_tokens=raw.get("cache_read_tokens"),
+                cache_write_input_tokens=raw.get("cache_write_tokens"),
+                output_tokens=raw.get("output_tokens"),
+                reasoning_output_tokens=raw.get("reasoning_tokens"),
+                reasoning_in_output=False,
             ),
             cost_usd=actual_cost if actual_cost is not None else estimated_cost,
             cost_estimated=actual_cost is None,
@@ -3821,18 +3749,6 @@ class HermesAdapter:
             "xai": "xai",
             "xai-oauth": "xai",
         }.get(provider or "")
-
-    @staticmethod
-    def _integer(value: object) -> int:
-        if isinstance(value, bool) or not isinstance(value, int):
-            return 0
-        return max(value, 0)
-
-    @staticmethod
-    def _number(value: object) -> float | None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        return max(float(value), 0.0)
 
 
 class DeepSeekHarnessAdapter:
@@ -4078,17 +3994,12 @@ class DeepSeekHarnessAdapter:
         raw_usage = result.get("usage")
         usage_observed = isinstance(raw_usage, dict) and bool(raw_usage)
         raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
-        uncached_input = _token_count(raw_usage.get("input_tokens"))
-        cached_input = _token_count(raw_usage.get("cached_input_tokens"))
-        cache_write = _token_count(raw_usage.get("cache_write_input_tokens"))
-        usage = TokenUsage(
-            input_tokens=uncached_input + cached_input + cache_write,
-            cached_input_tokens=cached_input,
-            cache_write_input_tokens=cache_write,
-            output_tokens=_token_count(raw_usage.get("output_tokens")),
-            reasoning_output_tokens=_token_count(
-                raw_usage.get("reasoning_output_tokens")
-            ),
+        usage = TokenUsage.from_disjoint(
+            uncached_input_tokens=raw_usage.get("input_tokens"),
+            cached_input_tokens=raw_usage.get("cached_input_tokens"),
+            cache_write_input_tokens=raw_usage.get("cache_write_input_tokens"),
+            output_tokens=raw_usage.get("output_tokens"),
+            reasoning_output_tokens=raw_usage.get("reasoning_output_tokens"),
         )
         return {
             "session_id": (

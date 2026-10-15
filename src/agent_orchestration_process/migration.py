@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import TOKEN_USAGE_SCHEMA, RunRequest, RunResult
-from .pricing import TokenUsage, estimate_api_cost
+from .pricing import TokenUsage, estimate_api_cost, nonnegative_int
 from .runner import (
     AgyAdapter,
     ClaudeAdapter,
@@ -332,21 +332,8 @@ def _fold_legacy_costs(fields: dict[str, Any], conversions: list[str]) -> None:
 def _raw_usage_counts(raw: object) -> TokenUsage | None:
     if not isinstance(raw, dict):
         return None
-    counts = {
-        key: max(value, 0)
-        if isinstance(value := raw.get(key), int) and not isinstance(value, bool)
-        else 0
-        for key in (
-            "input_tokens",
-            "cached_input_tokens",
-            "cache_write_input_tokens",
-            "cache_write_1h_input_tokens",
-            "output_tokens",
-            "reasoning_output_tokens",
-        )
-    }
     try:
-        return TokenUsage(**counts)
+        return TokenUsage.from_dict(raw)
     except ValueError:
         return None
 
@@ -354,9 +341,7 @@ def _raw_usage_counts(raw: object) -> TokenUsage | None:
 def _legacy_usage(fields: dict[str, Any]) -> TokenUsage:
     raw = fields.get("usage") if isinstance(fields.get("usage"), dict) else {}
     counts = {
-        key: max(value, 0)
-        if isinstance(value := raw.get(key), int) and not isinstance(value, bool)
-        else 0
+        key: nonnegative_int(raw.get(key))
         for key in (
             "input_tokens",
             "cached_input_tokens",

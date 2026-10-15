@@ -65,18 +65,45 @@ class TokenUsage:
         if value is None:
             return cls()
         return cls(
-            input_tokens=_nonnegative_integer(value.get("input_tokens")),
-            cached_input_tokens=_nonnegative_integer(value.get("cached_input_tokens")),
-            output_tokens=_nonnegative_integer(value.get("output_tokens")),
-            reasoning_output_tokens=_nonnegative_integer(
+            input_tokens=nonnegative_int(value.get("input_tokens")),
+            cached_input_tokens=nonnegative_int(value.get("cached_input_tokens")),
+            output_tokens=nonnegative_int(value.get("output_tokens")),
+            reasoning_output_tokens=nonnegative_int(
                 value.get("reasoning_output_tokens")
             ),
-            cache_write_input_tokens=_nonnegative_integer(
+            cache_write_input_tokens=nonnegative_int(
                 value.get("cache_write_input_tokens")
             ),
-            cache_write_1h_input_tokens=_nonnegative_integer(
+            cache_write_1h_input_tokens=nonnegative_int(
                 value.get("cache_write_1h_input_tokens")
             ),
+        )
+
+    @classmethod
+    def from_disjoint(
+        cls,
+        *,
+        uncached_input_tokens: object = 0,
+        cached_input_tokens: object = 0,
+        cache_write_input_tokens: object = 0,
+        cache_write_1h_input_tokens: object = 0,
+        output_tokens: object = 0,
+        reasoning_output_tokens: object = 0,
+        reasoning_in_output: bool = True,
+    ) -> TokenUsage:
+        uncached = nonnegative_int(uncached_input_tokens)
+        cached = nonnegative_int(cached_input_tokens)
+        write = nonnegative_int(cache_write_input_tokens)
+        write_1h = min(nonnegative_int(cache_write_1h_input_tokens), write)
+        output = nonnegative_int(output_tokens)
+        reasoning = nonnegative_int(reasoning_output_tokens)
+        return cls(
+            input_tokens=uncached + cached + write,
+            cached_input_tokens=cached,
+            output_tokens=output if reasoning_in_output else output + reasoning,
+            reasoning_output_tokens=reasoning,
+            cache_write_input_tokens=write,
+            cache_write_1h_input_tokens=write_1h,
         )
 
 
@@ -124,7 +151,7 @@ def estimate_api_cost(
     if model is None:
         return None
     priced = tuple(requests) if requests is not None else ((usage, None),)
-    if _sum_usage([request_usage for request_usage, _ in priced]) != usage:
+    if sum_usage(request_usage for request_usage, _ in priced) != usage:
         raise ValueError("request usage does not match aggregate usage")
     # With no measured requests, pricing zero usage still requires known rates.
     priced = priced or ((usage, None),)
@@ -217,22 +244,29 @@ def _utc(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(UTC)
 
 
-def _sum_usage(usages: Sequence[TokenUsage]) -> TokenUsage:
+def sum_usage(usages: Iterable[TokenUsage]) -> TokenUsage:
+    items = tuple(usages)
     return TokenUsage(
-        input_tokens=sum(usage.input_tokens for usage in usages),
-        cached_input_tokens=sum(usage.cached_input_tokens for usage in usages),
-        output_tokens=sum(usage.output_tokens for usage in usages),
-        reasoning_output_tokens=sum(usage.reasoning_output_tokens for usage in usages),
+        input_tokens=sum(usage.input_tokens for usage in items),
+        cached_input_tokens=sum(usage.cached_input_tokens for usage in items),
+        output_tokens=sum(usage.output_tokens for usage in items),
+        reasoning_output_tokens=sum(usage.reasoning_output_tokens for usage in items),
         cache_write_input_tokens=sum(
-            usage.cache_write_input_tokens for usage in usages
+            usage.cache_write_input_tokens for usage in items
         ),
         cache_write_1h_input_tokens=sum(
-            usage.cache_write_1h_input_tokens for usage in usages
+            usage.cache_write_1h_input_tokens for usage in items
         ),
     )
 
 
-def _nonnegative_integer(value: object) -> int:
+def nonnegative_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return max(value, 0)
+
+
+def nonnegative_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return max(float(value), 0.0)

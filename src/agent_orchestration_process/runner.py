@@ -110,7 +110,15 @@ def _finalize_accounting(
     usage_observed: bool,
     calculated_cost: CalculatedCost | None,
     provider_reported_cost: ProviderReportedCost | None = None,
+    require_observed: bool = False,
 ) -> _Accounting:
+    if require_observed and not usage_observed:
+        return _Accounting(
+            usage=None,
+            calculated_cost=None,
+            provider_reported_cost=None,
+            status="unavailable",
+        )
     if not timed_out:
         return _Accounting(
             usage=usage,
@@ -132,6 +140,92 @@ def _finalize_accounting(
         calculated_cost=retained_calculated_cost,
         provider_reported_cost=provider_reported_cost,
         status="partial",
+    )
+
+
+def _write_run_logs(
+    run_dir: Path,
+    capture: _ProcessCapture | zcode_protocol.Capture,
+    final_message: str | None = None,
+) -> None:
+    _atomic_write(run_dir / "events.jsonl", capture.stdout)
+    _atomic_write(run_dir / "stderr.log", capture.stderr)
+    if final_message is not None:
+        _atomic_write(run_dir / "last-message.txt", final_message)
+
+
+def _check_resumed_session(
+    label: str,
+    noun: str,
+    requested_session_id: str | None,
+    reported_session_id: str | None,
+) -> tuple[str | None, str | None]:
+    if not requested_session_id or reported_session_id == requested_session_id:
+        return reported_session_id, None
+    if reported_session_id is None:
+        return (
+            None,
+            f"{label} resume result did not report the requested {noun} ID "
+            f"{requested_session_id}",
+        )
+    return (
+        None,
+        f"{label} resumed as {noun} {reported_session_id} instead of "
+        f"the requested {noun} {requested_session_id}",
+    )
+
+
+def _build_run_result(
+    request: RunRequest,
+    capture: _ProcessCapture | zcode_protocol.Capture,
+    *,
+    model: str | None,
+    session_id: str | None,
+    command: list[str],
+    started_at: str,
+    finished_at: str,
+    error: str | None,
+    final_message: str | None,
+    accounting: _Accounting,
+    billing: BillingProvenance,
+    secret_names: set[str] | None = None,
+    inference_provider: str | None = None,
+    provider_duration_seconds: float | None = None,
+    provider_status: str | None = None,
+    provider_error: str | None = None,
+) -> RunResult:
+    return RunResult(
+        run_id=request.run_id,
+        provider=request.provider,
+        mode=request.mode,
+        task=request.task,
+        model=model,
+        effort=(
+            capture.effort
+            if isinstance(capture, zcode_protocol.Capture)
+            else request.effort
+        ),
+        session_id=session_id,
+        command=_recorded_command(command, secret_names=secret_names),
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_seconds=capture.duration_seconds,
+        time_to_first_event_seconds=capture.first_event_seconds,
+        time_to_first_response_seconds=capture.first_response_seconds,
+        exit_code=capture.exit_code,
+        timed_out=capture.timed_out,
+        error=error,
+        final_message=final_message,
+        usage=accounting.usage,
+        calculated_cost=accounting.calculated_cost,
+        provider_reported_cost=accounting.provider_reported_cost,
+        accounting_status=accounting.status,
+        billing=billing,
+        inference_provider=inference_provider,
+        inference_route=request.inference_route,
+        provider_duration_seconds=provider_duration_seconds,
+        provider_status=provider_status,
+        provider_error=provider_error,
     )
 
 
@@ -430,13 +524,15 @@ class CodexAdapter:
                 start_new_session=True,
             )
         except FileNotFoundError:
-            stdout = ""
-            stderr = f"command not found: {self.binary}\n"
-            exit_code = 127
-            timed_out = False
-            first_event_seconds = None
-            first_response_seconds = None
-            protocol_error = None
+            capture = _ProcessCapture(
+                stdout="",
+                stderr=f"command not found: {self.binary}\n",
+                exit_code=127,
+                timed_out=False,
+                duration_seconds=round(time.monotonic() - started, 6),
+                first_event_seconds=None,
+                first_response_seconds=None,
+            )
         else:
             try:
                 capture = self._run_app_server(
@@ -451,47 +547,30 @@ class CodexAdapter:
             except KeyboardInterrupt:
                 self._stop_process(process)
                 raise
-            stdout = capture.stdout
-            stderr = capture.stderr
-            exit_code = capture.exit_code
-            timed_out = capture.timed_out
-            first_event_seconds = capture.first_event_seconds
-            first_response_seconds = capture.first_response_seconds
-            protocol_error = capture.protocol_error
 
-        duration = time.monotonic() - started
-        _atomic_write(run_dir / "events.jsonl", stdout)
-        _atomic_write(run_dir / "stderr.log", stderr)
-
-        parsed = self._parse_events(stdout)
+        parsed = self._parse_events(capture.stdout)
+        final_message = parsed["final_message"]
+        _write_run_logs(run_dir, capture, final_message)
         reported_session_id = parsed["session_id"]
         event_error = parsed["error"]
         usage = parsed["usage"]
         completed = parsed["completed"]
         usage_observed = parsed["usage_observed"]
         effective_model = request.model or parsed["model"]
-        session_id = reported_session_id
-        resume_error = None
-        if request.session_id and reported_session_id != request.session_id:
-            session_id = None
-            if reported_session_id is None:
-                resume_error = (
-                    "Codex resume result did not report the requested thread ID "
-                    f"{request.session_id}"
-                )
-            else:
-                resume_error = (
-                    f"Codex resumed as thread {reported_session_id} instead of "
-                    f"the requested thread {request.session_id}"
-                )
-        if timed_out:
+        session_id, resume_error = _check_resumed_session(
+            "Codex", "thread", request.session_id, reported_session_id
+        )
+        if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
-        elif protocol_error:
-            error = protocol_error
+        elif capture.protocol_error:
+            error = capture.protocol_error
         elif event_error:
             error = event_error
-        elif exit_code != 0:
-            error = stderr.strip() or f"Codex exited with status {exit_code}"
+        elif capture.exit_code != 0:
+            error = (
+                capture.stderr.strip()
+                or f"Codex exited with status {capture.exit_code}"
+            )
         elif resume_error:
             error = resume_error
         elif reported_session_id is None:
@@ -501,9 +580,6 @@ class CodexAdapter:
         else:
             error = None
 
-        final_message = parsed["final_message"]
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
         billing = (
             BillingProvenance(
                 route="subscription",
@@ -515,7 +591,7 @@ class CodexAdapter:
         )
         finished_at = _now()
         accounting = _finalize_accounting(
-            timed_out=timed_out,
+            timed_out=capture.timed_out,
             usage=usage,
             usage_observed=usage_observed,
             calculated_cost=estimate_api_cost(
@@ -528,36 +604,23 @@ class CodexAdapter:
             ),
         )
 
-        return RunResult(
-            run_id=request.run_id,
-            provider=request.provider,
-            mode=request.mode,
-            task=request.task,
+        return _build_run_result(
+            request,
+            capture,
             model=effective_model,
-            effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(
-                command,
-                secret_names=(
-                    {request.inference_route.credential_env}
-                    if request.inference_route is not None
-                    else None
-                ),
+            command=command,
+            secret_names=(
+                {request.inference_route.credential_env}
+                if request.inference_route is not None
+                else None
             ),
             started_at=started_at,
             finished_at=finished_at,
-            duration_seconds=round(duration, 6),
-            time_to_first_event_seconds=_rounded(first_event_seconds),
-            time_to_first_response_seconds=_rounded(first_response_seconds),
-            exit_code=exit_code,
-            timed_out=timed_out,
             error=error,
             final_message=final_message,
-            usage=accounting.usage,
-            calculated_cost=accounting.calculated_cost,
-            accounting_status=accounting.status,
+            accounting=accounting,
             billing=billing,
-            inference_route=request.inference_route,
             provider_duration_seconds=parsed["provider_duration_seconds"],
             provider_status=parsed["provider_status"],
         )
@@ -1245,8 +1308,6 @@ class ClaudeAdapter:
             is_response=self._is_response,
             live_dir=run_dir,
         )
-        _atomic_write(run_dir / "events.jsonl", capture.stdout)
-        _atomic_write(run_dir / "stderr.log", capture.stderr)
         previous_total_cost_usd = (
             self._reported_total_cost_usd(
                 run_dir.parent / request.parent_run_id / "events.jsonl"
@@ -1259,23 +1320,11 @@ class ClaudeAdapter:
             previous_total_cost_usd=previous_total_cost_usd,
         )
         final_message = parsed["final_message"]
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
+        _write_run_logs(run_dir, capture, final_message)
         reported_session_id = parsed["session_id"]
-        session_id = reported_session_id
-        resume_error = None
-        if request.session_id and reported_session_id != request.session_id:
-            session_id = None
-            if reported_session_id is None:
-                resume_error = (
-                    "Claude resume result did not report the requested session ID "
-                    f"{request.session_id}"
-                )
-            else:
-                resume_error = (
-                    f"Claude resumed as session {reported_session_id} instead of "
-                    f"the requested session {request.session_id}"
-                )
+        session_id, resume_error = _check_resumed_session(
+            "Claude", "session", request.session_id, reported_session_id
+        )
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif parsed["error"]:
@@ -1311,27 +1360,17 @@ class ClaudeAdapter:
             usage_observed=parsed["usage_observed"],
             calculated_cost=calculated_cost,
         )
-        return RunResult(
-            run_id=request.run_id,
-            provider=self.provider,
-            mode=request.mode,
-            task=request.task,
+        return _build_run_result(
+            request,
+            capture,
             model=effective_model,
-            effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(command),
+            command=command,
             started_at=started_at,
             finished_at=finished_at,
-            duration_seconds=capture.duration_seconds,
-            time_to_first_event_seconds=capture.first_event_seconds,
-            time_to_first_response_seconds=capture.first_response_seconds,
-            exit_code=capture.exit_code,
-            timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=accounting.usage,
-            calculated_cost=accounting.calculated_cost,
-            accounting_status=accounting.status,
+            accounting=accounting,
             billing=billing,
         )
 
@@ -1728,8 +1767,6 @@ class ZcodeAdapter:
             timeout_seconds=request.timeout_seconds,
             on_selection=record_selection,
         )
-        _atomic_write(run_dir / "events.jsonl", capture.stdout)
-        _atomic_write(run_dir / "stderr.log", capture.stderr)
         parsed = zcode.parse_protocol(capture.stdout)
         session_id = parsed["session_id"]
         error = capture.error or parsed["error"]
@@ -1743,28 +1780,10 @@ class ZcodeAdapter:
         elif capture.exit_code:
             error = error or f"Zcode exited with status {capture.exit_code}"
         final_message = parsed["final_message"]
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
+        _write_run_logs(run_dir, capture, final_message)
         usage = parsed["usage"]
         finished_at = _now()
-        return RunResult(
-            run_id=request.run_id,
-            provider=self.provider,
-            mode=request.mode,
-            task=request.task,
-            model=parsed["model"] or model,
-            effort=capture.effort,
-            session_id=session_id,
-            command=_recorded_command(command, secret_names=set(credential_names)),
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_seconds=capture.duration_seconds,
-            time_to_first_event_seconds=capture.first_event_seconds,
-            time_to_first_response_seconds=capture.first_response_seconds,
-            exit_code=capture.exit_code,
-            timed_out=capture.timed_out,
-            error=error,
-            final_message=final_message,
+        accounting = _Accounting(
             usage=usage,
             calculated_cost=(
                 zcode.calculate_cost(
@@ -1777,9 +1796,25 @@ class ZcodeAdapter:
                 )
                 else None
             ),
-            accounting_status="partial"
-            if capture.timed_out and usage is not None
-            else parsed["accounting_status"],
+            provider_reported_cost=None,
+            status=(
+                "partial"
+                if capture.timed_out and usage is not None
+                else parsed["accounting_status"]
+            ),
+        )
+        return _build_run_result(
+            request,
+            capture,
+            model=parsed["model"] or model,
+            session_id=session_id,
+            command=command,
+            secret_names=set(credential_names),
+            started_at=started_at,
+            finished_at=finished_at,
+            error=error,
+            final_message=final_message,
+            accounting=accounting,
             billing=billing,
             inference_provider=inference_provider,
             provider_duration_seconds=parsed["duration_seconds"],
@@ -1984,28 +2019,14 @@ class GrokAdapter:
             is_response=self._is_response,
             live_dir=run_dir,
         )
-        _atomic_write(run_dir / "events.jsonl", capture.stdout)
-        _atomic_write(run_dir / "stderr.log", capture.stderr)
         parsed = self._parse(capture.stdout, request.model)
         final_message = parsed["final_message"]
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
+        _write_run_logs(run_dir, capture, final_message)
 
         reported_session_id = parsed["session_id"]
-        session_id = reported_session_id
-        resume_error = None
-        if request.session_id and reported_session_id != request.session_id:
-            session_id = None
-            if reported_session_id is None:
-                resume_error = (
-                    "Grok resume result did not report the requested session ID "
-                    f"{request.session_id}"
-                )
-            else:
-                resume_error = (
-                    f"Grok resumed as session {reported_session_id} instead of "
-                    f"the requested session {request.session_id}"
-                )
+        session_id, resume_error = _check_resumed_session(
+            "Grok", "session", request.session_id, reported_session_id
+        )
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
@@ -2048,28 +2069,17 @@ class GrokAdapter:
             ),
             provider_reported_cost=reported_cost,
         )
-        return RunResult(
-            run_id=request.run_id,
-            provider=self.provider,
-            mode=request.mode,
-            task=request.task,
+        return _build_run_result(
+            request,
+            capture,
             model=model,
-            effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(command),
+            command=command,
             started_at=started_at,
             finished_at=finished_at,
-            duration_seconds=capture.duration_seconds,
-            time_to_first_event_seconds=capture.first_event_seconds,
-            time_to_first_response_seconds=capture.first_response_seconds,
-            exit_code=capture.exit_code,
-            timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=accounting.usage,
-            calculated_cost=accounting.calculated_cost,
-            provider_reported_cost=accounting.provider_reported_cost,
-            accounting_status=accounting.status,
+            accounting=accounting,
             billing=billing,
             provider_status=parsed["status"],
             provider_error=parsed["error"],
@@ -2308,14 +2318,13 @@ class CursorAdapter:
             is_response=self._is_response,
             live_dir=run_dir,
         )
-        _atomic_write(run_dir / "events.jsonl", capture.stdout)
-        _atomic_write(run_dir / "stderr.log", capture.stderr)
         parsed = self._parse(capture.stdout)
         reported_session_id = parsed["session_id"]
-        session_id = reported_session_id
+        session_id, resume_error = _check_resumed_session(
+            "Cursor Agent", "chat", request.session_id, reported_session_id
+        )
         final_message = parsed["final_message"]
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
+        _write_run_logs(run_dir, capture, final_message)
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
@@ -2326,18 +2335,8 @@ class CursorAdapter:
             )
         elif not parsed["has_result"]:
             error = "Cursor Agent did not emit a terminal result"
-        elif request.session_id and reported_session_id != request.session_id:
-            session_id = None
-            if reported_session_id is None:
-                error = (
-                    "Cursor Agent resume result did not report the requested chat ID "
-                    f"{request.session_id}"
-                )
-            else:
-                error = (
-                    f"Cursor Agent resumed as chat {reported_session_id} instead of "
-                    f"the requested chat {request.session_id}"
-                )
+        elif resume_error:
+            error = resume_error
         elif reported_session_id is None:
             error = "Cursor Agent result did not report a chat ID"
         elif final_message is None:
@@ -2351,27 +2350,17 @@ class CursorAdapter:
             usage_observed=parsed["usage_observed"],
             calculated_cost=None,
         )
-        return RunResult(
-            run_id=request.run_id,
-            provider=self.provider,
-            mode=request.mode,
-            task=request.task,
+        return _build_run_result(
+            request,
+            capture,
             model=request.model,
-            effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(command),
+            command=command,
             started_at=started_at,
             finished_at=_now(),
-            duration_seconds=capture.duration_seconds,
-            time_to_first_event_seconds=capture.first_event_seconds,
-            time_to_first_response_seconds=capture.first_response_seconds,
-            exit_code=capture.exit_code,
-            timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=accounting.usage,
-            calculated_cost=None,
-            accounting_status=accounting.status,
+            accounting=accounting,
             billing=BillingProvenance(
                 route="provider-credits",
                 credential_source=(
@@ -2522,8 +2511,6 @@ class DevinAdapter:
             is_response=lambda line: bool(line.strip()),
             live_dir=run_dir,
         )
-        _atomic_write(run_dir / "events.jsonl", capture.stdout)
-        _atomic_write(run_dir / "stderr.log", capture.stderr)
         parsed = self._parse_export(
             export_path,
             request.prompt,
@@ -2533,10 +2520,11 @@ class DevinAdapter:
             _atomic_write(run_dir / "provider-result.json", export_path.read_text())
             export_path.unlink()
         final_message = parsed["final_message"]
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
+        _write_run_logs(run_dir, capture, final_message)
         reported_session_id = parsed["session_id"]
-        session_id = reported_session_id
+        session_id, resume_error = _check_resumed_session(
+            "Devin", "session", request.session_id, reported_session_id
+        )
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
@@ -2547,18 +2535,8 @@ class DevinAdapter:
             )
         elif parsed["error"]:
             error = parsed["error"]
-        elif request.session_id and reported_session_id != request.session_id:
-            session_id = None
-            if reported_session_id is None:
-                error = (
-                    "Devin resume result did not report the requested session ID "
-                    f"{request.session_id}"
-                )
-            else:
-                error = (
-                    f"Devin resumed as session {reported_session_id} instead of "
-                    f"the requested session {request.session_id}"
-                )
+        elif resume_error:
+            error = resume_error
         elif reported_session_id is None:
             error = "Devin did not report a session ID"
         elif final_message is None:
@@ -2572,27 +2550,17 @@ class DevinAdapter:
             usage_observed=parsed["usage_observed"],
             calculated_cost=None,
         )
-        return RunResult(
-            run_id=request.run_id,
-            provider=self.provider,
-            mode=request.mode,
-            task=request.task,
+        return _build_run_result(
+            request,
+            capture,
             model=parsed["model"] or request.model,
-            effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(command),
+            command=command,
             started_at=started_at,
             finished_at=_now(),
-            duration_seconds=capture.duration_seconds,
-            time_to_first_event_seconds=capture.first_event_seconds,
-            time_to_first_response_seconds=capture.first_response_seconds,
-            exit_code=capture.exit_code,
-            timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=accounting.usage,
-            calculated_cost=None,
-            accounting_status=accounting.status,
+            accounting=accounting,
             billing=BillingProvenance(
                 route="provider-credits",
                 credential_source="devin-account",
@@ -2781,27 +2749,13 @@ class OpenCodeAdapter:
             is_response=self._is_response,
             live_dir=run_dir,
         )
-        _atomic_write(run_dir / "events.jsonl", capture.stdout)
-        _atomic_write(run_dir / "stderr.log", capture.stderr)
         parsed = self._parse(capture.stdout, request.model)
         final_message = parsed["final_message"]
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
+        _write_run_logs(run_dir, capture, final_message)
         reported_session_id = parsed["session_id"]
-        session_id = reported_session_id
-        resume_error = None
-        if request.session_id and reported_session_id != request.session_id:
-            session_id = None
-            if reported_session_id is None:
-                resume_error = (
-                    "OpenCode resume result did not report the requested session ID "
-                    f"{request.session_id}"
-                )
-            else:
-                resume_error = (
-                    f"OpenCode resumed as session {reported_session_id} instead of "
-                    f"the requested session {request.session_id}"
-                )
+        session_id, resume_error = _check_resumed_session(
+            "OpenCode", "session", request.session_id, reported_session_id
+        )
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
@@ -2842,28 +2796,17 @@ class OpenCodeAdapter:
             provider_reported_cost=reported_cost,
         )
 
-        return RunResult(
-            run_id=request.run_id,
-            provider=self.provider,
-            mode=request.mode,
-            task=request.task,
+        return _build_run_result(
+            request,
+            capture,
             model=request.model,
-            effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(command),
+            command=command,
             started_at=started_at,
             finished_at=finished_at,
-            duration_seconds=capture.duration_seconds,
-            time_to_first_event_seconds=capture.first_event_seconds,
-            time_to_first_response_seconds=capture.first_response_seconds,
-            exit_code=capture.exit_code,
-            timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=accounting.usage,
-            calculated_cost=accounting.calculated_cost,
-            provider_reported_cost=accounting.provider_reported_cost,
-            accounting_status=accounting.status,
+            accounting=accounting,
             billing=billing,
             provider_duration_seconds=parsed["duration_seconds"],
             provider_status=parsed["status"],
@@ -3119,14 +3062,13 @@ class AgyAdapter:
             is_response=self._is_response,
             live_dir=run_dir,
         )
-        _atomic_write(run_dir / "events.jsonl", capture.stdout)
-        _atomic_write(run_dir / "stderr.log", capture.stderr)
         parsed = self._parse(capture.stdout)
         final_message = parsed["final_message"]
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
+        _write_run_logs(run_dir, capture, final_message)
         reported_session_id = parsed["session_id"]
-        session_id = reported_session_id
+        session_id, resume_error = _check_resumed_session(
+            "agy", "conversation", request.session_id, reported_session_id
+        )
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
         elif capture.exit_code:
@@ -3135,18 +3077,8 @@ class AgyAdapter:
             )
         elif not parsed["has_result"]:
             error = "agy did not emit a terminal result"
-        elif request.session_id and reported_session_id != request.session_id:
-            session_id = None
-            if reported_session_id is None:
-                error = (
-                    "agy resume result did not report the requested conversation ID "
-                    f"{request.session_id}"
-                )
-            else:
-                error = (
-                    f"agy resumed as conversation {reported_session_id} instead of "
-                    f"the requested conversation {request.session_id}"
-                )
+        elif resume_error:
+            error = resume_error
         elif reported_session_id is None:
             error = "agy result did not report a conversation ID"
         elif final_message is None:
@@ -3168,27 +3100,17 @@ class AgyAdapter:
                 finished_at=finished_at,
             ),
         )
-        return RunResult(
-            run_id=request.run_id,
-            provider=self.provider,
-            mode=request.mode,
-            task=request.task,
+        return _build_run_result(
+            request,
+            capture,
             model=model,
-            effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(command),
+            command=command,
             started_at=started_at,
             finished_at=finished_at,
-            duration_seconds=capture.duration_seconds,
-            time_to_first_event_seconds=capture.first_event_seconds,
-            time_to_first_response_seconds=capture.first_response_seconds,
-            exit_code=capture.exit_code,
-            timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=accounting.usage,
-            calculated_cost=accounting.calculated_cost,
-            accounting_status=accounting.status,
+            accounting=accounting,
             billing=self._billing_provenance(gemini_dir, environment),
             provider_duration_seconds=parsed["duration_seconds"],
             provider_status=parsed["status"],
@@ -3400,14 +3322,11 @@ class HermesAdapter:
             is_response=lambda line: bool(line.strip()),
             live_dir=run_dir,
         )
-        _atomic_write(run_dir / "events.jsonl", capture.stdout)
-        _atomic_write(run_dir / "stderr.log", capture.stderr)
         reported_session_id = self._session_id(capture.stderr)
         session_id = reported_session_id or request.session_id
         after = self._session(session_id, request, worktree, environment)
         final_message = self._final_message(before, after)
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
+        _write_run_logs(run_dir, capture, final_message)
         baseline = before if request.session_id == session_id else None
         usage = self._usage_delta(baseline, after)
         finished_at = _now()
@@ -3443,28 +3362,17 @@ class HermesAdapter:
             error = "Hermes did not emit a final response"
         else:
             error = None
-        return RunResult(
-            run_id=request.run_id,
-            provider=self.provider,
-            mode=request.mode,
-            task=request.task,
+        return _build_run_result(
+            request,
+            capture,
             model=(after.model if after else None) or request.model,
-            effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(command),
+            command=command,
             started_at=started_at,
             finished_at=finished_at,
-            duration_seconds=capture.duration_seconds,
-            time_to_first_event_seconds=capture.first_event_seconds,
-            time_to_first_response_seconds=capture.first_response_seconds,
-            exit_code=capture.exit_code,
-            timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=accounting.usage,
-            calculated_cost=accounting.calculated_cost,
-            provider_reported_cost=accounting.provider_reported_cost,
-            accounting_status=accounting.status,
+            accounting=accounting,
             billing=billing,
         )
 
@@ -3839,28 +3747,17 @@ class DeepSeekHarnessAdapter:
             is_response=self._is_response,
             live_dir=run_dir,
         )
-        _atomic_write(run_dir / "events.jsonl", capture.stdout)
-        _atomic_write(run_dir / "stderr.log", capture.stderr)
         parsed = self._parse(capture.stdout)
         final_message = parsed["final_message"]
-        if final_message is not None:
-            _atomic_write(run_dir / "last-message.txt", final_message)
+        _write_run_logs(run_dir, capture, final_message)
         reported_session_id = parsed["session_id"]
-        session_id = reported_session_id
+        session_id, resume_error = _check_resumed_session(
+            "dsh", "session", request.session_id, reported_session_id
+        )
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
-        elif request.session_id and reported_session_id != request.session_id:
-            session_id = None
-            if reported_session_id is None:
-                error = (
-                    "dsh resume result did not report the requested session ID "
-                    f"{request.session_id}"
-                )
-            else:
-                error = (
-                    f"dsh resumed as session {reported_session_id} instead of the "
-                    f"requested session {request.session_id}"
-                )
+        elif resume_error:
+            error = resume_error
         elif capture.exit_code:
             error = (
                 capture.stderr.strip()
@@ -3887,38 +3784,20 @@ class DeepSeekHarnessAdapter:
                 if parsed["usage_observed"]
                 else None
             ),
+            require_observed=True,
         )
-        if not parsed["usage_observed"]:
-            accounting = _Accounting(
-                usage=None,
-                calculated_cost=None,
-                provider_reported_cost=None,
-                status="unavailable",
-            )
-        return RunResult(
-            run_id=request.run_id,
-            provider=self.provider,
-            mode=request.mode,
-            task=request.task,
+        return _build_run_result(
+            request,
+            capture,
             model=model,
-            effort=request.effort,
             session_id=session_id,
-            command=_recorded_command(
-                command,
-                secret_names={environment.get("AOP_DSH_CREDENTIAL_REF", "")},
-            ),
+            command=command,
+            secret_names={environment.get("AOP_DSH_CREDENTIAL_REF", "")},
             started_at=started_at,
             finished_at=finished_at,
-            duration_seconds=capture.duration_seconds,
-            time_to_first_event_seconds=capture.first_event_seconds,
-            time_to_first_response_seconds=capture.first_response_seconds,
-            exit_code=capture.exit_code,
-            timed_out=capture.timed_out,
             error=error,
             final_message=final_message,
-            usage=accounting.usage,
-            calculated_cost=accounting.calculated_cost,
-            accounting_status=accounting.status,
+            accounting=accounting,
             billing=BillingProvenance(
                 route="metered-api",
                 credential_source=(

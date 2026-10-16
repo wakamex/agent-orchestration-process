@@ -307,6 +307,7 @@ def _recover_event_accounting(
         )
         parsed = ClaudeAdapter._parse(
             events_text,
+            resumed=parent_run_id is not None,
             previous_total_cost_usd=previous_total_cost_usd,
         )
         if not parsed["usage_observed"]:

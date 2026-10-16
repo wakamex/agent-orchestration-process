@@ -1339,6 +1339,7 @@ class ClaudeAdapter:
         )
         parsed = self._parse(
             capture.stdout,
+            resumed=bool(request.session_id),
             previous_total_cost_usd=previous_total_cost_usd,
         )
         final_message = parsed["final_message"]
@@ -1574,8 +1575,17 @@ class ClaudeAdapter:
     def _parse(
         output: str,
         *,
+        resumed: bool = False,
         previous_total_cost_usd: float | None = None,
     ) -> dict[str, object]:
+        """Parse a Claude Code run.
+
+        On a resumed session Claude Code reports the session's running cost,
+        recognized by modelUsage exceeding this run's usage, so the parent
+        run's reported total is subtracted. A fresh run's modelUsage can also
+        exceed its usage, through another model such as a subagent's, and its
+        reported cost is already its own.
+        """
         session_id = None
         model = None
         final_message = None
@@ -1622,7 +1632,7 @@ class ClaudeAdapter:
                 ),
                 output_tokens=output_tokens,
             )
-            cost_is_cumulative = ClaudeAdapter._is_cumulative_model_usage(
+            cost_is_cumulative = resumed and ClaudeAdapter._is_cumulative_model_usage(
                 event.get("modelUsage"),
                 model,
                 uncached=uncached,

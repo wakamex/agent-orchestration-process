@@ -224,13 +224,20 @@ class UsageSemanticsTest(AOPTestCase):
         ]
         raw = "\n".join(map(json.dumps, events))
 
-        with_parent = ClaudeAdapter._parse(raw, previous_total_cost_usd=0.30)
-        without_parent = ClaudeAdapter._parse(raw)
+        with_parent = ClaudeAdapter._parse(
+            raw, resumed=True, previous_total_cost_usd=0.30
+        )
+        without_parent = ClaudeAdapter._parse(raw, resumed=True)
+        fresh = ClaudeAdapter._parse(raw)
 
         assert with_parent["cost_is_cumulative"] is True
         assert with_parent["cost"].amount_usd == 0.15
         assert without_parent["cost_is_cumulative"] is True
         assert without_parent["cost"] is None
+        # A fresh run's modelUsage can exceed its usage through another model,
+        # such as a subagent's, and its reported cost is already its own.
+        assert fresh["cost_is_cumulative"] is False
+        assert fresh["cost"].amount_usd == 0.45
 
     def test_agy_usage_is_this_invocations_steps_with_disjoint_cache(self) -> None:
         def step(input_tokens: int, cache_read: int, output: int, thinking: int) -> dict:

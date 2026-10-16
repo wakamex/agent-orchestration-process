@@ -82,6 +82,10 @@ OpenCode can report billed per-step cost; Grok can report terminal cost; and Her
 through its selected inference provider. Cursor and Devin do not currently expose enough
 information for AOP to calculate an API-equivalent cost, so their calculated cost remains null.
 
+## Results archive
+
+Every result AOP writes to `.aop/runs/RUN_ID/result.json` is also written, with the same content, to `$XDG_STATE_HOME/aop/results/RUN_ID.json` (by default `~/.local/state/aop/results/`). The archive keeps a run's usage and cost after the directory holding its `.aop` is deleted, such as a benchmark's per-question profile. Each result's `state_root` field names the `.aop` directory the run was recorded in, exactly as it appears in `state-roots`, so a consumer can attribute an archived run to its project after that directory is gone. The archive holds one current record per run at its top level; originals that a migration replaced are kept in its `originals` subdirectory.
+
 ## Migrating older run records
 
 AOP reads only current run records. Loading an older `result.json` or `request.json` fails with a message to run the one-time migration:
@@ -93,6 +97,8 @@ aop migrate-results /code/project/.aop/runs ~/other/.aop/runs
 ```
 
 Without arguments, the command migrates every state directory listed in `$XDG_STATE_HOME/aop/state-roots` (by default `~/.local/state/aop/state-roots`) and the current project's `.aop/runs`. AOP adds a state directory to that list whenever it records a run there, and the migration adds every directory it migrates. `--dry-run` prints, for each run directory, how many records each conversion would change, and writes nothing.
+
+The migration also maintains the results archive. It copies each current result into the archive when the archived copy is missing or differs, and migrates archived results whose run directory no longer exists in place. Finally it rewrites `state-roots` without duplicate entries or directories that no longer exist.
 
 For each record the migration rewrites, it keeps the original byte for byte beside it as `result.pre-v3.json` or `request.pre-v3.json` and adds a `migration` object naming the original schema, the conversions applied, the original's file name, and the migration time. Raw provider artifacts such as `events.jsonl` are never changed. Running the migration again skips records already in the current format.
 
@@ -107,6 +113,7 @@ Results convert as follows:
 | Every Agy result before v3 | usage recomputed from the `step_update` usage in the run's own `events.jsonl`, because Agy's terminal `result` event reports the conversation's running total across every run that resumed it; without usage events, usage and costs become unavailable |
 | Claude, Cursor, DeepSeek Harness, Grok, and OpenCode results with cache writes in `events.jsonl` | `cache_write_input_tokens` and `cache_write_1h_input_tokens` recovered from `events.jsonl` when `result.json` predates those fields |
 | Resumed Claude results with cumulative `modelUsage` in `events.jsonl` | `calculated_cost` recomputed as the single-turn delta from the parent run's reported session cost (or `model-prices` when parent events are absent) |
+| Results without `state_root` | `state_root` set to the `.aop` directory that holds the run directory |
 | `api_equivalent_cost`, `billing.actual_cost_known`, `calculated_cost.estimated`, `read_paths` | folded into `calculated_cost` or `provider_reported_cost`, removed, or renamed to `inputs` |
 
 When a conversion changes a result's usage, the migration reprices `calculated_cost` with model-prices at the run's own time and records the price data in `pricing_basis`. A run the model-prices data cannot price for that whole span gets a null cost. Results whose usage is unchanged keep their stored cost.
@@ -115,6 +122,6 @@ Requests convert `sandbox` to `profile` and `read_paths` to `inputs`, and fill f
 
 ## Downstream consumer rule
 
-Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v3"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the six counters as stored and calculate uncached input as `input_tokens - cached_input_tokens - cache_write_input_tokens` and total tokens as `input_tokens + output_tokens`. Never add cached input, cache writes, or reasoning output to `input_tokens`, `output_tokens`, or `total_tokens`. Each result records only its own invocation's usage, so results can be summed across runs. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Records with other schema markers should be migrated with `aop migrate-results` rather than converted by the consumer. To find every AOP run directory on a machine, read `$XDG_STATE_HOME/aop/state-roots` and look in each listed directory's `runs`.
+Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v3"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the six counters as stored and calculate uncached input as `input_tokens - cached_input_tokens - cache_write_input_tokens` and total tokens as `input_tokens + output_tokens`. Never add cached input, cache writes, or reasoning output to `input_tokens`, `output_tokens`, or `total_tokens`. Each result records only its own invocation's usage, so results can be summed across runs. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Records with other schema markers should be migrated with `aop migrate-results` rather than converted by the consumer. To read every AOP result on a machine, including runs whose state directory was deleted, read `$XDG_STATE_HOME/aop/results/*.json`, deduplicate by `run_id`, and take the project from `state_root`. `$XDG_STATE_HOME/aop/state-roots` lists the state directories that still exist, for consumers that also need run directories such as `events.jsonl`.
 
 Zcode uses the native terminal `usage` summary for the current turn. If the terminal summary is missing, it sums observed `model_request_completed` measurements for that turn, deduplicated by request and attempt, and marks accounting partial. Timeouts retain these measurements. Cumulative session projection totals are never substituted for per-turn usage. For the canonical Z.ai Coding Plan route, AOP calculates API-equivalent cost for each measured model request at its completion time, including compaction and lite-model calls. A cost is available only when all measured models have prices and the measurements reconcile with reported turn usage. Native credential provenance identifies the subscription route separately; provider-reported monetary cost remains unavailable.

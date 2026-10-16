@@ -34,7 +34,11 @@ from agent_orchestration_process.runner import (
     _provider_command,
     _provider_runtime,
 )
-from agent_orchestration_process.worktrees import AOPError, WorktreeManager
+from agent_orchestration_process.worktrees import (
+    AOPError,
+    WorktreeManager,
+    results_archive_dir,
+)
 
 
 SESSION_ID = "019f4da1-342f-7670-8aac-25999973b294"
@@ -618,6 +622,21 @@ class RunnerTest(AOPTestCase):
         assert help_exit.value.code == 0
         resume_help = capsys.readouterr().out
         assert "replace inherited input snapshots" in resume_help
+
+    def test_each_result_names_its_state_root_and_is_archived(
+        self,
+        repository: Path, fake_codex: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+
+        result = runner.run(task="archived", prompt="go")
+
+        assert result.state_root == os.fspath(manager.state_dir.resolve())
+        written = (manager.state_dir / "runs" / result.run_id / "result.json").read_text()
+        assert json.loads(written)["state_root"] == result.state_root
+        archived = results_archive_dir() / f"{result.run_id}.json"
+        assert archived.read_text() == written
 
     def test_run_persists_structured_codex_artifacts(
         self,

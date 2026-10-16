@@ -450,6 +450,7 @@ class UsageSemanticsTest(AOPTestCase):
             },
         )
         raw["usage_schema"] = TOKEN_USAGE_SCHEMA
+        raw["state_root"] = "/project/.aop"
         raw["accounting_status"] = "complete"
 
         result = RunResult.from_dict(raw)
@@ -465,6 +466,7 @@ class UsageSemanticsTest(AOPTestCase):
     def test_versioned_complete_result_preserves_measured_zero_usage(self) -> None:
         raw = _result_dict("codex", {})
         raw["usage_schema"] = TOKEN_USAGE_SCHEMA
+        raw["state_root"] = "/project/.aop"
         raw["accounting_status"] = "complete"
 
         result = RunResult.from_dict(raw)

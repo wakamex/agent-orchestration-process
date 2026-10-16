@@ -26,6 +26,7 @@ from .runner import (
     OpenCodeAdapter,
     RunStore,
 )
+from .worktrees import results_archive_dir
 
 ORIGINAL_SUFFIX = ".pre-v3.json"
 LEGACY_TOKEN_USAGE_SCHEMA = "aop-token-usage-v1"
@@ -44,7 +45,8 @@ _DERIVED_RESULT_FIELDS = (
 
 
 def migrate_runs(runs_dir: Path, *, dry_run: bool = False) -> Counter[str]:
-    """Bring every run record under runs_dir to the current formats."""
+    """Bring every run record under runs_dir to the current formats, and copy
+    each current result into the results archive."""
     counts: Counter[str] = Counter()
     for run_dir in sorted(path for path in runs_dir.iterdir() if path.is_dir()):
         for name, upgrade in (
@@ -52,28 +54,83 @@ def migrate_runs(runs_dir: Path, *, dry_run: bool = False) -> Counter[str]:
             ("result.json", _upgraded_result),
         ):
             path = run_dir / name
-            if not path.is_file():
-                continue
-            try:
-                raw = json.loads(path.read_text())
-                upgraded = upgrade(raw, run_dir)
-            except (OSError, ValueError, TypeError, KeyError) as error:
-                counts[f"{name}: error"] += 1
-                print(f"aop: could not migrate {path}: {error}", flush=True)
-                continue
-            if upgraded is None:
-                counts[f"{name}: current"] += 1
-                continue
-            value, outcome = upgraded
-            counts[f"{name}: {outcome}"] += 1
-            if not dry_run:
-                original = path.with_name(
-                    path.name.removesuffix(".json") + ORIGINAL_SUFFIX
-                )
-                if not original.exists():
-                    shutil.copy2(path, original)
-                RunStore.write_json(path, value)
+            value = _migrate_file(path, run_dir, upgrade, name, counts, dry_run)
+            if name == "result.json" and value is not None:
+                _archive(value, counts, dry_run)
     return counts
+
+
+def migrate_archive(*, dry_run: bool = False) -> Counter[str]:
+    """Bring archived results whose run directory is gone to the current format.
+
+    A result whose run directory still exists is migrated there and copied
+    here by migrate_runs, so the two stay identical.
+    """
+    counts: Counter[str] = Counter()
+    archive = results_archive_dir()
+    if not archive.is_dir():
+        return counts
+    for path in sorted(archive.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text())
+            run_dir = Path(raw["state_root"]) / "runs" / raw["run_id"]
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            counts["archive: error"] += 1
+            print(f"aop: could not read archived result {path}: {error}", flush=True)
+            continue
+        if (run_dir / "result.json").is_file():
+            continue
+        _migrate_file(path, run_dir, _upgraded_result, "archive", counts, dry_run)
+    return counts
+
+
+def _migrate_file(
+    path: Path,
+    run_dir: Path,
+    upgrade: Any,
+    label: str,
+    counts: Counter[str],
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    """Upgrade one record in place, keeping its original; return the current value."""
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+        upgraded = upgrade(raw, run_dir)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        counts[f"{label}: error"] += 1
+        print(f"aop: could not migrate {path}: {error}", flush=True)
+        return None
+    if upgraded is None:
+        counts[f"{label}: current"] += 1
+        return raw
+    value, outcome = upgraded
+    counts[f"{label}: {outcome}"] += 1
+    if not dry_run:
+        # Archived originals go in a subdirectory, so the archive's top level
+        # holds exactly one current record per run.
+        folder = path.parent / "originals" if label == "archive" else path.parent
+        original = folder / (path.name.removesuffix(".json") + ORIGINAL_SUFFIX)
+        if not original.exists():
+            folder.mkdir(exist_ok=True)
+            shutil.copy2(path, original)
+        RunStore.write_json(path, value)
+    return value
+
+
+def _archive(value: dict[str, Any], counts: Counter[str], dry_run: bool) -> None:
+    path = results_archive_dir() / f"{value['run_id']}.json"
+    try:
+        current = json.loads(path.read_text()) == value
+    except (OSError, ValueError):
+        current = False
+    if current:
+        counts["archive: current"] += 1
+        return
+    counts["archive: copied"] += 1
+    if not dry_run:
+        RunStore.archive_result(value)
 
 
 def _upgraded_request(
@@ -112,6 +169,29 @@ def _upgraded_request(
 
 
 def _upgraded_result(
+    raw: dict[str, Any], run_dir: Path
+) -> tuple[dict[str, Any], str] | None:
+    if raw.get("state_root"):
+        return _upgraded_result_fields(raw, run_dir)
+    # Results recorded before state_root take it from where they are stored.
+    raw = {**raw, "state_root": str(run_dir.parent.parent.resolve())}
+    upgraded = _upgraded_result_fields(raw, run_dir)
+    if upgraded is None:
+        result = RunResult.from_dict(raw)
+        result = replace(
+            result,
+            migration=_record(
+                raw.get("usage_schema"), ["state-root"], "result.json"
+            ),
+        )
+        return result.to_dict(), "state-root"
+    value, outcome = upgraded
+    value["migration"]["conversions"].append("state-root")
+    conversions, note, rest = outcome.partition(" (")
+    return value, f"{conversions}+state-root{note}{rest}"
+
+
+def _upgraded_result_fields(
     raw: dict[str, Any], run_dir: Path
 ) -> tuple[dict[str, Any], str] | None:
     try:

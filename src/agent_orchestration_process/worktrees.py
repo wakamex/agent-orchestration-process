@@ -24,21 +24,52 @@ def _user_runtime_dir() -> Path:
     return Path("/run/user") / str(os.getuid())
 
 
+def _user_state_dir() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(base) / "aop"
+
+
 def state_roots_file() -> Path:
     """List of every AOP state directory that has recorded a run."""
-    base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
-    return Path(base) / "aop" / "state-roots"
+    return _user_state_dir() / "state-roots"
+
+
+def results_archive_dir() -> Path:
+    """A copy of every run result, kept when its state directory is deleted."""
+    return _user_state_dir() / "results"
+
+
+@contextmanager
+def _locked_registry() -> Iterator[Path]:
+    path = state_roots_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with (path.parent / "state-roots.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield path
 
 
 def register_state_root(state_dir: Path) -> None:
-    path = state_roots_file()
     entry = os.fspath(state_dir.resolve())
-    if entry in _registered_entries(path):
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # One short O_APPEND write per entry, so concurrent runs cannot interleave.
-    with path.open("a") as stream:
-        stream.write(f"{entry}\n")
+    # The lock makes the check and the append one step for concurrent runs.
+    with _locked_registry() as path:
+        if entry in _registered_entries(path):
+            return
+        with path.open("a") as stream:
+            stream.write(f"{entry}\n")
+
+
+def compact_state_roots() -> tuple[int, int]:
+    """Drop duplicate and deleted roots; return the entries kept and removed."""
+    with _locked_registry() as path:
+        try:
+            lines = [line for line in path.read_text().splitlines() if line]
+        except FileNotFoundError:
+            return 0, 0
+        kept = [line for line in dict.fromkeys(lines) if Path(line).is_dir()]
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_text("".join(f"{line}\n" for line in kept))
+        os.replace(temporary, path)
+        return len(kept), len(lines) - len(kept)
 
 
 def registered_state_roots() -> list[Path]:

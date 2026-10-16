@@ -58,7 +58,13 @@ from .pricing import (
 )
 from .provider_versions import require_supported_agy
 from . import egress
-from .worktrees import AOPError, Worktree, WorktreeManager, register_state_root
+from .worktrees import (
+    AOPError,
+    Worktree,
+    WorktreeManager,
+    register_state_root,
+    results_archive_dir,
+)
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -314,6 +320,22 @@ class RunStore:
     @staticmethod
     def write_json(path: Path, value: dict[str, object]) -> None:
         _atomic_write(path, f"{json.dumps(value, indent=2, sort_keys=True)}\n")
+
+    def write_result(self, run_dir: Path, result: RunResult) -> RunResult:
+        """Write result.json and its copy in the user-level results archive."""
+        result = replace(result, state_root=os.fspath(self.root.parent.resolve()))
+        value = result.to_dict()
+        self.write_json(run_dir / "result.json", value)
+        self.archive_result(value)
+        return result
+
+    @classmethod
+    def archive_result(cls, value: dict[str, object]) -> Path:
+        archive = results_archive_dir()
+        archive.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = archive / f"{value['run_id']}.json"
+        cls.write_json(path, value)
+        return path
 
     def _load_json(self, run_id: str, name: str) -> dict[str, object]:
         path = self.path(run_id) / name
@@ -6258,8 +6280,7 @@ class AgentRunner:
         )
         if result.succeeded and request.artifacts:
             result = _archive_artifacts(result, request.artifacts, output_dir, run_dir)
-        self.store.write_json(run_dir / "result.json", result.to_dict())
-        return result
+        return self.store.write_result(run_dir, result)
 
     def _request(
         self,

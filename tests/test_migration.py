@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import model_prices
 from support import AOPTestCase, parametrize, raises
 
 from agent_orchestration_process.cli import main
-from agent_orchestration_process.migration import migrate_runs
+from agent_orchestration_process.migration import migrate_archive, migrate_runs
 from agent_orchestration_process.models import TOKEN_USAGE_SCHEMA
 from agent_orchestration_process.runner import RunStore
-from agent_orchestration_process.worktrees import AOPError, registered_state_roots
+from agent_orchestration_process.worktrees import (
+    AOPError,
+    compact_state_roots,
+    register_state_root,
+    registered_state_roots,
+    results_archive_dir,
+    state_roots_file,
+)
 
 RUN_ID = "f1e2d3c4-0000-4000-8000-000000000001"
 
@@ -112,7 +120,10 @@ class MigrationTest(AOPTestCase):
 
         counts = migrate_runs(runs)
 
-        assert counts == {"result.json: v2-schema+agy-step-usage (usage changed)": 1}
+        assert counts == {
+            "result.json: v2-schema+agy-step-usage+state-root (usage changed)": 1,
+            "archive: copied": 1,
+        }
         migrated = json.loads((run_dir / "result.json").read_text())
         assert migrated["usage_schema"] == TOKEN_USAGE_SCHEMA
         assert migrated["usage"] == usage(226_578, 220_102, 2_504, 426)
@@ -130,7 +141,11 @@ class MigrationTest(AOPTestCase):
             8,
         )
         assert migrated["migration"]["from_usage_schema"] == "aop-token-usage-v2"
-        assert migrated["migration"]["conversions"] == ["v2-schema", "agy-step-usage"]
+        assert migrated["migration"]["conversions"] == [
+            "v2-schema",
+            "agy-step-usage",
+            "state-root",
+        ]
         assert json.loads((run_dir / "result.pre-v3.json").read_text()) == original
         assert RunStore(runs).load_result(RUN_ID).usage.input_tokens == 226_578
 
@@ -163,12 +178,15 @@ class MigrationTest(AOPTestCase):
         )
         run_dir = write_run(runs, original)
 
-        assert migrate_runs(runs) == {"result.json: v2-schema": 1}
+        assert migrate_runs(runs) == {
+            "result.json: v2-schema+state-root": 1,
+            "archive: copied": 1,
+        }
 
         migrated = json.loads((run_dir / "result.json").read_text())
         assert migrated["usage"] == original["usage"]
         assert migrated["calculated_cost"] is None
-        assert migrated["migration"]["conversions"] == ["v2-schema"]
+        assert migrated["migration"]["conversions"] == ["v2-schema", "state-root"]
 
     @parametrize(
         ("provider", "expected"),
@@ -277,13 +295,16 @@ class MigrationTest(AOPTestCase):
         )
         before = (run_dir / "result.json").read_text()
 
-        assert migrate_runs(runs, dry_run=True) == {"result.json: v2-schema": 1}
+        assert migrate_runs(runs, dry_run=True) == {
+            "result.json: v2-schema+state-root": 1,
+            "archive: copied": 1,
+        }
         assert (run_dir / "result.json").read_text() == before
         assert not (run_dir / "result.pre-v3.json").exists()
 
         migrate_runs(runs)
         migrated = (run_dir / "result.json").read_text()
-        assert migrate_runs(runs) == {"result.json: current": 1}
+        assert migrate_runs(runs) == {"result.json: current": 1, "archive: current": 1}
         assert (run_dir / "result.json").read_text() == migrated
         assert (run_dir / "result.pre-v3.json").read_text() == before
 
@@ -418,7 +439,8 @@ class MigrationTest(AOPTestCase):
 
         assert counts == {
             "request.json: current": 1,
-            "result.json: cache-write-usage+claude-resume-cost (usage changed)": 1,
+            "result.json: cache-write-usage+claude-resume-cost+state-root (usage changed)": 1,
+            "archive: copied": 1,
         }
         migrated = json.loads((run_dir / "result.json").read_text())
         assert migrated["usage"] == usage(
@@ -430,3 +452,71 @@ class MigrationTest(AOPTestCase):
             cache_write_1h=200,
         )
         assert migrated["calculated_cost"]["amount_usd"] == 0.15
+
+
+class ResultsArchiveTest(AOPTestCase):
+    def test_backfill_names_the_state_root_and_archives_each_result(self, tmp_path):
+        state = tmp_path / "project" / ".aop"
+        run_dir = write_run(
+            state / "runs",
+            result(
+                "codex",
+                usage(10, 4, 2, 1),
+                usage_schema=TOKEN_USAGE_SCHEMA,
+                accounting_status="complete",
+                mode="agent",
+                effort=None,
+                time_to_first_event_seconds=None,
+                time_to_first_response_seconds=None,
+            ),
+        )
+
+        counts = migrate_runs(state / "runs")
+
+        assert counts == {"result.json: state-root": 1, "archive: copied": 1}
+        migrated = json.loads((run_dir / "result.json").read_text())
+        assert migrated["state_root"] == str(state.resolve())
+        assert migrated["migration"]["conversions"] == ["state-root"]
+        archived = results_archive_dir() / f"{RUN_ID}.json"
+        assert json.loads(archived.read_text()) == migrated
+        assert migrate_runs(state / "runs") == {
+            "result.json: current": 1,
+            "archive: current": 1,
+        }
+
+    def test_archived_results_outlive_their_state_root_and_still_migrate(self, tmp_path):
+        state = tmp_path / "deleted" / ".aop"
+        archive = results_archive_dir()
+        archive.mkdir(parents=True)
+        legacy = result(
+            "codex",
+            usage(10, 4, 2, 1),
+            usage_schema="aop-token-usage-v2",
+            state_root=str(state),
+        )
+        (archive / f"{RUN_ID}.json").write_text(json.dumps(legacy))
+
+        assert migrate_archive() == {"archive: v2-schema": 1}
+
+        migrated = json.loads((archive / f"{RUN_ID}.json").read_text())
+        assert migrated["usage_schema"] == TOKEN_USAGE_SCHEMA
+        assert migrated["state_root"] == str(state)
+        original = archive / "originals" / f"{RUN_ID}.pre-v3.json"
+        assert json.loads(original.read_text()) == legacy
+        assert sorted(path.name for path in archive.glob("*.json")) == [
+            f"{RUN_ID}.json"
+        ]
+        assert migrate_archive() == {"archive: current": 1}
+
+    def test_registry_records_each_root_once_and_compacts(self, tmp_path):
+        live = tmp_path / "live" / ".aop"
+        live.mkdir(parents=True)
+        gone = tmp_path / "gone" / ".aop"
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(lambda _: register_state_root(live), range(64)))
+        assert registered_state_roots() == [live.resolve()]
+
+        with state_roots_file().open("a") as stream:
+            stream.write(f"{live.resolve()}\n{gone}\n")
+        assert compact_state_roots() == (1, 2)
+        assert state_roots_file().read_text() == f"{live.resolve()}\n"

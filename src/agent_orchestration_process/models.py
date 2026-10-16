@@ -205,6 +205,9 @@ class RunResult:
     provider_error: str | None = None
     accounting_status: str = "complete"
     usage_schema: str = TOKEN_USAGE_SCHEMA
+    # The .aop state directory the run was recorded in, as listed in the
+    # state-roots registry. Set when the result is written.
+    state_root: str | None = None
     # How `aop migrate-results` converted an older record, if it did.
     migration: dict[str, Any] | None = None
 
@@ -285,6 +288,8 @@ class RunResult:
                 f"unsupported token usage schema {fields.get('usage_schema')!r}; "
                 f"{MIGRATE_HINT}"
             )
+        if not fields.get("state_root"):
+            raise ValueError(f"run result has no state_root; {MIGRATE_HINT}")
         usage = fields["usage"]
         fields["usage"] = None if usage is None else TokenUsage.from_dict(usage)
         fields["calculated_cost"] = CalculatedCost.from_dict(fields["calculated_cost"])

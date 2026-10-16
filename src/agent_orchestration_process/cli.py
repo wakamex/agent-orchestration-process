@@ -30,12 +30,15 @@ from .runner import (
     plan_inputs,
     provider_runtime_record,
 )
-from .migration import migrate_runs, migration_roots, print_counts
+from .migration import migrate_archive, migrate_runs, migration_roots, print_counts
 from .worktrees import (
     AOPError,
     WorktreeManager,
+    compact_state_roots,
     register_state_root,
     registered_state_roots,
+    results_archive_dir,
+    state_roots_file,
 )
 
 
@@ -748,6 +751,12 @@ def _migrate_results(runs_dirs: Sequence[Path], *, dry_run: bool) -> int:
         errors += sum(
             count for outcome, count in counts.items() if outcome.endswith("error")
         )
+    counts = migrate_archive(dry_run=dry_run)
+    print_counts(results_archive_dir(), counts)
+    errors += counts["archive: error"]
+    if not dry_run:
+        kept, removed = compact_state_roots()
+        print(f"{state_roots_file()}: kept {kept} roots, removed {removed}")
     return 1 if errors else 0
 
 

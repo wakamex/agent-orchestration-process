@@ -114,6 +114,10 @@ class RunRequest:
     # that leave their input are skipped instead of failing the run.
     input_excludes: tuple[str, ...] = ()
     skip_external_links: bool = False
+    # A host run in this directory itself instead of a task worktree, and
+    # whether the harness keeps its own home and state there.
+    workdir: str | None = None
+    native_state: bool = False
     # How `aop migrate-results` converted an older record, if it did.
     migration: dict[str, Any] | None = None
 

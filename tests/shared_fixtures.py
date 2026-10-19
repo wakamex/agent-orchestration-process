@@ -775,7 +775,7 @@ print(json.dumps({{
     "subtype": "success",
     "is_error": False,
     "session_id": session_id,
-    "result": f"answer:{{prompt}}",
+    "result": json.dumps({{"cwd": os.getcwd(), "home": os.environ["HOME"]}}) if prompt == "WHERE" else f"answer:{{prompt}}",
     "total_cost_usd": 0.0123,
     "usage": {{
         "input_tokens": 10,

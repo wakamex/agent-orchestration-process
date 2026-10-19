@@ -1286,7 +1286,8 @@ class ClaudeAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        _prepare_claude_environment(environment)
+        if not request.native_state:
+            _prepare_claude_environment(environment)
         if request.provider_base_url is not None:
             environment["ANTHROPIC_BASE_URL"] = request.provider_base_url
             environment["AOP_PROVIDER_BASE_URL_ENV"] = "ANTHROPIC_BASE_URL"
@@ -5445,6 +5446,10 @@ def _link_hermes_dependency_store(source_home: Path, root: Path) -> None:
             link.symlink_to(store.resolve())
 
 
+# Harnesses that can run with their own home and state under --native-state.
+NATIVE_STATE_PROVIDERS = frozenset({"claude"})
+
+
 _HERMES_SEED_DIRECTORIES = {
     "cron",
     "hooks",
@@ -5798,8 +5803,16 @@ class AgentRunner:
         prompt_parts: Sequence[PromptPart] | None = None,
         input_excludes: Sequence[str] = (),
         skip_external_links: bool = False,
+        workdir: str | os.PathLike[str] | None = None,
+        native_state: bool = False,
     ) -> RunResult:
         self._validate_mode(mode)
+        workdir = self._validated_workdir(workdir, profile)
+        if native_state:
+            if profile != "host":
+                raise AOPError("--native-state applies only to the host profile")
+            if self.adapter.provider not in NATIVE_STATE_PROVIDERS:
+                raise AOPError(f"{self.adapter.provider} does not support --native-state")
         prompt_parts = self._validated_prompt_parts(prompt, prompt_parts)
         input_excludes = tuple(input_excludes)
         # Every input problem fails here, before any state is created.
@@ -5857,9 +5870,13 @@ class AgentRunner:
             prompt_parts=prompt_parts,
             input_excludes=input_excludes,
             skip_external_links=skip_external_links,
+            workdir=workdir,
+            native_state=native_state,
         )
         worktree = (
-            self._create_sealed_workspace(request.run_id)
+            Worktree(task=task, path=Path(workdir), head="")
+            if workdir is not None
+            else self._create_sealed_workspace(request.run_id)
             if profile == "sealed"
             else self._get_or_create_worktree(task, base)
         )
@@ -5924,6 +5941,9 @@ class AgentRunner:
             if not path.is_relative_to(sealed_root) or not path.is_dir():
                 raise AOPError("sealed run workspace is missing or outside AOP state")
             worktree = Worktree(task=parent_request.run_id, path=path, head="")
+        elif parent_request.workdir is not None:
+            path = Path(self._validated_workdir(parent_request.workdir, "host"))
+            worktree = Worktree(task=parent_request.task, path=path, head="")
         else:
             worktree = self.manager.get(parent_request.task)
         if parent_request.profile == "sealed" and input_paths is None:
@@ -5992,6 +6012,8 @@ class AgentRunner:
             prompt_parts=prompt_parts,
             input_excludes=parent_request.input_excludes,
             skip_external_links=parent_request.skip_external_links,
+            workdir=parent_request.workdir,
+            native_state=parent_request.native_state,
         )
         return self._execute(
             request,
@@ -6128,6 +6150,12 @@ class AgentRunner:
             input_names=tuple(Path(item.mounted_path).name for item in declared_inputs),
         ).to_dict()
         effective_policy["workspace"]["controller_path"] = os.fspath(worktree.path)
+        if request.workdir is not None:
+            # The harness runs in the caller's directory, not a task worktree.
+            effective_policy["workspace"]["content"] = "caller-directory"
+            effective_policy["working_directory"] = request.workdir
+        if request.native_state:
+            effective_policy["state"] = "harness-native"
         if request.writable_workspace:
             effective_policy["workspace"]["writable"] = True
             effective_policy["writable_paths"] = [
@@ -6355,6 +6383,8 @@ class AgentRunner:
         prompt_parts: tuple[PromptPart, ...] | None = None,
         input_excludes: tuple[str, ...] = (),
         skip_external_links: bool = False,
+        workdir: str | None = None,
+        native_state: bool = False,
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -6385,7 +6415,22 @@ class AgentRunner:
             prompt_parts=prompt_parts,
             input_excludes=input_excludes,
             skip_external_links=skip_external_links,
+            workdir=workdir,
+            native_state=native_state,
         )
+
+    @staticmethod
+    def _validated_workdir(
+        workdir: str | os.PathLike[str] | None, profile: str
+    ) -> str | None:
+        if workdir is None:
+            return None
+        if profile != "host":
+            raise AOPError("--workdir applies only to the host profile")
+        path = Path(workdir).expanduser().resolve()
+        if not path.is_dir():
+            raise AOPError(f"--workdir is not a directory: {path}")
+        return os.fspath(path)
 
     def _state_roots(self) -> tuple[Path, ...]:
         """AOP's own state, which no input snapshot may copy into itself."""

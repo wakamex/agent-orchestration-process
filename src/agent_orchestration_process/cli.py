@@ -27,6 +27,7 @@ from .runner import (
     AgentRunner,
     RunStore,
     adapter_for,
+    NATIVE_STATE_PROVIDERS,
     plan_inputs,
     provider_runtime_record,
 )
@@ -201,6 +202,20 @@ def build_parser() -> argparse.ArgumentParser:
         "(claude only)",
     )
     run.add_argument(
+        "--workdir",
+        type=Path,
+        metavar="DIR",
+        help="with --profile host, run the harness in DIR itself, Git or not, "
+        "instead of a task worktree; TASK becomes optional and AOP keeps its "
+        "records in the current directory",
+    )
+    run.add_argument(
+        "--native-state",
+        action="store_true",
+        help="with --profile host, let the harness use its own home, settings, "
+        "memory and sessions instead of AOP's private copy (claude only)",
+    )
+    run.add_argument(
         "--writable-workspace",
         action="store_true",
         help="with --profile sealed, let the run write its private, initially empty "
@@ -328,7 +343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _report_policy(policy, json_output=args.json)
             return 0
 
-        if args.command == "run" and args.profile == "sealed":
+        if args.command == "run" and (args.profile == "sealed" or args.workdir):
             manager = WorktreeManager.standalone(Path.cwd())
         elif args.command in {"resume", "cleanup"}:
             manager = _manager_holding_run(args.run_id)
@@ -344,6 +359,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             request = RunStore(manager.state_dir / "runs").load_request(args.run_id)
             if request.profile == "sealed":
                 _cleanup_sealed(manager, request)
+            elif request.workdir is not None:
+                pass  # The caller's directory is not AOP's to remove.
             elif any(item.task == request.task for item in manager.list()):
                 manager.remove(request.task, force=True)
             print(request.task)
@@ -396,8 +413,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "run":
             task = args.task or str(uuid.uuid4())
-            if args.task is None and args.profile != "sealed":
-                raise AOPError("TASK is required unless --profile sealed is selected")
+            if args.task is None and args.profile != "sealed" and not args.workdir:
+                raise AOPError(
+                    "TASK is required unless --profile sealed or --workdir is selected"
+                )
             preview = resolve_policy(
                 args.profile,
                 provider=args.agent,
@@ -405,6 +424,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 input_names=tuple(Path(path).name for path in args.input_paths),
             ).to_dict()
             preview["provider"] = args.agent
+            workdir = AgentRunner._validated_workdir(args.workdir, args.profile)
+            if workdir is not None:
+                preview["workspace"]["content"] = "caller-directory"
+                preview["workspace"]["host_path"] = workdir
+                preview["working_directory"] = workdir
+            if args.native_state:
+                if args.profile != "host":
+                    raise AOPError("--native-state applies only to the host profile")
+                if args.agent not in NATIVE_STATE_PROVIDERS:
+                    raise AOPError(f"{args.agent} does not support --native-state")
+                preview["state"] = "harness-native"
             planned = plan_inputs(
                 args.input_paths,
                 excludes=args.input_excludes,
@@ -454,6 +484,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 input_paths=args.input_paths,
                 input_excludes=args.input_excludes,
                 skip_external_links=args.skip_external_links,
+                workdir=args.workdir,
+                native_state=args.native_state,
                 system_prompt=_read_system_prompt(args),
                 tools=args.tools,
                 provider_base_url=args.provider_base_url,

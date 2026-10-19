@@ -2627,6 +2627,57 @@ class ProvidersTest(AOPTestCase):
             "web_search",
         ]
 
+    def test_claude_runs_in_place_with_native_state_outside_git(
+        self,
+        tmp_path: Path,
+        fake_claude: Path,
+        monkeypatch: MonkeyPatch,
+        capsys: Capture,
+    ) -> None:
+        workdir = tmp_path / "debate"
+        workdir.mkdir()
+        records = tmp_path / "profile"
+        records.mkdir()
+        monkeypatch.chdir(records)
+        monkeypatch.setenv("AOP_CLAUDE_BIN", os.fspath(fake_claude))
+        base = ["--agent", "claude", "--profile", "host", "--workdir", os.fspath(workdir)]
+
+        assert main(["run", *base, "--native-state", "--prompt", "WHERE", "--json"]) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result["succeeded"], result["error"]
+        where = json.loads(result["final_message"])
+        assert where == {"cwd": os.fspath(workdir), "home": os.environ["HOME"]}
+        request = json.loads(
+            (records / ".aop" / "runs" / result["run_id"] / "request.json").read_text()
+        )
+        assert request["workdir"] == os.fspath(workdir)
+        assert request["native_state"] is True
+        assert request["effective_policy"]["workspace"]["content"] == "caller-directory"
+        assert request["effective_policy"]["state"] == "harness-native"
+        assert not (workdir / ".aop").exists()
+
+        assert main(["resume", result["run_id"], "--prompt", "WHERE", "--json"]) == 0
+        resumed = json.loads(capsys.readouterr().out)
+        assert resumed["session_id"] == result["session_id"]
+        assert json.loads(resumed["final_message"])["cwd"] == os.fspath(workdir)
+
+        # Without --native-state the harness keeps AOP's private home.
+        assert main(["run", *base, "--prompt", "WHERE", "--json"]) == 0
+        private = json.loads(json.loads(capsys.readouterr().out)["final_message"])
+        assert private["cwd"] == os.fspath(workdir)
+        assert private["home"] != os.environ["HOME"]
+
+        assert main(["cleanup", result["run_id"]]) == 0
+        capsys.readouterr()
+        assert (workdir).is_dir()
+        with raises(AOPError, match="applies only to the host profile"):
+            AgentRunner(
+                WorktreeManager.standalone(records), ClaudeAdapter(os.fspath(fake_claude))
+            ).run(task="t", prompt="x", profile="sealed", workdir=workdir)
+        assert main(["run", "--agent", "codex", "--profile", "host", "--native-state",
+                     "--workdir", os.fspath(workdir), "--prompt", "x", "--dry-run"]) == 2
+        assert "codex does not support --native-state" in capsys.readouterr().err
+
     def test_claude_thinking_display_is_recorded_and_kept_on_resume(
         self,
         repository: Path, fake_claude: Path, fake_codex: Path

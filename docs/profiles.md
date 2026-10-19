@@ -23,6 +23,17 @@ outer mount boundary decides whether filesystem writes can succeed.
 `host` skips `bwrap` and environment filtering. Use it only when the native host filesystem and
 environment are part of the intended boundary.
 
+Two options make a `host` run behave like the harness started by hand in a directory:
+
+- `--workdir DIR` runs the harness in `DIR` itself, which need not be a Git repository, instead of a task worktree. TASK becomes optional, and AOP keeps the run's records in the `.aop` of the directory `aop` runs from, so `DIR` stays untouched and `aop cleanup` never removes it.
+- `--native-state` lets the harness use its own home, settings, memory, skills, and session store instead of AOP's private copy, so its sessions appear where the harness normally keeps them. Claude supports it; other harnesses refuse it.
+
+`request.json` records both, and `aop resume` reuses them. The effective policy reports the workspace content as `caller-directory` and the state as `harness-native`. For example, from a chat's own records directory:
+
+```sh
+aop run --agent claude --profile host --workdir /code/debate --native-state --prompt-parts turn.json
+```
+
 ## Sealed runs
 
 `sealed` does not require a Git repository. It uses an opaque agent-visible identity, canonical

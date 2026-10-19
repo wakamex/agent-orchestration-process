@@ -91,6 +91,10 @@ sys.argv = sys.argv[1:]
 flag = '--prompt' if '--prompt' in sys.argv else '-q'
 i = sys.argv.index(flag) + 1
 sys.argv[i] = pathlib.Path(sys.argv[i]).read_bytes().decode('utf-8')
-sys.path.insert(0, str(pathlib.Path(sys.argv[0]).resolve().parent))
-runpy.run_path(sys.argv[0], run_name='__main__')
+if sys.argv[0] == '-c':
+    code = sys.argv.pop(1)
+    exec(compile(code, '<string>', 'exec'), {'__name__': '__main__'})
+else:
+    sys.path.insert(0, str(pathlib.Path(sys.argv[0]).resolve().parent))
+    runpy.run_path(sys.argv[0], run_name='__main__')
 """

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import fnmatch
 import hashlib
@@ -4036,9 +4035,22 @@ def _provider_command(
         environment["XDG_CACHE_HOME"] = os.fspath(cursor_cache)
     if request.provider == "hermes":
         isolated_home = Path(environment["HERMES_HOME"])
-        if isolated_home != provider_state / "hermes" / "home":
+        if isolated_home != provider_state / _HERMES_TASK_HOME:
             raise AOPError("Hermes runtime home is outside its task-private state")
         environment["HERMES_REAL_HOME"] = os.fspath(isolated_home)
+        tools = (provider_state / "hermes" / "tools").resolve()
+        if tools.is_dir():
+            # Hermes's managed Python, Node.js, ripgrep and ffmpeg.
+            _add_guest_parent_directories(wrapped, tools)
+            wrapped.extend(["--ro-bind", os.fspath(tools), os.fspath(tools)])
+        store = (provider_state / "hermes" / "installs").resolve()
+        if store.is_dir():
+            # Hermes takes a lock and leases its dependency generation at every
+            # start. A temporary overlay lets it, without writing the store.
+            _add_guest_parent_directories(wrapped, store)
+            wrapped.extend(
+                ["--overlay-src", os.fspath(store), "--tmp-overlay", os.fspath(store)]
+            )
     if request.provider == "opencode":
         source_config = _opencode_source_config(environment)
         source_data = _opencode_source_data(environment)
@@ -4143,12 +4155,21 @@ def _prompt_runtime_command(
     with resolved.open("rb") as handle:
         header = handle.readline(4096).decode(errors="replace").strip()
     if request.provider == "hermes" and request.profile == "host":
-        runtime = _hermes_wrapper_runtime(resolved, command[1:])
+        runtime = _hermes_runtime(resolved, command[1:])
         if runtime is not None:
             command = runtime[0]
             environment.pop("PYTHONPATH", None)
             environment.pop("PYTHONHOME", None)
     if "python" in Path(command[0]).name:
+        if "-c" in command:
+            # python [options] -c CODE ARGS runs the loader, which runs CODE.
+            split = command.index("-c")
+            return [
+                *command[:split],
+                "-c",
+                prompt_transport.PYTHON_ARGV_LOADER,
+                *command[split:],
+            ]
         return [command[0], "-c", prompt_transport.PYTHON_ARGV_LOADER, *command[1:]]
     if header.startswith("#!") and "python" in header:
         parts = header[2:].split()
@@ -4230,7 +4251,7 @@ def _provider_runtime(
         command[0] = os.fspath(resolved)
         return command, [(os.fspath(brew), os.fspath(brew))]
     if provider == "hermes":
-        hermes_runtime = _hermes_wrapper_runtime(resolved, command[1:])
+        hermes_runtime = _hermes_runtime(resolved, command[1:])
         if hermes_runtime is not None:
             return hermes_runtime
     if provider == "dsh":
@@ -4274,68 +4295,54 @@ def _provider_runtime(
     return command, mounts
 
 
-def _hermes_wrapper_runtime(
-    wrapper: Path, arguments: list[str]
-) -> tuple[list[str], list[tuple[str, str]]] | None:
-    try:
-        contents = wrapper.read_text()
-    except (OSError, UnicodeDecodeError):
-        return None
-    match = re.search(
-        r'^exec\s+"([^"\n]+/venv/bin/python)"\s+"([^"\n]+/hermes)"\s+"\$@"\s*$',
-        contents,
-        flags=re.MULTILINE,
-    )
-    if match is None:
-        return None
-    python = Path(match.group(1))
-    entrypoint = Path(match.group(2))
-    agent_root = entrypoint.parent.resolve()
-    venv = python.parent.parent
-    if not python.exists() or not entrypoint.is_file() or not venv.is_dir():
-        raise AOPError("Hermes launcher references an incomplete private runtime")
-    resolved_python = python.resolve()
-    python_runtime = resolved_python.parent.parent
-    if not python_runtime.is_dir():
-        raise AOPError("Hermes launcher Python runtime is unavailable")
-
-    finders = sorted(venv.glob("lib/python*/site-packages/__editable__*_finder.py"))
-    if len(finders) != 1:
-        raise AOPError("Hermes private runtime has no unique editable package map")
-    try:
-        tree = ast.parse(finders[0].read_text())
-    except (OSError, SyntaxError) as error:
-        raise AOPError(f"could not inspect Hermes private runtime: {error}") from error
-    mapping: dict[str, str] | None = None
-    for node in tree.body:
-        if not isinstance(node, ast.AnnAssign):
-            continue
-        if not isinstance(node.target, ast.Name) or node.target.id != "MAPPING":
-            continue
+def _hermes_launcher(path: Path) -> Path | None:
+    """The Hermes launcher behind `path`, through one-line `exec` wrappers."""
+    for _ in range(4):
         try:
-            value = ast.literal_eval(node.value)
-        except (ValueError, TypeError, SyntaxError) as error:
-            raise AOPError("Hermes editable package map is not literal") from error
-        if isinstance(value, dict) and all(
-            isinstance(key, str) and isinstance(path, str)
-            for key, path in value.items()
-        ):
-            mapping = value
-        break
-    if mapping is None:
-        raise AOPError("Hermes private runtime has no valid editable package map")
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            return None
+        if "--print-runtime-command" in text:
+            return path
+        match = re.fullmatch(r'#!/bin/(?:ba)?sh\n\s*exec\s+"?(/[^"\s]+)"?\s+"\$@"\s*', text)
+        if match is None:
+            return None
+        path = Path(match.group(1)).resolve()
+    return None
 
-    sources = {entrypoint, venv, python_runtime}
-    for raw_path in mapping.values():
-        candidate = Path(raw_path)
-        if not candidate.exists():
-            candidate = candidate.with_suffix(".py")
-        source = candidate.resolve()
-        if not source.is_relative_to(agent_root) or not source.exists():
-            raise AOPError("Hermes editable package map escapes its installation")
-        sources.add(source)
-    mounts = [(os.fspath(source), os.fspath(source)) for source in sorted(sources)]
-    return [os.fspath(python), os.fspath(entrypoint), *arguments], mounts
+
+def _hermes_runtime(
+    executable: Path, arguments: list[str]
+) -> tuple[list[str], list[tuple[str, str]]] | None:
+    """Hermes's own launch command and the read-only trees it runs from."""
+    launcher = _hermes_launcher(executable)
+    if launcher is None:
+        return None
+    try:
+        reported = subprocess.run(
+            [os.fspath(launcher), "--print-runtime-command", "--", *arguments],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        ).stdout
+        command = json.loads(reported)
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raise AOPError(f"could not resolve the Hermes launch command: {error}") from error
+    if not (
+        isinstance(command, list)
+        and len(command) >= 4
+        and all(isinstance(part, str) for part in command)
+        and "-c" in command
+    ):
+        raise AOPError("Hermes reported an unrecognized launch command")
+    code = command[command.index("-c") + 1]
+    root = re.search(r"sys\.path\.insert\(0, '([^']+)'\)", code)
+    python = Path(command[0])
+    if root is None or not python.is_absolute() or not Path(root.group(1)).is_dir():
+        raise AOPError("Hermes reported a launch command without its installation")
+    sources = {python.resolve().parent.parent, Path(root.group(1)).resolve()}
+    return command, [(os.fspath(path), os.fspath(path)) for path in sorted(sources)]
 
 
 def _guest_path(value: str, mappings: tuple[tuple[Path, Path], ...]) -> str:
@@ -4492,6 +4499,7 @@ def _filtered_environment(environment: dict[str, str]) -> dict[str, str]:
         "GOOGLE_API_KEY",
         "GOOGLE_GEMINI_BASE_URL",
         "GROK_STORAGE_MODE",
+        "HERMES_DISABLE_LAZY_INSTALLS",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -5432,6 +5440,25 @@ def _prepare_agy_dir(source: Path, destination: Path, *, sealed: bool = False) -
         raise AOPError(f"could not prepare isolated Agy profile: {error}") from error
 
 
+# A home at <root>/profiles/<name> gives Hermes <root> as its data root, where it
+# finds the dependency store it installed under <root>/installs.
+_HERMES_TASK_HOME = Path("hermes", "profiles", "aop")
+
+
+def _link_hermes_dependency_store(source_home: Path, root: Path) -> None:
+    """Point the task root's installs and tools at what the user's Hermes installed."""
+    source_root = (
+        source_home.parent.parent
+        if source_home.parent.name == "profiles"
+        else source_home
+    )
+    for name in ("installs", "tools"):
+        store = source_root / name
+        link = root / name
+        if store.is_dir() and not (link.is_symlink() or link.exists()):
+            link.symlink_to(store.resolve())
+
+
 _HERMES_SEED_DIRECTORIES = {
     "cron",
     "hooks",
@@ -5669,6 +5696,7 @@ def _reconcile_hermes_credentials(
     candidates = [source_home / "auth.json", shared_auth]
     # Recover a rotation even if AOP was interrupted before committing it.
     candidates.extend(state_dir.glob("provider-state/*/hermes/home/auth.json"))
+    candidates.extend(state_dir.glob(f"provider-state/*/{_HERMES_TASK_HOME}/auth.json"))
     stores = []
     for path in candidates:
         store = _load_hermes_auth(path)
@@ -5691,8 +5719,13 @@ def _hermes_runtime_environment(
             f"Hermes home does not exist: {source_home}; authenticate Hermes first"
         )
     provider_state = Path(environment["AOP_PROVIDER_STATE_DIR"])
-    task_home = provider_state / "hermes" / "home"
+    task_home = provider_state / _HERMES_TASK_HOME
+    previous_home = provider_state / "hermes" / "home"
+    if previous_home.is_dir() and not task_home.exists():
+        task_home.parent.mkdir(parents=True, exist_ok=True)
+        previous_home.rename(task_home)
     _prepare_hermes_home(source_home, task_home, sealed=_sealed(environment))
+    _link_hermes_dependency_store(source_home, task_home.parent.parent)
     configured_state = environment.get("AOP_HERMES_SHARED_STATE_DIR")
     state_dir = (
         Path(configured_state) if configured_state else provider_state.parent.parent
@@ -5700,6 +5733,11 @@ def _hermes_runtime_environment(
     lock_path = state_dir / "locks" / "hermes-credentials.lock"
     runtime_environment = environment.copy()
     runtime_environment["HERMES_HOME"] = os.fspath(task_home)
+    # The task root shares the user's dependency store, so Hermes would treat
+    # it as the installation's owner: finish pending updates, republish the
+    # checkout's launchers through the task root, and restart. A task installs
+    # and publishes nothing.
+    runtime_environment["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
 
     # Hermes has no separate auth path. Hold the lock for the complete turn so
     # two task-private homes cannot consume the same single-use refresh token.

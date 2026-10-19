@@ -498,41 +498,29 @@ class RunnerTest(AOPTestCase):
         )
         assert request["effective_policy"]["provider_runtime"]["sha256"]
 
-    def test_hermes_runtime_projects_only_editable_python_runtime(
+    def test_hermes_runtime_comes_from_its_launcher_through_a_wrapper(
         self,
         tmp_path: Path, monkeypatch: MonkeyPatch
     ) -> None:
         agent_root = tmp_path / "hermes-agent"
-        venv = agent_root / "venv"
-        site_packages = venv / "lib" / "python3.11" / "site-packages"
-        source_package = agent_root / "hermes_cli"
-        source_module = agent_root / "batch_runner.py"
-        interpreter_root = tmp_path / "python-runtime"
-        interpreter = interpreter_root / "bin" / "python3.11"
+        runtime_root = tmp_path / "tools" / "python-3.14"
+        python = runtime_root / "bin" / "python3"
+        launcher = agent_root / ".hermes" / "bin" / "hermes"
         wrapper = tmp_path / "bin" / "hermes"
-        for directory in (
-            site_packages,
-            source_package,
-            interpreter.parent,
-            wrapper.parent,
-        ):
-            directory.mkdir(parents=True, exist_ok=True)
-        interpreter.write_text("runtime\n")
-        python = venv / "bin" / "python"
-        python.parent.mkdir(parents=True)
-        python.symlink_to(interpreter)
-        entrypoint = agent_root / "hermes"
-        entrypoint.write_text("launcher\n")
-        source_module.write_text("module\n")
-        finder = site_packages / "__editable___hermes_agent_finder.py"
-        finder.write_text(
-            "from __future__ import annotations\n"
-            "MAPPING: dict[str, str] = {"
-            f"'hermes_cli': {os.fspath(source_package)!r}, "
-            f"'batch_runner': {os.fspath(source_module.with_suffix(''))!r}"
-            "}\n"
+        for directory in (python.parent, launcher.parent, wrapper.parent):
+            directory.mkdir(parents=True)
+        python.write_text("runtime\n")
+        code = f"import sys; sys.path.insert(0, '{agent_root}'); import hermes_cli"
+        # The shape of Hermes's published launcher: a machine flag that prints
+        # the command to run, as JSON, for the arguments after --.
+        launcher.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "if sys.argv[1:2] == ['--print-runtime-command']:\n"
+            f"    print(json.dumps([{os.fspath(python)!r}, '-I', '-c', {code!r}, *sys.argv[3:]]))\n"
         )
-        wrapper.write_text(f'#!/usr/bin/env bash\nexec "{python}" "{entrypoint}" "$@"\n')
+        launcher.chmod(0o755)
+        wrapper.write_text(f'#!/bin/sh\nexec {launcher} "$@"\n')
         wrapper.chmod(0o755)
         monkeypatch.setenv("PATH", f"{wrapper.parent}:{os.environ['PATH']}")
 
@@ -540,20 +528,10 @@ class RunnerTest(AOPTestCase):
             ["hermes", "chat", "-q", "test"], provider="hermes"
         )
 
-        assert command == [
-            os.fspath(python),
-            os.fspath(entrypoint),
-            "chat",
-            "-q",
-            "test",
-        ]
-        assert mounts == [
-            (os.fspath(source_module), os.fspath(source_module)),
-            (os.fspath(entrypoint), os.fspath(entrypoint)),
-            (os.fspath(source_package), os.fspath(source_package)),
-            (os.fspath(venv), os.fspath(venv)),
-            (os.fspath(interpreter_root), os.fspath(interpreter_root)),
-        ]
+        assert command == [os.fspath(python), "-I", "-c", code, "chat", "-q", "test"]
+        assert sorted(mounts) == sorted(
+            (os.fspath(path), os.fspath(path)) for path in (agent_root, runtime_root)
+        )
 
     def test_cli_reports_version_and_provider_neutral_resume_help(
         self,

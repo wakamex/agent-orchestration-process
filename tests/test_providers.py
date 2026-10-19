@@ -2129,7 +2129,7 @@ class ProvidersTest(AOPTestCase):
         assert resumed.final_message == "answer:second"
         assert not state_path.exists()
         isolated_home = (
-            manager.state_dir / "provider-state" / f"managed-{profile}" / "hermes" / "home"
+            manager.state_dir / "provider-state" / f"managed-{profile}" / "hermes" / "profiles" / "aop"
         )
         assert (isolated_home / "fake-state.json").is_file()
         assert (isolated_home / "auth.json").read_text() == "{}\n"
@@ -2187,12 +2187,12 @@ class ProvidersTest(AOPTestCase):
         manager = WorktreeManager.discover(repository)
 
         newer_private = (
-            manager.state_dir / "provider-state" / "previous-success" / "hermes" / "home"
+            manager.state_dir / "provider-state" / "previous-success" / "hermes" / "profiles" / "aop"
         )
         newer_private.mkdir(parents=True)
         (newer_private / "auth.json").write_text(json.dumps(auth(1, updated_minute=14)))
         later_but_stale = (
-            manager.state_dir / "provider-state" / "later-failure" / "hermes" / "home"
+            manager.state_dir / "provider-state" / "later-failure" / "hermes" / "profiles" / "aop"
         )
         later_but_stale.mkdir(parents=True)
         (later_but_stale / "auth.json").write_text(json.dumps(auth(0, updated_minute=34)))

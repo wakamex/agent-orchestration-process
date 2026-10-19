@@ -11,7 +11,7 @@ from shared_fixtures import api_cost
 
 from agent_orchestration_process import runner as runner_module
 from agent_orchestration_process.cli import main
-from agent_orchestration_process.models import PromptPart
+from agent_orchestration_process.models import PromptPart, RunRequest
 from agent_orchestration_process.pricing import TokenUsage
 from agent_orchestration_process.runner import (
     AgyAdapter,
@@ -26,10 +26,34 @@ from agent_orchestration_process.runner import (
     _HermesSession,
     OpenCodeAdapter,
 )
-from agent_orchestration_process.worktrees import AOPError, WorktreeManager
+from agent_orchestration_process.worktrees import AOPError, Worktree, WorktreeManager
 
 
 AT = "2026-09-01T12:00:00+00:00"
+
+
+def _host_request() -> RunRequest:
+    return RunRequest(
+        run_id="run",
+        provider="hermes",
+        mode="agent",
+        task="t",
+        prompt="p",
+        base="HEAD",
+        model=None,
+        inference_provider=None,
+        inference_route=None,
+        effort=None,
+        profile="host",
+        no_web=False,
+        effective_policy={},
+        timeout_seconds=None,
+        session_id=None,
+        parent_run_id=None,
+        artifacts=(),
+        inputs=(),
+        created_at="2026-10-19T00:00:00+00:00",
+    )
 
 
 class ProvidersTest(AOPTestCase):
@@ -1989,6 +2013,44 @@ class ProvidersTest(AOPTestCase):
         )
 
         assert error == "API call failed after 3 retries: empty stream"
+
+    def test_hermes_resume_keeps_a_new_answer_that_repeats_the_previous_one(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # The shape of a Hermes 0.22 export: integer message IDs.
+        def export(messages: list[dict]) -> str:
+            return json.dumps({"id": "session-1", "model": "gpt-4.1", "messages": messages})
+
+        first = [
+            {"id": 1, "role": "user", "content": "Reply with silver."},
+            {"id": 2, "role": "assistant", "content": "silver", "finish_reason": "stop"},
+        ]
+        second = [
+            *first,
+            {"id": 3, "role": "user", "content": "Repeat it."},
+            {"id": 4, "role": "assistant", "content": "silver", "finish_reason": "stop"},
+        ]
+        sessions = []
+        for messages in (first, second):
+            monkeypatch.setattr(
+                runner_module.subprocess,
+                "run",
+                lambda *args, output=export(messages), **kwargs: runner_module.subprocess.CompletedProcess(
+                    args, 0, stdout=output, stderr=""
+                ),
+            )
+            sessions.append(
+                HermesAdapter("hermes")._session(
+                    "session-1",
+                    _host_request(),
+                    Worktree(task="t", path=Path("/tmp"), head=""),
+                    {},
+                )
+            )
+
+        assert sessions[0].last_assistant_id == "2"
+        assert sessions[1].last_assistant_id == "4"
+        assert HermesAdapter._final_message(sessions[0], sessions[1]) == "silver"
 
     def test_hermes_does_not_return_a_stale_message_when_resume_adds_no_answer(self) -> None:
         previous = _HermesSession(

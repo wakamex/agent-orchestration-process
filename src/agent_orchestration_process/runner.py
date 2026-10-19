@@ -3501,9 +3501,14 @@ class HermesAdapter:
                 content = message.get("content")
                 if isinstance(content, str) and content.strip():
                     final_message = content.rstrip()
+                    # Hermes 0.22 numbers messages with integers, earlier
+                    # versions with strings.
                     message_id = message.get("id")
                     last_assistant_id = (
-                        message_id if isinstance(message_id, str) else None
+                        str(message_id)
+                        if isinstance(message_id, (str, int))
+                        and not isinstance(message_id, bool)
+                        else None
                     )
                     break
         return _HermesSession(

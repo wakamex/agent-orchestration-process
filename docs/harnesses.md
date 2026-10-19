@@ -55,7 +55,7 @@ retrieval. Enforcement differs because the harnesses expose different native con
 | Codex | Native web search and tool network access disabled; local shell and file tools remain available inside Codex's network-disabled workspace sandbox. Native routes use authentication-only state; selected external routes receive an AOP-generated provider-only config. |
 | Claude Code | Local file-tool allowlist; safe mode, Chrome, and MCP restrictions enabled. |
 | OpenCode | All model tool calls denied; external plugins disabled. |
-| Grok Build | Isolated profiles only; local file-tool allowlist; native web, subagent, shell, fetch, and MCP routes denied; authentication-only state. |
+| Grok Build | Isolated profiles only; local file-tool allowlist (`read_file`, `search_replace`, `grep`, `list_dir`, `todo_write`); native web, subagent, shell, fetch, and MCP routes denied, including the `search_tool` and `use_tool` MCP catalog tools; authentication-only state. Check with `AOP_TEST_GROK_BIN=/path/to/grok uv run --locked python -m unittest discover -s tests -p test_grok_native.py`, which needs no quota. |
 | Hermes | `file` and `todo` toolsets only; safe mode disables customizations and MCP. |
 | Cursor Agent | Unsupported; the run fails before dispatch. |
 | Devin CLI | Unsupported; the run fails before dispatch. |

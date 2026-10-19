@@ -2149,6 +2149,10 @@ class GrokAdapter:
                     "--no-subagents",
                     "--tools",
                     "read_file,search_replace,grep,list_dir,todo_write",
+                    # Grok 1.0.60 adds search_tool and use_tool, which find and
+                    # call MCP servers' tools, outside the --tools allowlist.
+                    "--disallowed-tools",
+                    "search_tool,use_tool",
                     "--deny",
                     "Bash",
                     "--deny",

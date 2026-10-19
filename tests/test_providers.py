@@ -100,7 +100,7 @@ class ProvidersTest(AOPTestCase):
         assert resumed.final_message == "answer:second"
 
         private_home = manager.state_dir / "provider-state" / "dsh-task" / "dsh" / "home"
-        assert private_home.joinpath(".credentials.yaml").is_file()
+        assert not private_home.joinpath(".credentials.yaml").exists()
         assert not private_home.joinpath("settings.yaml").exists()
         assert (
             private_home.joinpath("fake-sessions", first.session_id).read_text() == "second"
@@ -314,14 +314,11 @@ class ProvidersTest(AOPTestCase):
             manager.state_dir / "provider-state" / "dsh-anthropic" / "dsh" / "home"
         )
         settings = private_home.joinpath("settings.yaml").read_text()
-        credentials = private_home.joinpath(".credentials.yaml").read_text()
         assert "anthropic:" in settings
         assert "CUSTOM_ANTHROPIC_AUTH" in settings
         assert "openai:" not in settings
         assert "study:" not in settings
-        assert "CUSTOM_ANTHROPIC_AUTH" in credentials
-        assert "DEEPSEEK_API_KEY" not in credentials
-        assert "OPENAI_API_KEY" not in credentials
+        assert not private_home.joinpath(".credentials.yaml").exists()
         assert "environment-custom-value" not in json.dumps(result.to_dict())
         assert "OPENAI_API_KEY" not in result.command
         ref_index = result.command.index("CUSTOM_ANTHROPIC_AUTH")
@@ -359,31 +356,42 @@ class ProvidersTest(AOPTestCase):
         assert private_home.joinpath("settings.yaml").is_file()
         assert not private_home.joinpath(".credentials.yaml").exists()
 
-    def test_sealed_dsh_projects_only_its_managed_credential(
+    def test_sealed_dsh_passes_only_its_managed_credential_through_the_environment(
         self,
         tmp_path: Path, fake_dsh: Path
     ) -> None:
         manager = WorktreeManager.standalone(tmp_path / "controller")
         result = AgentRunner(manager, DeepSeekHarnessAdapter(os.fspath(fake_dsh))).run(
-            task="sealed-dsh", prompt="test", profile="sealed"
+            task="sealed-dsh", prompt="CHECK_MANAGED_KEY", profile="sealed"
         )
 
-        assert result.succeeded
-        private_credentials = (
-            manager.sealed_runtime_dir
-            / "provider-state"
-            / result.run_id
-            / "dsh"
-            / "home"
-            / ".credentials.yaml"
+        assert result.succeeded, result.error
+        private_home = (
+            manager.sealed_runtime_dir / "provider-state" / result.run_id / "dsh" / "home"
         )
-        content = private_credentials.read_text()
-        assert "DEEPSEEK_API_KEY:" in content
-        assert "managed test: value" in content
-        assert "OPENAI_API_KEY" not in content
-        assert "unrelated-secret" not in content
-        assert private_credentials.stat().st_mode & 0o777 == 0o600
+        # dsh's headless profile reads launch credentials, not its store.
+        assert not private_home.joinpath(".credentials.yaml").exists()
+        ref_index = result.command.index("DEEPSEEK_API_KEY")
+        assert result.command[ref_index - 1 : ref_index + 2] == [
+            "--setenv",
+            "DEEPSEEK_API_KEY",
+            "<redacted>",
+        ]
+        assert "OPENAI_API_KEY" not in result.command
         assert "managed test: value" not in json.dumps(result.to_dict())
+
+    def test_dsh_rejects_a_credentials_file_older_than_version_1(
+        self,
+        tmp_path: Path, fake_dsh: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        source = Path(os.environ["AOP_DSH_SOURCE_HOME"])
+        source.joinpath(".credentials.yaml").write_text("DEEPSEEK_API_KEY: flat\n")
+        manager = WorktreeManager.standalone(tmp_path / "controller")
+
+        with raises(AOPError, match="not a version 1 dsh credentials file"):
+            AgentRunner(manager, DeepSeekHarnessAdapter(os.fspath(fake_dsh))).run(
+                task="flat-dsh", prompt="test", profile="sealed"
+            )
 
     def test_sealed_dsh_preserves_and_redacts_native_environment_override(
         self,

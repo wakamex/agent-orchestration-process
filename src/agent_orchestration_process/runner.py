@@ -4723,12 +4723,15 @@ def _prepare_dsh_environment(request: RunRequest, environment: dict[str, str]) -
         )
 
     if credential_ref is not None:
-        credentials = _read_yaml_mapping(
-            source_home / ".credentials.yaml", "dsh managed credentials"
-        )
-        _project_dsh_credential(
-            credentials, credential_ref, dsh_home / ".credentials.yaml"
-        )
+        # dsh's headless profile reads credentials from its launch environment
+        # and leaves its managed store off, so a key the user keeps in that
+        # store goes into the run's environment. An exported key wins.
+        if not environment.get(credential_ref):
+            managed = _dsh_managed_credential(
+                source_home / ".credentials.yaml", credential_ref
+            )
+            if managed is not None:
+                environment[credential_ref] = managed
         environment["AOP_DSH_CREDENTIAL_REF"] = credential_ref
         environment["AOP_DSH_ALLOWED_AUTH_ENV"] = credential_ref
     else:
@@ -4773,6 +4776,11 @@ def _prepare_dsh_environment(request: RunRequest, environment: dict[str, str]) -
             "- id: plugin-package-inventory-deepseek",
             "  config:",
             "    enabled: false",
+            # dsh 0.2 uploads each session's log with every DeepSeek request
+            # by default. AOP sends only the request itself.
+            "- id: session-log-deepseek",
+            "  config:",
+            "    enabled: false",
             "- id: session-title-llm",
             "  disabled: true",
             "- id: headless-runner",
@@ -4787,6 +4795,9 @@ def _prepare_dsh_environment(request: RunRequest, environment: dict[str, str]) -
                     "tool-web",
                     "web-fetch-http",
                     "web-search-deepseek",
+                    # dsh 0.2's search and fetch providers wait for the web
+                    # service and warn on every run when it is disabled.
+                    "web-deepseek-api",
                     "web",
                     "tool-bash",
                     "tool-pwsh",
@@ -4865,23 +4876,25 @@ def _project_dsh_provider_settings(
     return projected, credential_ref
 
 
-def _project_dsh_credential(
-    credentials: dict[str, object], credential_ref: str, destination: Path
-) -> None:
-    credential = credentials.get(credential_ref)
+def _dsh_managed_credential(path: Path, credential_ref: str) -> str | None:
+    """One reference from dsh's managed store, `version: 1` with `refs`."""
+    document = _read_yaml_mapping(path, "dsh managed credentials")
+    if not document:
+        return None
+    if document.get("version") != 1:
+        raise AOPError(
+            f"{path} is not a version 1 dsh credentials file; run dsh once to "
+            "convert it"
+        )
+    refs = document.get("refs") or {}
+    if not isinstance(refs, dict):
+        raise AOPError("dsh managed credentials refs must be a mapping")
+    credential = refs.get(credential_ref)
     if credential is None:
-        return
+        return None
     if not isinstance(credential, str) or not credential:
         raise AOPError(f"dsh managed {credential_ref} must be a nonempty string")
-    _atomic_write_private(
-        destination,
-        yaml.safe_dump(
-            {credential_ref: credential},
-            allow_unicode=True,
-            default_flow_style=False,
-            sort_keys=False,
-        ),
-    )
+    return credential
 
 
 def _codex_source_home(environment: dict[str, str]) -> Path | None:

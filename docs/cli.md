@@ -90,7 +90,7 @@ aop run study-arm --agent codex --profile sealed --no-web \
 
 A harness or Hermes provider without an entry reaches only the URLs the run names. The network boundary cannot stop retrieval that a provider performs on its own servers through an allowed inference endpoint, such as a server-side search tool, and a shell holding the run's credentials could call such a tool directly. The harness-level restrictions above therefore still apply, and harnesses whose web search runs server-side also lose their shell tools:
 
-- DeepSeek Harness: AOP's patch disables the `web`, `web-search-deepseek`, `web-fetch-http`, `tool-web`, `tool-bash`, `tool-pwsh`, `tool-jobs`, and `tool-workflow` plugins, because its `web_search` is a server-side tool call through the DeepSeek API host. File, subagent, skill, todo, and goal tools remain.
+- DeepSeek Harness: AOP's patch disables the `web`, `web-search-deepseek`, `web-deepseek-api`, `web-fetch-http`, `tool-web`, `tool-bash`, `tool-pwsh`, `tool-jobs`, and `tool-workflow` plugins, because its `web_search` is a server-side tool call through the DeepSeek API host. File, subagent, skill, todo, and goal tools remain.
 - Devin: AOP adds the permission deny rules `exec` and `web_search` to the run's private Devin config, because `web_search` runs on Devin's API server. Its `webfetch` tool runs on the client, where the proxy refuses it. When a deny rule refuses a call, Devin ends the turn without a final message, so a run whose model insists on searching fails instead of continuing offline.
 
 Both require a sandboxed profile, because their remaining tools rely on the network namespace. The `host` profile has no sandbox and keeps only the harness-level restrictions.

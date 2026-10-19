@@ -1467,10 +1467,13 @@ if prompt == "FAIL":
 def fake_dsh(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     source_home = tmp_path / "dsh-home"
     source_home.mkdir()
+    # dsh 0.1.5-rc.3 and later read only this version 1 layout.
     source_home.joinpath(".credentials.yaml").write_text(
-        'DEEPSEEK_API_KEY: "managed test: value"\n'
-        "CUSTOM_ANTHROPIC_AUTH: managed-anthropic-value\n"
-        "OPENAI_API_KEY: unrelated-secret\n"
+        "version: 1\n"
+        "refs:\n"
+        '  DEEPSEEK_API_KEY: "managed test: value"\n'
+        "  CUSTOM_ANTHROPIC_AUTH: managed-anthropic-value\n"
+        "  OPENAI_API_KEY: unrelated-secret\n"
     )
     source_home.joinpath("settings.yaml").write_text(
         "study: must-not-copy\n"
@@ -1505,10 +1508,13 @@ if os.environ.get("DSH_TELEMETRY_DISABLED") != "1":
     print("dsh telemetry was not disabled", file=sys.stderr)
     raise SystemExit(2)
 home = pathlib.Path(os.environ["DSH_HOME"])
+if home.joinpath(".credentials.yaml").exists():
+    print("dsh headless reads launch credentials; a managed store was seeded", file=sys.stderr)
+    raise SystemExit(2)
 if (
     "provider: \\\"amazon-bedrock\\\"" not in contents
-    and not home.joinpath(".credentials.yaml").is_file()
     and not os.environ.get("DEEPSEEK_API_KEY")
+    and not os.environ.get("CUSTOM_ANTHROPIC_AUTH")
 ):
     print("dsh credentials were not seeded", file=sys.stderr)
     raise SystemExit(2)
@@ -1529,21 +1535,25 @@ if prompt == "CHECK_ENV_OVERRIDE" and os.environ.get("DEEPSEEK_API_KEY") != "env
     raise SystemExit(2)
 if prompt == "CHECK_PROVIDER":
     settings = home.joinpath("settings.yaml").read_text()
-    credentials = home.joinpath(".credentials.yaml").read_text()
     if "provider: \\\"anthropic\\\"" not in contents or "model: \\\"claude-sonnet-4-5\\\"" not in contents:
         print("dsh provider selection was not patched", file=sys.stderr)
         raise SystemExit(2)
     if "CUSTOM_ANTHROPIC_AUTH" not in settings or "openai:" in settings:
         print("dsh provider settings were not projected", file=sys.stderr)
         raise SystemExit(2)
-    if "CUSTOM_ANTHROPIC_AUTH" not in credentials or "DEEPSEEK_API_KEY" in credentials:
-        print("dsh provider credential was not projected", file=sys.stderr)
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        print("dsh received an unselected provider credential", file=sys.stderr)
         raise SystemExit(2)
     if os.environ.get("CUSTOM_ANTHROPIC_AUTH") != "environment-custom-value":
         print("dsh custom environment credential was not preserved", file=sys.stderr)
         raise SystemExit(2)
-if prompt == "CHECK_NATIVE_PROVIDER" and home.joinpath(".credentials.yaml").exists():
+if prompt == "CHECK_NATIVE_PROVIDER" and (
+    os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("CUSTOM_ANTHROPIC_AUTH")
+):
     print("dsh provider-native auth received a managed credential", file=sys.stderr)
+    raise SystemExit(2)
+if prompt == "CHECK_MANAGED_KEY" and os.environ.get("DEEPSEEK_API_KEY") != "managed test: value":
+    print("dsh did not receive the managed credential", file=sys.stderr)
     raise SystemExit(2)
 session.write_text(prompt)
 if "anthropic.claude-sonnet-4-5-v1:0" in contents:

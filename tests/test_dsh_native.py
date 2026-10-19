@@ -16,6 +16,14 @@ from agent_orchestration_process.runner import AgentRunner, DeepSeekHarnessAdapt
 from agent_orchestration_process.worktrees import WorktreeManager
 
 
+def _texts(message):
+    """The text of one Messages API message, a string or a list of blocks."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return [content]
+    return [part.get("text", "") for part in content or [] if isinstance(part, dict)]
+
+
 class DshNativeTest(AOPTestCase):
     @parametrize("exercise_tools", [False, True])
     @parametrize("profile", ["edit", "review", "sealed", "host"])
@@ -33,25 +41,25 @@ class DshNativeTest(AOPTestCase):
                 pass
 
             def do_POST(self):
+                # dsh 0.2 calls DeepSeek's Anthropic-compatible Messages API.
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 calls.append(payload)
-                assert self.path == "/chat/completions"
+                assert self.path == "/v1/messages"
                 assert payload["model"] == "deepseek-flash"
-                assert self.headers.get("Authorization") == "Bearer local-test-key"
+                assert payload.get("stream") is True
+                assert self.headers.get("x-api-key") == "local-test-key"
                 assert "dsh_plugin_packages" not in payload
                 assert "dsh_session_log" not in payload
-                delta = {"role": "assistant", "content": "native answer"}
-                finish = "stop"
+                block = {"type": "text", "text": ""}
+                delta = {"type": "text_delta", "text": "native answer"}
+                stop = "end_turn"
                 if exercise_tools and len(calls) == 1:
-                    definitions = {
-                        tool["function"]["name"]: tool["function"]
-                        for tool in payload["tools"]
-                    }
+                    definitions = {tool["name"]: tool for tool in payload["tools"]}
                     assert "bash" in definitions
                     prompt = "\n".join(
-                        m["content"]
+                        text
                         for m in payload["messages"]
-                        if isinstance(m.get("content"), str)
+                        for text in _texts(m)
                     )
                     output_dir = re.search(
                         r"Write the following deliverables beneath (.+):", prompt
@@ -69,52 +77,46 @@ class DshNativeTest(AOPTestCase):
                         "description": "Check workspace access and write proof",
                     }
                     assert (
-                        set(definitions["bash"]["parameters"].get("required", []))
+                        set(definitions["bash"]["input_schema"].get("required", []))
                         <= arguments.keys()
                     )
-                    delta = {
-                        "role": "assistant",
-                        "tool_calls": [
-                            {
-                                "index": 0,
-                                "id": "native-tool",
-                                "type": "function",
-                                "function": {
-                                    "name": "bash",
-                                    "arguments": json.dumps(arguments),
-                                },
-                            }
-                        ],
-                    }
-                    finish = "tool_calls"
+                    block = {"type": "tool_use", "id": "native-tool", "name": "bash", "input": {}}
+                    delta = {"type": "input_json_delta", "partial_json": json.dumps(arguments)}
+                    stop = "tool_use"
+                events = [
+                    ("message_start", {
+                        "type": "message_start",
+                        "message": {
+                            "id": f"msg-{len(calls)}",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": "deepseek-flash",
+                            "content": [],
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": {
+                                "input_tokens": 10,
+                                "cache_read_input_tokens": 2,
+                                "cache_creation_input_tokens": 0,
+                                "output_tokens": 0,
+                            },
+                        },
+                    }),
+                    ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": block}),
+                    ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": delta}),
+                    ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                    ("message_delta", {
+                        "type": "message_delta",
+                        "delta": {"stop_reason": stop, "stop_sequence": None},
+                        "usage": {"output_tokens": 4},
+                    }),
+                    ("message_stop", {"type": "message_stop"}),
+                ]
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                for delta, finish, usage in [
-                    (delta, None, None),
-                    (
-                        {},
-                        finish,
-                        {
-                            "prompt_tokens": 12,
-                            "prompt_cache_hit_tokens": 2,
-                            "prompt_cache_miss_tokens": 10,
-                            "completion_tokens": 4,
-                            "total_tokens": 16,
-                        },
-                    ),
-                ]:
-                    event = {
-                        "id": f"chat-{len(calls)}",
-                        "object": "chat.completion.chunk",
-                        "created": 1,
-                        "model": "deepseek-flash",
-                        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-                    }
-                    if usage:
-                        event["usage"] = usage
-                    self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
-                self.wfile.write(b"data: [DONE]\n\n")
+                for name, event in events:
+                    self.wfile.write(f"event: {name}\ndata: {json.dumps(event)}\n\n".encode())
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
@@ -144,14 +146,7 @@ class DshNativeTest(AOPTestCase):
 
         def contains_prompt(payload, prompt):
             return any(
-                prompt
-                in (
-                    message["content"]
-                    if isinstance(message.get("content"), str)
-                    else "".join(
-                        part.get("text", "") for part in message.get("content", [])
-                    )
-                )
+                prompt in "".join(_texts(message))
                 for message in payload["messages"]
                 if message.get("role") == "user"
             )
@@ -193,8 +188,11 @@ class DshNativeTest(AOPTestCase):
                         runner.manager.get("native-dsh").path / "README.md"
                     ).read_text() == expected
                 assert any(
-                    m.get("role") == "tool" and m.get("tool_call_id") == "native-tool"
+                    part.get("type") == "tool_result"
+                    and part.get("tool_use_id") == "native-tool"
                     for m in calls[1]["messages"]
+                    if m.get("role") == "user" and isinstance(m.get("content"), list)
+                    for part in m["content"]
                 )
             resumed = runner.resume(run_id=first.run_id, prompt=resume_prompt)
             assert resumed.succeeded, resumed.error
@@ -208,3 +206,74 @@ class DshNativeTest(AOPTestCase):
             server.shutdown()
             server.server_close()
             worker.join()
+
+
+class DshNativeNoWebTest(AOPTestCase):
+    def test_no_web_dsh_offers_no_web_shell_or_code_tools(self, tmp_path, monkeypatch):
+        binary = os.environ.get("AOP_TEST_DSH_BIN")
+        if not binary:
+            skip("set AOP_TEST_DSH_BIN to test installed dsh")
+        offered = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                offered.append(sorted(tool["name"] for tool in payload.get("tools", [])))
+                usage = {"input_tokens": 1, "output_tokens": 0}
+                events = [
+                    {"type": "message_start", "message": {
+                        "id": "msg", "type": "message", "role": "assistant",
+                        "model": "deepseek-flash", "content": [], "stop_reason": None,
+                        "stop_sequence": None, "usage": usage}},
+                    {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "done"}},
+                    {"type": "content_block_stop", "index": 0},
+                    {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                     "usage": {"output_tokens": 1}},
+                    {"type": "message_stop"},
+                ]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for event in events:
+                    self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        source = tmp_path / "dsh-source"
+        source.mkdir()
+        (source / "settings.yaml").write_text(yaml.safe_dump({"llm-deepseek": {
+            "apiKeyEnv": "AOP_NATIVE_TEST_KEY",
+            "baseURL": f"http://127.0.0.1:{server.server_port}",
+        }}))
+        monkeypatch.setenv("AOP_DSH_SOURCE_HOME", str(source))
+        monkeypatch.setenv("AOP_NATIVE_TEST_KEY", "local-test-key")
+        monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+        manager = WorktreeManager.standalone(tmp_path / "controller")
+        try:
+            # The loopback model server is forwarded into the network sandbox.
+            result = AgentRunner(manager, DeepSeekHarnessAdapter(binary)).run(
+                task="no-web",
+                prompt="answer",
+                profile="sealed",
+                no_web=True,
+                allowed_urls=[f"http://127.0.0.1:{server.server_port}"],
+                timeout_seconds=30,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
+
+        assert result.succeeded, result.error
+        stderr = (manager.state_dir / "runs" / result.run_id / "stderr.log").read_text()
+        assert "did not activate" not in stderr, stderr
+        tools = set(offered[0])
+        assert tools, "dsh offered no tools at all"
+        forbidden = {"web_search", "web_fetch", "bash", "pwsh", "workflow", "jobs"}
+        assert not tools & forbidden, sorted(tools & forbidden)
+        assert not any("web" in name or "workflow" in name or "ptc" in name for name in tools), sorted(tools)

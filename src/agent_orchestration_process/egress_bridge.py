@@ -5,11 +5,10 @@ Usage: egress_bridge.py SOCKET PROXY_PORT [HOST:PORT ...] -- COMMAND...
 Inside the namespace, 127.0.0.1:PROXY_PORT reaches the controller's CONNECT
 proxy through SOCKET, and each HOST:PORT (a loopback endpoint) is forwarded to
 the same endpoint outside. The controller decides what is allowed, so this
-script holds no policy. It runs as the sandbox's PID 1: it forwards signals to
-the command, reaps orphans, and exits with the command's status.
+script holds no policy. It forwards stop signals to the command and exits
+with the command's status; bubblewrap's own process 1 collects orphans.
 """
 
-import os
 import signal
 import socket
 import subprocess
@@ -88,12 +87,8 @@ def main(argv):
     child = subprocess.Popen(command)
     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(number, lambda signum, frame: child.send_signal(signum))
-    # As PID 1, reap every orphan until the command itself exits.
-    while True:
-        pid, status = os.wait()
-        if pid == child.pid:
-            code = os.waitstatus_to_exitcode(status)
-            return code if code >= 0 else 128 - code
+    code = child.wait()
+    return code if code >= 0 else 128 - code
 
 
 if __name__ == "__main__":

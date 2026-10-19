@@ -10,7 +10,6 @@ import os
 import queue
 import re
 import shutil
-import signal
 import stat
 import subprocess
 import tempfile
@@ -56,7 +55,7 @@ from .pricing import (
     sum_usage,
 )
 from .provider_versions import require_supported_agy
-from . import egress
+from . import egress, sandbox_launch
 from .worktrees import (
     AOPError,
     Worktree,
@@ -533,7 +532,7 @@ class CodexAdapter:
         )
 
         try:
-            process = subprocess.Popen(
+            process = sandbox_launch.popen(
                 command,
                 cwd=worktree.path,
                 env=_launch_environment(command, environment),
@@ -568,6 +567,8 @@ class CodexAdapter:
             except KeyboardInterrupt:
                 self._stop_process(process)
                 raise
+            finally:
+                sandbox_launch.close(process)
 
         parsed = self._parse_events(capture.stdout)
         final_message = parsed["final_message"]
@@ -1119,21 +1120,7 @@ class CodexAdapter:
 
     @classmethod
     def _stop_process(cls, process: subprocess.Popen[str]) -> None:
-        cls._signal_process_group(process, signal.SIGTERM)
-        try:
-            process.wait(timeout=cls._SHUTDOWN_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            cls._signal_process_group(process, signal.SIGKILL)
-            process.wait()
-
-    @staticmethod
-    def _signal_process_group(
-        process: subprocess.Popen[str], signal_number: signal.Signals
-    ) -> None:
-        try:
-            os.killpg(process.pid, signal_number)
-        except ProcessLookupError:
-            pass
+        sandbox_launch.stop(process, cls._SHUTDOWN_GRACE_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -1166,7 +1153,7 @@ def _capture_process(
     first_response_seconds = None
     try:
         with prompt_transport.prompt_stream(prompt) as input_stream:
-            process = subprocess.Popen(
+            process = sandbox_launch.popen(
                 command,
                 cwd=cwd,
                 env=_launch_environment(command, environment),
@@ -1226,21 +1213,12 @@ def _capture_process(
         process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
-        CodexAdapter._signal_process_group(process, signal.SIGTERM)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            CodexAdapter._signal_process_group(process, signal.SIGKILL)
-            process.wait()
+        sandbox_launch.stop(process, CodexAdapter._SHUTDOWN_GRACE_SECONDS)
     except KeyboardInterrupt:
-        CodexAdapter._signal_process_group(process, signal.SIGTERM)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            CodexAdapter._signal_process_group(process, signal.SIGKILL)
-            process.wait()
+        sandbox_launch.stop(process, CodexAdapter._SHUTDOWN_GRACE_SECONDS)
         raise
     finally:
+        sandbox_launch.close(process)
         stdout_reader.join(timeout=5)
         stderr_reader.join(timeout=5)
         _close_finished_streams(
@@ -4200,7 +4178,6 @@ def _isolated_root_command(bwrap: str) -> list[str]:
         "--cap-drop",
         "ALL",
         "--unshare-pid",
-        "--as-pid-1",
         "--unshare-ipc",
         "--unshare-uts",
         "--proc",

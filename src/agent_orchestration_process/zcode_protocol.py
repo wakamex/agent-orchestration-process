@@ -6,12 +6,12 @@ import json
 import os
 from pathlib import Path
 import selectors
-import signal
 import subprocess
 import time
 import uuid
 from typing import Callable
 
+from . import sandbox_launch
 from .worktrees import AOPError
 
 
@@ -56,7 +56,7 @@ def run(
     events = deque()
     counter = 0
     with (
-        subprocess.Popen(
+        sandbox_launch.popen(
             command,
             cwd=cwd,
             env=environment,
@@ -276,12 +276,8 @@ def run(
         finally:
             natural_exit = process.poll()
             if natural_exit is None:
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
+                sandbox_launch.stop(process, 2)
+            sandbox_launch.close(process)
             capture.exit_code = (
                 natural_exit
                 if natural_exit is not None

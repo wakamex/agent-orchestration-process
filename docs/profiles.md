@@ -6,6 +6,8 @@ repository view, read-only input snapshots, output, provider runtime, private st
 required operating-system runtime paths, and fresh `/proc`, `/dev`, and `/tmp`. They do not inherit
 the host root filesystem.
 
+Inside the sandbox, bubblewrap's own reaper is process 1 and collects orphaned processes, and the harness runs as process 2. AOP passes bubblewrap's options through a private file descriptor, so process 1's command line, which every process in the sandbox can read, names no mount or host path. When `--timeout` expires, AOP sends SIGTERM to the harness itself, so it can save its session and flush its output, and stops the sandbox after a five-second grace period.
+
 | Profile | Primary repository | Task workspace | Other host paths | Instructions | Writable guest paths |
 | --- | --- | --- | --- | --- | --- |
 | `edit` | Read-only at `/repository` | Read-write at `/workspace` | Runtime allowlist only | Project and user | `/workspace`, `/output`, `/scratch`, `/state`, `/cache`, `/tmp` |

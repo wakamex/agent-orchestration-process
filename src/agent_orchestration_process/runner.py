@@ -197,6 +197,7 @@ def _build_run_result(
     provider_duration_seconds: float | None = None,
     provider_status: str | None = None,
     provider_error: str | None = None,
+    refusal: dict[str, Any] | None = None,
 ) -> RunResult:
     return RunResult(
         run_id=request.run_id,
@@ -230,6 +231,7 @@ def _build_run_result(
         provider_duration_seconds=provider_duration_seconds,
         provider_status=provider_status,
         provider_error=provider_error,
+        refusal=refusal,
     )
 
 
@@ -1373,6 +1375,7 @@ class ClaudeAdapter:
             final_message=final_message,
             accounting=accounting,
             billing=billing,
+            refusal=parsed["refusal"],
         )
 
     def _billing_provenance(
@@ -1550,6 +1553,39 @@ class ClaudeAdapter:
         )
 
     @staticmethod
+    def _refusal(events: list[tuple[int, dict[str, object]]]) -> dict[str, object]:
+        """The refusal record, from Claude Code's model_refusal events.
+
+        The turn's thinking, tool calls and text before the refusal stay in
+        events.jsonl, before `event_line`; `retracted_messages` names the
+        assistant messages Claude Code withdrew from the session.
+        """
+
+        def text(value: object) -> str | None:
+            return value if isinstance(value, str) and value else None
+
+        details = [event for _, event in events]
+        models = [
+            model
+            for model in (text(event.get("original_model")) for event in details)
+            if model is not None
+        ]
+        retracted = [
+            message
+            for event in details
+            for message in event.get("retracted_message_uuids") or []
+            if isinstance(message, str)
+        ]
+        last = details[-1]
+        return {
+            "category": text(last.get("api_refusal_category")),
+            "explanation": text(last.get("api_refusal_explanation")),
+            "models": list(dict.fromkeys(models)),
+            "retracted_messages": retracted,
+            "event_line": events[0][0],
+        }
+
+    @staticmethod
     def _parse(
         output: str,
         *,
@@ -1573,7 +1609,9 @@ class ClaudeAdapter:
         cost_is_cumulative = False
         has_result = False
         usage_observed = False
-        for line in output.splitlines():
+        refusal_events: list[tuple[int, dict[str, object]]] = []
+        refused = False
+        for line_number, line in enumerate(output.splitlines(), start=1):
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -1583,9 +1621,16 @@ class ClaudeAdapter:
             session_id = event.get("session_id") or session_id
             if event.get("type") == "system" and event.get("subtype") == "init":
                 model = event.get("model") or model
+            if event.get("type") == "system" and str(
+                event.get("subtype", "")
+            ).startswith("model_refusal"):
+                refusal_events.append((line_number, event))
             if event.get("type") != "result":
                 continue
             has_result = True
+            refused = event.get("stop_reason") == "refusal"
+            if refused and not refusal_events:
+                refusal_events.append((line_number, event))
             final_message = (
                 event.get("result") if isinstance(event.get("result"), str) else None
             )
@@ -1648,6 +1693,7 @@ class ClaudeAdapter:
             "cost": cost,
             "cost_is_cumulative": cost_is_cumulative,
             "has_result": has_result,
+            "refusal": ClaudeAdapter._refusal(refusal_events) if refused else None,
             "usage_observed": usage_observed,
         }
 

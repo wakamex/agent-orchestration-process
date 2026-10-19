@@ -207,6 +207,10 @@ class RunResult:
     provider_duration_seconds: float | None = None
     provider_status: str | None = None
     provider_error: str | None = None
+    # Set when the provider refused the input: its category and explanation
+    # when reported, the models that refused, the messages the harness
+    # withdrew, and the line of events.jsonl where the refusal begins.
+    refusal: dict[str, Any] | None = None
     accounting_status: str = "complete"
     usage_schema: str = TOKEN_USAGE_SCHEMA
     # The .aop state directory the run was recorded in, as listed in the

@@ -112,6 +112,8 @@ Add `--json` to `run` or `resume` for the stable machine interface. Stdout then 
 normalized result object, including its run ID, harness session ID, status, timing, token usage,
 final message, and artifacts. See [Token usage and pricing](token-usage.md) for the usage contract.
 
+`refusal` is `null` unless the provider refused the input. For Claude it is set when the turn's final `result` event has `stop_reason: refusal`, read from Claude Code's structured refusal events, so a refusal can be told apart from an outage, a quota limit, an expired login, or a timeout without matching error text. A refused run still has `status: failed`. The object holds the refusal `category` and `explanation` when the API reports them, the `models` that refused (Claude Code may retry on a fallback model first; a fallback that answers is not a refusal), `retracted_messages`, the assistant messages Claude Code withdrew from the session, and `event_line`, the line of `events.jsonl` where the refusal begins. Everything the turn produced before the refusal, such as thinking, tool calls, and text, is in `events.jsonl` before that line. Other harnesses report `null`. Results recorded before this field existed also have `null`.
+
 ## Inputs and artifacts
 
 Declare files or directories as input snapshots and require outputs as retained artifacts:

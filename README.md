@@ -17,7 +17,8 @@ schema, runtime state, or resume behavior:
 - Reuse each harness's existing authentication, model execution, tools, and conversations instead
   of maintaining a separate AOP credential store.
 - Apply the same isolated worktrees, inputs-only sealed runs, configured deadlines, process cleanup,
-  snapshotted inputs, and validated artifacts across harnesses.
+  snapshotted inputs, and validated artifacts across harnesses. A harness that reaches its deadline
+  receives a stop signal and a short grace period to save its session before AOP ends the run.
 - Retain consistent results, logs, timing, token usage, and exact provider session identity when
   available.
 - Keep cleanup, checkpointing, and Git integration outside agent control.
@@ -67,6 +68,8 @@ the task worktree automatically and prints the run ID needed to resume the exact
 aop resume <run-id> --prompt "Address the review findings"
 ```
 
+Give a run read-only copies of files or whole project folders with `--input`, and leave out build output or large files with `--input-exclude`; `--dry-run` checks every input before anything is copied. Follow a running harness with `tail -f .aop/runs/<run-id>/events.jsonl`.
+
 See the [CLI guide](docs/cli.md) for other harnesses, inputs, artifacts, batch runs, cleanup, and
 machine-readable results. See [Integration](docs/integration.md) when a task's changes are ready to
 checkpoint and merge.
@@ -107,6 +110,8 @@ and cost calculation rules.
 
 Results distinguish complete accounting from partial or unavailable deadline accounting. Codex deadlines use native app-server interruption to retain per-turn usage and an API-equivalent cost when available. If any harness terminates before reporting usage, `usage` and cost fields remain null instead of being reported as measured zero.
 
+AOP also keeps a copy of every result in `~/.local/state/aop/results/` (under `$XDG_STATE_HOME` when set), so a run's usage and cost remain available after the directory holding its `.aop` is deleted. Each result names the `.aop` directory it ran in.
+
 AOP reads only current run records. After upgrading from a version that wrote older records, run `aop migrate-results` once; it converts them in place and keeps each original beside it. See [Token usage and pricing](docs/token-usage.md#migrating-older-run-records).
 
 ## Development
@@ -116,7 +121,7 @@ Clone the repository and synchronize its locked development environment:
 ```sh
 git clone https://github.com/wakamex/agent-orchestration-process.git
 cd agent-orchestration-process
-uv --no-config sync --locked
-uv --no-config run --locked python -m unittest discover -s tests
-uv --no-config run --locked ruff check src tests
+uv sync --locked
+uv run --locked python -m unittest discover -s tests
+uv run --locked ruff check src tests
 ```

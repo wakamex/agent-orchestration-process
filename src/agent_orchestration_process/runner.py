@@ -5184,8 +5184,22 @@ def _devin_source_config(environment: dict[str, str]) -> Path | None:
     return None
 
 
+def _claude_source(environment: dict[str, str]) -> tuple[Path, Path]:
+    """The user's Claude config directory and settings file.
+
+    CLAUDE_CONFIG_DIR selects another account's home, which then also holds
+    its .claude.json; otherwise they are ~/.claude and ~/.claude.json.
+    """
+    configured = environment.get("CLAUDE_CONFIG_DIR")
+    if configured:
+        config = Path(configured).expanduser()
+        return config, config / ".claude.json"
+    home = Path(environment["HOME"])
+    return home / ".claude", home / ".claude.json"
+
+
 def _prepare_claude_environment(environment: dict[str, str]) -> None:
-    source_home = Path(environment["HOME"])
+    source_config, source_settings = _claude_source(environment)
     destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "claude" / "home"
     if not destination.exists():
         # Seed a temporary home and rename it into place, so a failed copy
@@ -5195,7 +5209,9 @@ def _prepare_claude_environment(environment: dict[str, str]) -> None:
             f".{destination.name}.{uuid.uuid4().hex}.tmp"
         )
         try:
-            _seed_claude_home(source_home, temporary, sealed=_sealed(environment))
+            _seed_claude_home(
+                source_config, source_settings, temporary, sealed=_sealed(environment)
+            )
             _make_tree_user_writable(temporary)
             try:
                 os.replace(temporary, destination)
@@ -5208,11 +5224,14 @@ def _prepare_claude_environment(environment: dict[str, str]) -> None:
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
     environment["HOME"] = os.fspath(destination)
+    # The run uses the private copy in its standard place.
+    environment.pop("CLAUDE_CONFIG_DIR", None)
 
 
-def _seed_claude_home(source_home: Path, destination: Path, *, sealed: bool) -> None:
+def _seed_claude_home(
+    source_config: Path, source_settings: Path, destination: Path, *, sealed: bool
+) -> None:
     destination.mkdir(mode=0o700)
-    source_config = source_home / ".claude"
     private_config = destination / ".claude"
     if sealed:
         private_config.mkdir()
@@ -5235,9 +5254,8 @@ def _seed_claude_home(source_home: Path, destination: Path, *, sealed: bool) -> 
             ),
             copy_function=_copy_unless_removed,
         )
-    source_settings = source_home / ".claude.json"
     if source_settings.is_file() and not sealed:
-        shutil.copy2(source_settings, destination / source_settings.name)
+        shutil.copy2(source_settings, destination / ".claude.json")
 
 
 def _copy_unless_removed(source: str, target: str) -> None:
@@ -6624,8 +6642,8 @@ def _instruction_sources(
                 source / name for name in ("config.toml", "rules", "skills")
             )
     elif request.provider == "claude":
-        home = Path(environment["HOME"])
-        candidates.extend([home / ".claude.json", home / ".claude" / "settings.json"])
+        config, settings = _claude_source(environment)
+        candidates.extend([settings, config / "settings.json"])
     elif request.provider == "cursor":
         home = _cursor_source_home(environment)
         candidates.extend(

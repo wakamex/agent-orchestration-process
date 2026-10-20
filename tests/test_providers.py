@@ -2646,7 +2646,7 @@ class ProvidersTest(AOPTestCase):
         result = json.loads(capsys.readouterr().out)
         assert result["succeeded"], result["error"]
         where = json.loads(result["final_message"])
-        assert where == {"cwd": os.fspath(workdir), "home": os.environ["HOME"]}
+        assert where == {"cwd": os.fspath(workdir), "home": os.environ["HOME"], "config_dir": None}
         request = json.loads(
             (records / ".aop" / "runs" / result["run_id"] / "request.json").read_text()
         )
@@ -2677,6 +2677,45 @@ class ProvidersTest(AOPTestCase):
         assert main(["run", "--agent", "codex", "--profile", "host", "--native-state",
                      "--workdir", os.fspath(workdir), "--prompt", "x", "--dry-run"]) == 2
         assert "codex does not support --native-state" in capsys.readouterr().err
+
+    @parametrize("profile", ["edit", "sealed"])
+    def test_claude_runs_are_seeded_from_claude_config_dir(
+        self,
+        repository: Path,
+        tmp_path: Path,
+        fake_claude: Path,
+        monkeypatch: MonkeyPatch,
+        profile: str,
+    ) -> None:
+        second = tmp_path / "claude-b"
+        second.mkdir()
+        (second / ".credentials.json").write_text('{"account": "second"}\n')
+        (second / "settings.json").write_text('{"model": "second"}\n')
+        (second / ".claude.json").write_text('{"userID": "second"}\n')
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", os.fspath(second))
+        manager = (
+            WorktreeManager.standalone(tmp_path / "controller")
+            if profile == "sealed"
+            else WorktreeManager.discover(repository)
+        )
+
+        result = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude))).run(
+            task="second-account", prompt="WHERE", profile=profile
+        )
+
+        assert result.succeeded, result.error
+        where = json.loads(result.final_message)
+        # The run uses AOP's private copy in the standard place.
+        assert where["config_dir"] is None
+        private = (
+            manager.sealed_runtime_dir / "provider-state" / result.run_id
+            if profile == "sealed"
+            else manager.state_dir / "provider-state" / "second-account"
+        ) / "claude" / "home"
+        assert (private / ".claude" / ".credentials.json").read_text() == '{"account": "second"}\n'
+        if profile == "edit":
+            assert (private / ".claude" / "settings.json").read_text() == '{"model": "second"}\n'
+            assert (private / ".claude.json").read_text() == '{"userID": "second"}\n'
 
     def test_claude_thinking_display_is_recorded_and_kept_on_resume(
         self,

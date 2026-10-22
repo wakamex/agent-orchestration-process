@@ -66,6 +66,7 @@ def main() -> None:
         else:
             front = ["+++", f"title = {toml_string(title)}", "", "[extra]", *extra, "+++"]
             (content / f"{path.rstrip('/')}.md").write_text("\n".join(front) + "\n" + body)
+    (SITE / "data").mkdir(exist_ok=True)
     (SITE / "data" / "navigation.json").write_text(json.dumps(navigation, indent=2) + "\n")
 
 

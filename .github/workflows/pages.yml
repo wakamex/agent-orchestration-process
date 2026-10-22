@@ -1,0 +1,48 @@
+name: cloudflare-pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "README.md"
+      - "docs/**"
+      - "docs-site/**"
+      - "ci/build_docs.py"
+      - "ci/install-zola.sh"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "cloudflare-pages-production"
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    if: github.repository == 'wakamex/agent-orchestration-process'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 20
+      - name: Build the site
+        # Zola's link checker fails the build on a broken internal link.
+        run: |
+          ./ci/install-zola.sh
+          python3 ci/build_docs.py
+          cd docs-site && ../.cache/zola/0.23.4/zola build
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: "7c48ce23cb4423feb34a7fe3921e307f"
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || github.sha }}
+        run: |
+          npx wrangler@4.69.0 pages deploy docs-site/public \
+            --project-name agent-orchestration-process \
+            --branch main \
+            --commit-hash "${GITHUB_SHA}" \
+            --commit-message "$(printf '%s\n' "$COMMIT_MESSAGE" | head -n 1)"

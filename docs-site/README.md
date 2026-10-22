@@ -1,0 +1,11 @@
+# Documentation site
+
+The site at [agentorchestrationprocess.com](https://agentorchestrationprocess.com/) is built with [Zola](https://www.getzola.org/) and the [zola-docs](https://github.com/wakamex/zola-docs) theme, vendored under `themes/zola-docs` at the commit in `THEME_COMMIT`. Its pages come only from the repository's `README.md` and `docs/*.md`: `ci/build_docs.py` writes them into `content/` with front matter and navigation, so edit the Markdown files, never `content/`.
+
+```sh
+./ci/install-zola.sh
+python3 ci/build_docs.py
+cd docs-site && ../.cache/zola/0.23.4/zola serve
+```
+
+`.github/workflows/pages.yml` builds the site on each push to `main` that changes the docs, fails on a broken internal link, and deploys it to Cloudflare Pages.

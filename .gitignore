@@ -8,3 +8,7 @@
 /src/*.egg-info/
 __pycache__/
 *.py[cod]
+/.cache/
+/docs-site/content/
+/docs-site/public/
+/docs-site/data/navigation.json

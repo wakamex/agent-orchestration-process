@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="{{ config.default_language }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}">
+  {% if config.extra.zola_docs.appearance_selector %}
+  <script>
+    (function () {
+      var choice;
+      try { choice = localStorage.getItem("zola-docs-theme"); } catch (_error) {}
+      if (choice !== "light" && choice !== "dark") choice = "auto";
+      var dark = choice === "dark" || (choice === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.dataset.themeChoice = choice;
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    })();
+  </script>
+  {% endif %}
+  <link rel="stylesheet" href="{{ get_url(path='zola-docs.css', cachebust=true) | safe }}">
+  {% for stylesheet in config.extra.zola_docs.extra_styles %}
+  <link rel="stylesheet" href="{{ get_url(path=stylesheet, cachebust=true) | safe }}">
+  {% endfor %}
+  {% if config.extra.zola_docs.favicon %}
+  <link rel="icon" href="{{ get_url(path=config.extra.zola_docs.favicon) | safe }}">
+  {% endif %}
+  {% block head %}{% endblock head %}
+  <title>{% block title %}{{ config.title }}{% endblock title %}</title>
+</head>
+<body{% if config.extra.zola_docs.copy_code %} data-copy-code{% endif %}>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  {% block header %}
+  <header class="site-header">
+    {% block header_brand %}
+    <a class="site-name" href="{{ get_url(path=config.extra.zola_docs.home_url) | safe }}">{{ config.extra.zola_docs.site_name }}</a>
+    {% endblock header_brand %}
+    <button class="navigation-toggle" type="button" aria-controls="mobile-navigation-dialog" aria-expanded="false" data-navigation-open hidden>Menu</button>
+    {% if config.extra.zola_docs.appearance_selector %}
+    <button class="appearance-toggle" type="button" aria-label="{{ config.extra.zola_docs.appearance_label }}" title="{{ config.extra.zola_docs.appearance_label }}" data-appearance-toggle data-appearance-label="{{ config.extra.zola_docs.appearance_label }}">
+      <svg class="theme-icon theme-icon-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"></path></svg>
+      <svg class="theme-icon theme-icon-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"></path></svg>
+    </button>
+    {% endif %}
+    {% if config.extra.zola_docs.versions_enabled %}
+    {% set versions = load_data(path=config.extra.zola_docs.versions_path) %}
+    {% set version_current_path = current_path | default(value="/") %}
+    <nav class="version-switcher" aria-label="{{ config.extra.zola_docs.version_label }}">
+      <details>
+        <summary>
+          <span class="visually-hidden">{{ config.extra.zola_docs.version_label }}:</span>
+          {% for version in versions %}{% if version.id == config.extra.zola_docs.current_version %}{{ version.label }}{% endif %}{% endfor %}
+        </summary>
+        <ul>
+          {% for version in versions %}
+          <li>
+            {% if version.path is defined %}
+            {% set version_url = get_url(path=version.path) %}
+            {% else %}
+            {% set version_url = version.url %}
+            {% endif %}
+            {% if config.extra.zola_docs.version_preserve_path %}
+            {% set version_target = version_url | trim_end(pat="/") ~ version_current_path %}
+            {% else %}
+            {% set version_target = version_url %}
+            {% endif %}
+            <a href="{{ version_target | safe }}"{% if version.id == config.extra.zola_docs.current_version %} aria-current="page"{% endif %}>{{ version.label }}</a>
+          </li>
+          {% endfor %}
+        </ul>
+      </details>
+    </nav>
+    {% endif %}
+    {% if config.extra.zola_docs.search_enabled %}
+    <form
+      class="search"
+      role="search"
+      data-search-form
+      data-search-index="{{ get_url(path=config.extra.zola_docs.search_index) | safe }}"
+      data-search-limit="{{ config.extra.zola_docs.search_results_limit }}"
+    >
+      <label for="site-search">{{ config.extra.zola_docs.search_label }}</label>
+      <div class="search-row">
+        <input
+          id="site-search"
+          type="search"
+          minlength="2"
+          autocomplete="off"
+          placeholder="{{ config.extra.zola_docs.search_placeholder }}"
+          aria-controls="search-results"
+          aria-expanded="false"
+          data-search-input
+        >
+        <button type="submit">Search</button>
+      </div>
+      <div id="search-results" class="search-panel" role="region" aria-live="polite" hidden data-search-panel>
+        <p data-search-status></p>
+        <ol data-search-results></ol>
+      </div>
+    </form>
+    {% endif %}
+  </header>
+  {% endblock header %}
+  {% if config.extra.zola_docs.version_banner %}
+  <aside class="version-banner" aria-label="Version notice">{{ config.extra.zola_docs.version_banner }}</aside>
+  {% endif %}
+  <div class="shell">
+    {% block sidebar %}
+    {% set navigation_data = load_data(path=config.extra.zola_docs.navigation_path) %}
+    {% set navigation = navigation_data.groups | default(value=navigation_data) %}
+    {% set rendered_current_path = current_path | default(value="/") %}
+    {% set navigation_group = "" %}
+    {% set navigation_branch = "" %}
+    {% if page is defined %}
+      {% set navigation_group = page.extra.navigation_group | default(value="") %}
+      {% set navigation_branch = page.extra.navigation_branch | default(value="") %}
+    {% elif section is defined %}
+      {% set navigation_group = section.extra.navigation_group | default(value="") %}
+      {% set navigation_branch = section.extra.navigation_branch | default(value="") %}
+    {% endif %}
+    {% set navigation_scoped = navigation_group != "" %}
+    <aside class="sidebar">
+      <details>
+        <summary>{{ config.extra.zola_docs.navigation_label }}</summary>
+        <nav aria-label="{{ config.extra.zola_docs.navigation_label }}">
+          {% for group in navigation %}
+          <section>
+            {% set group_id = group.id | default(value="") %}
+            {% if not navigation_scoped or group_id == navigation_group %}
+            <h2 class="sidebar-navigation-parent">{% if group.path is defined %}<a class="sidebar-navigation-row" href="{{ get_url(path=group.path) | safe }}"><svg class="sidebar-chevron is-expanded" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>{{ group.title }}</a>{% elif group.url is defined %}<a class="sidebar-navigation-row" href="{{ group.url | safe }}"><svg class="sidebar-chevron is-expanded" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>{{ group.title }}</a>{% else %}<span class="sidebar-navigation-row"><svg class="sidebar-chevron is-expanded" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>{{ group.title }}</span>{% endif %}</h2>
+            {{ <zola_docs.navigation_nodes nodes={group.items} current_path={rendered_current_path} navigation_scoped={navigation_scoped} navigation_branch={navigation_branch}/> }}
+            {% else %}
+            <h2 class="sidebar-navigation-parent">{% if group.path is defined %}<a class="sidebar-navigation-row" href="{{ get_url(path=group.path) | safe }}"><svg class="sidebar-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>{{ group.title }}<span class="sidebar-child-count">{{ group.items | length }}<span class="visually-hidden"> sub-pages</span></span></a>{% elif group.url is defined %}<a class="sidebar-navigation-row" href="{{ group.url | safe }}"><svg class="sidebar-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>{{ group.title }}<span class="sidebar-child-count">{{ group.items | length }}<span class="visually-hidden"> sub-pages</span></span></a>{% else %}<span class="sidebar-navigation-row"><svg class="sidebar-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>{{ group.title }}<span class="sidebar-child-count">{{ group.items | length }}<span class="visually-hidden"> sub-pages</span></span></span>{% endif %}</h2>
+            {% endif %}
+          </section>
+          {% endfor %}
+        </nav>
+      </details>
+    </aside>
+    {% endblock sidebar %}
+    {% block body %}{% endblock body %}
+  </div>
+  {% block footer %}{% endblock footer %}
+  {% if config.extra.zola_docs.search_enabled %}
+  <script src="{{ get_url(path='zola-docs-search.js', cachebust=true) | safe }}"></script>
+  {% endif %}
+  <script src="{{ get_url(path='zola-docs.js', cachebust=true) | safe }}"></script>
+  {% block scripts %}{% endblock scripts %}
+</body>
+</html>

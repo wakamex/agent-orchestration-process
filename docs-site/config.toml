@@ -1,0 +1,50 @@
+title = "AOP documentation"
+description = "Agent Orchestration Process: one CLI for bounded, non-interactive jobs across coding-agent harnesses."
+base_url = "https://agentorchestrationprocess.com/"
+theme = "zola-docs"
+output_dir = "public"
+compile_sass = false
+build_search_index = true
+generate_sitemap = true
+generate_robots_txt = true
+
+[markdown]
+github_alerts = true
+insert_anchor_links = "right"
+
+[search]
+index_format = "fuse_json"
+include_title = true
+include_description = true
+include_content = true
+include_path = true
+truncate_content_length = 12000
+
+[link_checker]
+internal_level = "error"
+external_level = "warn"
+skip_prefixes = ["http://", "https://"]
+
+[extra.zola_docs]
+site_name = "AOP"
+home_url = ""
+navigation_path = "data/navigation.json"
+navigation_label = "Documentation"
+search_enabled = true
+search_label = "Search AOP documentation"
+search_placeholder = "Search"
+search_index = "search_index.en.json"
+search_results_limit = 10
+copy_code = true
+page_navigation = true
+breadcrumbs = true
+toc = true
+edit_url = "https://github.com/wakamex/agent-orchestration-process/edit"
+edit_branch = "main"
+edit_label = "Edit this page"
+last_updated = false
+appearance_selector = true
+appearance_label = "Appearance"
+metadata = true
+mermaid = false
+versions_enabled = false

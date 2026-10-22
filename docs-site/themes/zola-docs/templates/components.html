@@ -1,0 +1,26 @@
+{% component zola_docs.navigation_nodes(nodes, current_path, navigation_scoped, navigation_branch) -%}
+<ul>
+  {%- for node in nodes %}
+  {%- set has_node_path = node.path is defined %}
+  {%- set node_path = node.path | default(value="") %}
+  {%- set node_url = node.url | default(value="") %}
+  {%- if node.id %}{% set node_key = node.id %}{% elif has_node_path %}{% set node_key = node_path %}{% else %}{% set node_key = node_url %}{% endif %}
+  {%- set resolved_path = "/" ~ node_path %}
+  {%- set node_current = (has_node_path and current_path == resolved_path) or (node_url and current_path == node_url) %}
+  {%- set node_on_route = has_node_path and node_path and current_path is starting_with(pat=resolved_path) %}
+  {%- set node_in_branch = navigation_branch == node_key %}
+  {%- set sidebar_children = node.sidebar_children | default(value=true) %}
+  {%- set children_expanded = node.children and sidebar_children and (not navigation_scoped or node_in_branch or node_on_route) %}
+  <li>
+    {%- if has_node_path %}
+    <a class="sidebar-navigation-row" href="{{ get_url(path=node_path) | safe }}"{% if node_current %} aria-current="page"{% elif node_in_branch or node_on_route %} aria-current="location"{% endif %}>{% if node.children %}<svg class="sidebar-chevron{% if children_expanded %} is-expanded{% endif %}" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>{% endif %}{{ node.title }}{% if node.children and not children_expanded %}<span class="sidebar-child-count">{{ node.children | length }}<span class="visually-hidden"> sub-pages</span></span>{% endif %}</a>
+    {%- elif node_url %}
+    <a class="sidebar-navigation-row" href="{{ node_url | safe }}"{% if node_current %} aria-current="page"{% elif node_in_branch %} aria-current="location"{% endif %}>{% if node.children %}<svg class="sidebar-chevron{% if children_expanded %} is-expanded{% endif %}" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>{% endif %}{{ node.title }}{% if node.children and not children_expanded %}<span class="sidebar-child-count">{{ node.children | length }}<span class="visually-hidden"> sub-pages</span></span>{% endif %}</a>
+    {%- else %}
+    <span class="sidebar-navigation-row">{% if node.children %}<svg class="sidebar-chevron{% if children_expanded %} is-expanded{% endif %}" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>{% endif %}{{ node.title }}{% if node.children and not children_expanded %}<span class="sidebar-child-count">{{ node.children | length }}<span class="visually-hidden"> sub-pages</span></span>{% endif %}</span>
+    {%- endif %}
+    {%- if children_expanded %}{{ <zola_docs.navigation_nodes nodes={node.children} current_path={current_path} navigation_scoped={navigation_scoped} navigation_branch={navigation_branch}/> }}{% endif %}
+  </li>
+  {%- endfor %}
+</ul>
+{% endcomponent zola_docs.navigation_nodes %}

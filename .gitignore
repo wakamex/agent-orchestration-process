@@ -12,3 +12,4 @@ __pycache__/
 /docs-site/content/
 /docs-site/public/
 /docs-site/data/navigation.json
+/.wrangler/

@@ -8,4 +8,4 @@ python3 ci/build_docs.py
 cd docs-site && ../.cache/zola/0.23.4/zola serve
 ```
 
-`.github/workflows/pages.yml` builds the site on each push to `main` that changes the docs, fails on a broken internal link, and deploys it to Cloudflare Pages.
+`.github/workflows/docs-site.yml` builds the site on each push to `main` that changes the docs, fails on a broken internal link, and deploys it with `wrangler deploy` as a Cloudflare Worker serving static assets, configured in the repository's `wrangler.jsonc` for `agentorchestrationprocess.com` and `www.agentorchestrationprocess.com`.

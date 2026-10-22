@@ -1,4 +1,4 @@
-name: cloudflare-pages
+name: docs-site
 
 on:
   push:
@@ -10,14 +10,15 @@ on:
       - "docs-site/**"
       - "ci/build_docs.py"
       - "ci/install-zola.sh"
-      - ".github/workflows/pages.yml"
+      - "wrangler.jsonc"
+      - ".github/workflows/docs-site.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: "cloudflare-pages-production"
+  group: "docs-site-production"
   cancel-in-progress: true
 
 jobs:
@@ -35,14 +36,10 @@ jobs:
           ./ci/install-zola.sh
           python3 ci/build_docs.py
           cd docs-site && ../.cache/zola/0.23.4/zola build
-      - name: Deploy to Cloudflare Pages
+      - name: Deploy to Cloudflare Workers
+        # wrangler.jsonc serves docs-site/public as static assets on both
+        # custom domains.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: "7c48ce23cb4423feb34a7fe3921e307f"
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message || github.sha }}
-        run: |
-          npx wrangler@4.69.0 pages deploy docs-site/public \
-            --project-name agent-orchestration-process \
-            --branch main \
-            --commit-hash "${GITHUB_SHA}" \
-            --commit-message "$(printf '%s\n' "$COMMIT_MESSAGE" | head -n 1)"
+        run: npx wrangler@4.69.0 deploy

@@ -9,3 +9,5 @@ cd docs-site && ../.cache/zola/0.23.4/zola serve
 ```
 
 `.github/workflows/docs-site.yml` builds the site on each push to `main` that changes the docs, fails on a broken internal link, and deploys it with `wrangler deploy` as a Cloudflare Worker serving static assets, configured in the repository's `wrangler.jsonc` for `agentorchestrationprocess.com` and `www.agentorchestrationprocess.com`.
+
+To deploy by hand, put `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in the repository's `.env`, which Git ignores, and run `./deploy.sh`.

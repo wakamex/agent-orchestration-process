@@ -616,6 +616,14 @@ class RunnerTest(AOPTestCase):
         archived = results_archive_dir() / f"{result.run_id}.json"
         assert archived.read_text() == written
 
+    def test_artifact_contract_asks_for_a_file_tool_rather_than_the_shell(self) -> None:
+        from agent_orchestration_process.runner import _artifact_prompt
+
+        prompt = _artifact_prompt("task", ("paper.md",), Path("/output"))
+
+        assert "- paper.md" in prompt
+        assert "file-writing tool, not through a shell command" in prompt
+
     def test_run_persists_structured_codex_artifacts(
         self,
         repository: Path, fake_codex: Path

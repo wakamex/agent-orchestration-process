@@ -7058,7 +7058,9 @@ def _artifact_prompt(prompt: str, artifacts: tuple[str, ...], output_dir: Path) 
         f"{paths}\n"
         "Declared paths may be files or directories; directories are collected recursively. "
         "Stdout and stderr are logs, not deliverables. AOP will reject missing, empty, or "
-        "unsafe files."
+        "unsafe files. Write text deliverables with your file-writing tool, not through "
+        "a shell command: shell quoting and expansion change text, such as `$1` inside "
+        "double quotes."
     )
 
 

@@ -1,4 +1,4 @@
-title = "AOP documentation"
+title = "Agent Orchestration Process"
 description = "Agent Orchestration Process: one CLI for bounded, non-interactive jobs across coding-agent harnesses."
 base_url = "https://agentorchestrationprocess.com/"
 theme = "zola-docs"
@@ -26,7 +26,8 @@ external_level = "warn"
 skip_prefixes = ["http://", "https://"]
 
 [extra.zola_docs]
-site_name = "AOP"
+site_name = "Agent Orchestration Process"
+extra_styles = ["site.css"]
 home_url = ""
 navigation_path = "data/navigation.json"
 navigation_label = "Documentation"

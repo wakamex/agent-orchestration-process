@@ -1,6 +1,7 @@
 # Agent Orchestration Process (AOP)
 
-AOP gives automation one CLI for running bounded, non-interactive jobs across different agent
+AOP is a command-line tool that runs coding agents such as Claude Code, Codex and Gemini as
+unattended jobs. It gives automation one CLI for running bounded, non-interactive jobs across different agent
 harnesses without requiring callers to learn each harness's command flags, session format, output
 schema, runtime state, or resume behavior:
 

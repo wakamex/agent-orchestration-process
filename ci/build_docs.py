@@ -62,7 +62,7 @@ def main() -> None:
         body = LINK.sub(lambda m: f"](@/{m.group(1)}.md{m.group(2) or ''})", body)
         if path == "":
             front = ["+++", f"title = {toml_string(title)}", 'sort_by = "none"', "", "[extra]", "toc = false", *extra, "+++"]
-            (content / "_index.md").write_text("\n".join(front) + "\n" + body)
+            (content / "_index.md").write_text("\n".join(front) + f"\n# {title}\n\n" + body)
         else:
             front = ["+++", f"title = {toml_string(title)}", "", "[extra]", *extra, "+++"]
             (content / f"{path.rstrip('/')}.md").write_text("\n".join(front) + "\n" + body)

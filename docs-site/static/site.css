@@ -1,0 +1,3 @@
+/* The theme hides a section's leading heading; the overview keeps the README's
+   title, which is the only place the page spells out the name. */
+.prose > h1:first-child { display: block; }

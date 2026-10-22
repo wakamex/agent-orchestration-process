@@ -1,5 +1,7 @@
 # Token usage and pricing
 
+In brief: every result has a `usage` object with six token counters, an `accounting_status` that says whether they are complete, a `calculated_cost` that prices them at the provider's public API rates, and, when the harness reports one, a `provider_reported_cost`. The calculated cost is a comparison figure, not your bill: runs on a subscription cost nothing extra per token. Usage and cost are null, never zero, when a harness did not report them. The rest of this page defines each field exactly, for programs that read results.
+
 AOP persists token usage under one provider-independent convention. The marker for this convention is `usage_schema: "aop-token-usage-v3"` on `result.json`. Every result records only its own invocation's usage, so consumers can sum results across runs, including runs that resume the same session.
 
 The invariant is:
@@ -56,6 +58,9 @@ steps after the current user prompt. A fresh run whose run-owned ATIF export omi
 uses all agent steps from that new private session. The other adapters consume per-invocation
 terminal events. Resuming a session therefore does not turn a new run's usage into a cumulative
 session total.
+
+Zcode uses the native terminal `usage` summary for the current turn. If the terminal summary is missing, it sums observed `model_request_completed` measurements for that turn, deduplicated by request and attempt, and marks accounting partial. Timeouts retain these measurements. Cumulative session projection totals are never substituted for per-turn usage. For the canonical Z.ai Coding Plan route, AOP calculates API-equivalent cost for each measured model request at its completion time, including compaction and lite-model calls. A cost is available only when all measured models have prices and the measurements reconcile with reported turn usage. Native credential provenance identifies the subscription route separately; provider-reported monetary cost remains unavailable.
+
 
 ## Pricing
 
@@ -120,8 +125,6 @@ When a conversion changes a result's usage, the migration reprices `calculated_c
 
 Requests convert `sandbox` to `profile` and `read_paths` to `inputs`, and fill fields added after they were written with their defaults: `mode: "agent"`, `no_web: false`, an empty `effective_policy`, `artifacts`, and `inputs`, and null inference provider and route. A `sandbox` value is a Codex sandbox mode that no execution profile resolves, so resuming such a run fails while cleanup works.
 
-## Downstream consumer rule
+## Reading results from other programs
 
-Consumers such as `clanker-analytics` should require `usage_schema: "aop-token-usage-v3"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the six counters as stored and calculate uncached input as `input_tokens - cached_input_tokens - cache_write_input_tokens` and total tokens as `input_tokens + output_tokens`. Never add cached input, cache writes, or reasoning output to `input_tokens`, `output_tokens`, or `total_tokens`. Each result records only its own invocation's usage, so results can be summed across runs. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Records with other schema markers should be migrated with `aop migrate-results` rather than converted by the consumer. To read every AOP result on a machine, including runs whose state directory was deleted, read `$XDG_STATE_HOME/aop/results/*.json`, deduplicate by `run_id`, and take the project from `state_root`. `$XDG_STATE_HOME/aop/state-roots` lists the state directories that still exist, for consumers that also need run directories such as `events.jsonl`.
-
-Zcode uses the native terminal `usage` summary for the current turn. If the terminal summary is missing, it sums observed `model_request_completed` measurements for that turn, deduplicated by request and attempt, and marks accounting partial. Timeouts retain these measurements. Cumulative session projection totals are never substituted for per-turn usage. For the canonical Z.ai Coding Plan route, AOP calculates API-equivalent cost for each measured model request at its completion time, including compaction and lite-model calls. A cost is available only when all measured models have prices and the measurements reconcile with reported turn usage. Native credential provenance identifies the subscription route separately; provider-reported monetary cost remains unavailable.
+Programs that read AOP results should require `usage_schema: "aop-token-usage-v3"` and inspect `accounting_status` before reading usage. For `complete` or usage-bearing `partial` results, use the six counters as stored and calculate uncached input as `input_tokens - cached_input_tokens - cache_write_input_tokens` and total tokens as `input_tokens + output_tokens`. Never add cached input, cache writes, or reasoning output to `input_tokens`, `output_tokens`, or `total_tokens`. Each result records only its own invocation's usage, so results can be summed across runs. For `unavailable` results, keep usage and cost unknown rather than substituting zero. Records with other schema markers should be migrated with `aop migrate-results` rather than converted by the consumer. To read every AOP result on a machine, including runs whose state directory was deleted, read `$XDG_STATE_HOME/aop/results/*.json`, deduplicate by `run_id`, and take the project from `state_root`. `$XDG_STATE_HOME/aop/state-roots` lists the state directories that still exist, for consumers that also need run directories such as `events.jsonl`.

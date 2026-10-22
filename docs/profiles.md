@@ -28,7 +28,7 @@ Two options make a `host` run behave like the harness started by hand in a direc
 - `--workdir DIR` runs the harness in `DIR` itself, which need not be a Git repository, instead of a task worktree. TASK becomes optional, and AOP keeps the run's records in the `.aop` of the directory `aop` runs from, so `DIR` stays untouched and `aop cleanup` never removes it.
 - `--native-state` lets the harness use its own home, settings, memory, skills, and session store instead of AOP's private copy, so its sessions appear where the harness normally keeps them. Claude supports it; other harnesses refuse it.
 
-`request.json` records both, and `aop resume` reuses them. The effective policy reports the workspace content as `caller-directory` and the state as `harness-native`. For example, from a chat's own records directory:
+`request.json` records both, and `aop resume` reuses them. The effective policy reports the workspace content as `caller-directory` and the state as `harness-native`. For example, from a separate records directory records directory:
 
 ```sh
 aop run --agent claude --profile host --workdir /code/debate --native-state --prompt-parts turn.json
@@ -49,7 +49,7 @@ explicitly.
 
 Account-level customizations arrive with a login rather than from local files, so a private home alone does not exclude them. Claude Code downloads a claude.ai account's connectors as `mcp__claude_ai_*` tools and its claude.ai skills into the home it runs with. Sealed Claude runs therefore pass `--safe-mode`, `--strict-mcp-config`, and an empty `--mcp-config`, which keep out MCP servers, connectors, skills, and other customizations. Claude Code's own built-in tools and skills remain.
 
-A sealed run records itself under the directory it was started from, even inside a Git repository. `aop resume` and `aop cleanup` look for the run in the repository's state first and then in the current directory's, so run them from the directory the run started in.
+A sealed run records itself in the `.aop` of the directory it was started from, even inside a Git repository. `aop resume` and `aop cleanup` find a run from any directory.
 
 Without `--no-web`, every profile retains native host networking because the supported provider CLIs need it. Local network services and provider-side account state can therefore remain context channels. With `--no-web`, the sandboxed profiles get their own network namespace with only an allowlisted egress proxy, as the CLI guide describes.
 `sealed` is a filesystem and local-state boundary, not complete information isolation.
@@ -67,7 +67,7 @@ Inspect a declared profile or preview a run without dispatching it:
 ```sh
 aop profile explain sealed
 aop profile explain sealed --agent codex --json
-aop run study-arm --profile sealed --prompt "Answer using only declared inputs" --dry-run
+aop run --agent codex --profile sealed --prompt "Answer using only declared inputs" --dry-run
 ```
 
 Every dispatched run persists its compiled boundary in `request.json`. It records repository and

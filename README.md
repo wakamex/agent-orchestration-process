@@ -1,47 +1,23 @@
 # Agent Orchestration Process (AOP)
 
-AOP is a command-line tool that runs coding agents such as Claude Code, Codex and Gemini as
-unattended jobs. It gives automation one CLI for running bounded, non-interactive jobs across different agent
-harnesses without requiring callers to learn each harness's command flags, session format, output
-schema, runtime state, or resume behavior:
+AOP is a command-line tool for running coding agents such as Claude Code and Codex as unattended jobs. It is for automation: CI jobs, batch experiments, benchmarks, and programs that hand work to an agent and need a dependable result back. One `aop run` command drives ten different agent CLIs, called harnesses here, and gives every run the same sandbox, deadline, and result record, so a caller does not need a separate adapter for each CLI's flags, sessions, and output.
 
-- Run [Codex](https://github.com/openai/codex),
-  [Claude Code](https://code.claude.com/docs/en/overview),
-  [Cursor Agent](https://docs.cursor.com/en/cli/overview),
-  [Devin CLI](https://docs.devin.ai/cli/index),
-  [OpenCode](https://github.com/anomalyco/opencode),
-  [Antigravity (`agy`)](https://github.com/google-antigravity/antigravity-cli),
-  [Grok Build](https://github.com/xai-org/grok-build),
-  [Hermes](https://github.com/NousResearch/hermes-agent),
-  [DeepSeek Harness (`dsh`)](https://github.com/deepseek-ai/deepseek-harness), and Zcode through the same `run` and `resume` commands. See [Harness adapters](docs/harnesses.md) for current model support
-  and limitations.
-- Reuse each harness's existing authentication, model execution, tools, and conversations instead
-  of maintaining a separate AOP credential store.
-- Apply the same isolated worktrees, inputs-only sealed runs, configured deadlines, process cleanup,
-  snapshotted inputs, and validated artifacts across harnesses. A harness that reaches its deadline
-  receives a stop signal and a short grace period to save its session before AOP ends the run.
-- Retain consistent results, logs, timing, token usage, and exact provider session identity when
-  available.
-- Keep cleanup, checkpointing, and Git integration outside agent control.
+- Run [Codex](https://github.com/openai/codex), [Claude Code](https://code.claude.com/docs/en/overview), [Cursor Agent](https://docs.cursor.com/en/cli/overview), [Devin CLI](https://docs.devin.ai/cli/index), [OpenCode](https://github.com/anomalyco/opencode), [Antigravity (`agy`)](https://github.com/google-antigravity/antigravity-cli), [Grok Build](https://github.com/xai-org/grok-build), [Hermes](https://github.com/NousResearch/hermes-agent), [DeepSeek Harness (`dsh`)](https://github.com/deepseek-ai/deepseek-harness), and Zcode through the same `run` and `resume` commands. Each keeps its own login, models, and tools.
+- Isolate each run in a Git worktree or an empty sealed workspace, inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox, with optional network-level blocking of web access.
+- Get one JSON result per run: the answer, timing, token usage, an API-equivalent cost, the harness session ID for exact resume, and whether the provider refused.
+- Keep cleanup, checkpointing, and Git integration outside the agent's control.
 
-Codex runs can also use [Z.AI Coding Plan](docs/harnesses.md#codex) as the `zai-coding-plan` inference provider rather than as a separate harness. AOP resolves the effective native Codex configuration, validates the authenticated model inventory, projects only the selected credential into isolated runs, and preserves the exact route for resume. List the currently available models with:
+[Agent Client Protocol (ACP)](https://agentclientprotocol.com/) connects agents to editors for interactive sessions, where a person chats, approves actions, and steers. AOP serves the opposite case: software running bounded jobs with nobody watching. The two are complementary.
 
-```sh
-aop models --agent codex --provider zai-coding-plan
-```
+## Requirements
 
-[Agent Client Protocol (ACP)](https://agentclientprotocol.com/) standardizes interactive
-communication between agents and clients such as editors and IDEs. Use ACP when a person needs to
-chat, approve actions, watch progress, and steer a session.
+- Linux. AOP's sandbox is built on Linux namespaces.
+- Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
+- `bwrap` (bubblewrap) for the sandboxed profiles, with unprivileged user namespaces allowed. On Fedora and Debian, install the `bubblewrap` package. Ubuntu 24.04 and later also need `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`.
+- Git, for runs in a repository.
+- At least one harness, installed and signed in. Codex needs version 0.150.1 or newer and Antigravity 1.1.16 or newer; [Harness adapters](docs/harnesses.md#supported-harnesses) lists the versions each adapter was last tested with.
 
-Use AOP when software needs to run bounded jobs unattended across different agent CLIs. The two are
-complementary: ACP serves interactive clients, while AOP serves automation.
-
-## Install and run
-
-AOP requires Linux and Python 3.11 or newer. The `edit`, `review`, and `sealed` profiles require
-`bwrap`. Git is required for `edit`, `review`, and `host`. Install and authenticate at least one
-supported agent harness.
+## Quickstart
 
 Install AOP from [PyPI](https://pypi.org/project/agent-orchestration-process/):
 
@@ -49,80 +25,96 @@ Install AOP from [PyPI](https://pypi.org/project/agent-orchestration-process/):
 uv tool install agent-orchestration-process
 ```
 
-Run a sealed task from any directory without exposing local files or requiring a Git repository:
+Run a sealed task. It sees no repository and no local files, only what you pass with `--input`:
 
 ```sh
-aop run --agent codex --profile sealed --prompt "Explain the difference between TCP and UDP"
+aop run --agent claude --profile sealed --prompt "Reply with only the word copper."
 ```
 
-Run a task in an existing Git repository:
+The answer goes to stdout; the run's details go to stderr:
+
+```text
+aop: run_id=74a91b9f-d64e-45cd-9c56-b308c8840d58 session_id=fba843cd-3050-4672-a39b-1deaa63ef5d9 time=2.13s tokens=16887 accounting=complete calculated_cost=$0.000171 provider_reported_cost=n/a billing=subscription artifacts=/home/me/.aop/runs/74a91b9f-d64e-45cd-9c56-b308c8840d58
+copper
+```
+
+AOP records the run in a `.aop` folder in the directory you ran it from. Add `--json` for the full result as one object, abridged here:
+
+```json
+{
+  "run_id": "5f668bbc-cad7-4852-b1b3-00b021952dd2",
+  "provider": "claude",
+  "model": "claude-haiku-5-5",
+  "status": "succeeded",
+  "final_message": "copper",
+  "session_id": "24ec7778-cd70-450f-a1f1-9090ae51b889",
+  "duration_seconds": 2.18,
+  "error": null,
+  "usage": {"input_tokens": 16883, "cached_input_tokens": 11227, "output_tokens": 4},
+  "accounting_status": "complete",
+  "calculated_cost": {"amount_usd": 0.00124527, "currency": "USD", "priced_as": "claude-haiku-5-5"},
+  "billing": {"route": "subscription", "credential_source": "claude-oauth"},
+  "refusal": null
+}
+```
+
+Continue the same harness session from any directory with the run ID:
+
+```sh
+aop resume 5f668bbc-cad7-4852-b1b3-00b021952dd2 --prompt "Now reply with silver."
+```
+
+To work on a repository, run from inside it. AOP creates a worktree for the task and leaves your checkout alone:
 
 ```sh
 aop init
 aop run task-a --agent codex --prompt "Implement the parser and its tests"
 ```
 
-`aop init` adds `/.aop/` to `.gitignore`; commit that change before integrating tasks. AOP creates
-the task worktree automatically and prints the run ID needed to resume the exact provider session:
+`aop init` adds `/.aop/` to `.gitignore`; commit that before integrating tasks. See [Integration](docs/integration.md) for merging a task's changes back.
 
-```sh
-aop resume <run-id> --prompt "Address the review findings"
-```
+## Safety defaults
 
-Give a run read-only copies of files or whole project folders with `--input`, and leave out build output or large files with `--input-exclude`; `--dry-run` checks every input before anything is copied. Follow a running harness with `tail -f .aop/runs/<run-id>/events.jsonl`.
+AOP is built to run agents unattended, so know what a run can do before you start one:
 
-See the [CLI guide](docs/cli.md) for other harnesses, inputs, artifacts, batch runs, cleanup, and
-machine-readable results. See [Integration](docs/integration.md) when a task's changes are ready to
-checkpoint and merge.
+> [!WARNING]
+> - Harness permission prompts are always bypassed. The agent runs its tools without asking; the AOP sandbox and profile are the boundary.
+> - The network is open unless you pass `--no-web`. Without it, an agent can reach any host, including to send data out.
+> - The agent can read the credentials of its own harness, which AOP copies into the run so the harness can sign in.
+> - The `host` profile has no sandbox: the agent has your full user account and filesystem.
+> - AOP limits a run only by wall-clock time with `--timeout`. It has no spending, token, or resource cap.
+
+[Running unattended](docs/unattended.md) covers what the sandbox does and does not stop, every result status and exit code, recovery after a crash, and cleanup.
 
 ## Execution profiles
 
-AOP profiles describe the complete execution boundary rather than only where writes are allowed.
-The isolated profiles expose only the declared workspace, inputs, provider runtime, private state,
-cache, scratch, output, and required operating-system paths. `host` runs without that isolation.
+`--profile` sets what a run can see and change. The default is `edit`.
 
 | Profile | Use it when |
 | --- | --- |
 | `edit` | The agent should modify an isolated task worktree. |
 | `review` | The agent should inspect a task worktree without modifying it. |
 | `sealed` | The agent should see only explicit input snapshots, with no repository or inherited instructions. |
-| `host` | The command needs the native host environment and filesystem. |
+| `host` | The command needs the native host environment and filesystem, with no sandbox. |
 
-Inspect a declared profile or preview the intended policy without compiling or dispatching it:
+Preview a run's boundary without starting it:
 
 ```sh
-aop profile explain sealed
-aop profile explain sealed --agent codex --json
-aop run study-arm --profile sealed --prompt "Answer using only declared inputs" --dry-run
+aop run --agent codex --profile sealed --prompt "Answer using only declared inputs" --dry-run
 ```
 
-Profiles retain native network connectivity because the supported provider CLIs need it, except under `--no-web`. See [Execution profiles](docs/profiles.md) for the exact filesystem, instruction, environment, credential, input, and output boundaries.
+See [Execution profiles](docs/profiles.md) for exact filesystem, instruction, environment, credential, input, and output boundaries, and [CLI guide](docs/cli.md#disable-model-controlled-web-access) for `--no-web`.
 
-Use `--no-web` to deny model-controlled external retrieval while retaining the harness's inference connection. AOP restricts the harness's own web tools and, in sandboxed profiles, gives the run a network namespace whose only way out is a proxy allowing the harness's inference and login endpoints. AOP records the effective policy and every connection attempt, and rejects harnesses that cannot enforce the boundary. See [CLI guide](docs/cli.md#disable-model-controlled-web-access) for current support.
+## Documentation
 
-Codex `--no-web` uses the canonical top-level `web_search = "disabled"` mode introduced in Codex 0.82.0. AOP's current Codex app-server integration targets Codex 0.150.1 or newer.
-
-## Results and usage
-
-Every adapter records the same result shape, including provider session identity when available,
-timing, token usage, cost evidence, logs, and declared artifacts. See
-[Token usage and pricing](docs/token-usage.md) for the normalized token contract, provider mappings,
-and cost calculation rules.
-
-Results distinguish complete accounting from partial or unavailable deadline accounting. Codex deadlines use native app-server interruption to retain per-turn usage and an API-equivalent cost when available. If any harness terminates before reporting usage, `usage` and cost fields remain null instead of being reported as measured zero.
-
-AOP also keeps a copy of every result in `~/.local/state/aop/results/` (under `$XDG_STATE_HOME` when set), so a run's usage and cost remain available after the directory holding its `.aop` is deleted. Each result names the `.aop` directory it ran in.
-
-AOP reads only current run records. After upgrading from a version that wrote older records, run `aop migrate-results` once; it converts them in place and keeps each original beside it. See [Token usage and pricing](docs/token-usage.md#migrating-older-run-records).
+- [CLI guide](docs/cli.md): running and resuming tasks, inputs and artifacts, batches, models, and cleanup.
+- [Execution profiles](docs/profiles.md): what each profile exposes.
+- [Running unattended](docs/unattended.md): safety, statuses, exit codes, and recovery.
+- [Harness adapters](docs/harnesses.md): per-harness support, versions, and options.
+- [Token usage and pricing](docs/token-usage.md): the usage and cost fields, and upgrading old run records.
+- [Integration](docs/integration.md): checkpointing and merging task changes.
+- [Glossary](docs/glossary.md): the terms these pages use.
 
 ## Development
 
-Clone the repository and synchronize its locked development environment:
-
-```sh
-git clone https://github.com/wakamex/agent-orchestration-process.git
-cd agent-orchestration-process
-uv sync --locked
-uv run --locked python -m unittest discover -s tests
-uv run --locked ruff check src tests
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setting up a checkout and running the tests, including the opt-in tests against installed harnesses.

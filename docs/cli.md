@@ -32,8 +32,6 @@ Use `--prompt-file` for a prompt stored on disk, `--prompt-parts` for a Claude p
 effort, inference-provider, and resume behavior vary by harness. See
 [Harness adapters](harnesses.md).
 
-AOP preserves OpenCode's native `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` environment setting in sealed runs. OpenCode owns validation and the model-capacity bound. This can raise its default output ceiling for reasoning-heavy tasks without changing reasoning effort; record the selected value alongside experiment inputs. For example, prefix an invocation with `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=64000`.
-
 ## Execution profiles
 
 Select the access boundary with `--profile`:
@@ -59,7 +57,7 @@ environment, input, output, and network boundaries.
 Use `--no-web` when a run must not retrieve external information:
 
 ```sh
-aop run study-arm --agent claude --profile sealed --no-web \
+aop run --agent claude --profile sealed --no-web \
   --input source.md --prompt "Answer using only the declared source"
 ```
 
@@ -74,35 +72,33 @@ In the `edit`, `review`, and `sealed` profiles, AOP also enforces the boundary a
 ```sh
 aop run --agent claude --profile sealed --no-web \
   --provider-base-url http://127.0.0.1:18977 --prompt-file prompt.txt
-aop run study-arm --agent codex --profile sealed --no-web \
+aop run --agent codex --profile sealed --no-web \
   --allow-url https://api.example.com --prompt "..."
 ```
 
 `--allow-url` requires `--no-web` and a sandboxed profile, accepts `https` URLs and loopback `http` URLs, and is recorded in `request.json` as `allowed_urls`; resumes reuse it. These are the endpoints AOP allows for each harness, and the evidence for each:
 
-| Harness | Allowed endpoints | Evidence |
-| --- | --- | --- |
-| Claude | `api.anthropic.com:443` for inference, `platform.claude.com:443` for OAuth token refresh | A sealed `--no-web` run with the OAuth login answered; the refresh host is Claude Code's `TOKEN_URL` |
-| Codex | `chatgpt.com:443`; AOP refreshes Codex logins outside the sandbox | A sealed `--no-web` run with the ChatGPT login answered |
-| OpenCode | `opencode.ai:443` | A sealed `--no-web` run answered |
-| Grok | `auth.x.ai:443`, `cli-chat-proxy.grok.com:443` | A sealed `--no-web` run reached both hosts and got the same server reply as an unrestricted run |
-| DeepSeek Harness on its `deepseek-official` route | `api.deepseek.com:443` | A sealed `--no-web` run reached the API, which reported the account out of credit; the run's tool roster had no web or shell tools |
-| Devin | `server.codeium.com:443` | A sealed `--no-web` run answered; `web_search` and shell calls were refused and a `webfetch` to an outside site was blocked by the proxy |
-| Hermes with the `xai-oauth` provider | `auth.x.ai:443`, `api.x.ai:443` | A run reached `auth.x.ai` as an unrestricted run did; `api.x.ai` is the provider's configured base URL |
+| Harness | Allowed endpoints |
+| --- | --- |
+| Claude | `api.anthropic.com:443` for inference, `platform.claude.com:443` for OAuth token refresh |
+| Codex | `chatgpt.com:443`; AOP refreshes Codex logins outside the sandbox |
+| OpenCode | `opencode.ai:443` |
+| Grok | `auth.x.ai:443`, `cli-chat-proxy.grok.com:443` |
+| DeepSeek Harness on its `deepseek-official` route | `api.deepseek.com:443` |
+| Devin | `server.codeium.com:443` |
+| Hermes with the `xai-oauth` provider | `auth.x.ai:443`, `api.x.ai:443` |
 
-A harness or Hermes provider without an entry reaches only the URLs the run names. The network boundary cannot stop retrieval that a provider performs on its own servers through an allowed inference endpoint, such as a server-side search tool, and a shell holding the run's credentials could call such a tool directly. The harness-level restrictions above therefore still apply, and harnesses whose web search runs server-side also lose their shell tools:
+A harness or Hermes provider without an entry reaches only the URLs the run names, so a sandboxed `--no-web` run on another Hermes provider must name its inference endpoint with `--allow-url`. The network boundary cannot stop retrieval that a provider performs on its own servers through an allowed inference endpoint, such as a server-side search tool, and a shell holding the run's credentials could call such a tool directly. The harness-level restrictions above therefore still apply, and harnesses whose web search runs server-side also lose their shell tools:
 
 - DeepSeek Harness: AOP's patch disables the `web`, `web-search-deepseek`, `web-deepseek-api`, `web-fetch-http`, `tool-web`, `tool-bash`, `tool-pwsh`, `tool-jobs`, and `tool-workflow` plugins, because its `web_search` is a server-side tool call through the DeepSeek API host. File, subagent, skill, todo, and goal tools remain.
 - Devin: AOP adds the permission deny rules `exec` and `web_search` to the run's private Devin config, because `web_search` runs on Devin's API server. Its `webfetch` tool runs on the client, where the proxy refuses it. When a deny rule refuses a call, Devin ends the turn without a final message, so a run whose model insists on searching fails instead of continuing offline.
 
 Both require a sandboxed profile, because their remaining tools rely on the network namespace. The `host` profile has no sandbox and keeps only the harness-level restrictions.
 
-The effective policy is stored in `request.json` under `model_capabilities`. Some harnesses require a stronger restriction than the name suggests. OpenCode currently runs without any model-visible tools, while Codex, Claude, Grok, and Hermes retain local-only tools. Cursor and Antigravity currently reject `--no-web`: Antigravity's `search_web` and `read_url_content` run on Google's servers through its inference backend, and neither its `disabledTools` setting nor its permission rules removed them in a real run. Grok also rejects the `host` profile because host-visible global customizations cannot be excluded with its current automation interface.
+The effective policy is stored in `request.json` under `model_capabilities`. Some harnesses require a stronger restriction than the name suggests. OpenCode currently runs without any model-visible tools, while Codex, Claude, Grok, and Hermes retain local-only tools. Cursor and Antigravity currently reject `--no-web`: Antigravity's `search_web` and `read_url_content` run on Google's servers through its inference backend, and neither its `disabledTools` setting nor its permission rules removed them in a real run. Grok with `--no-web` also refuses the `host` profile, because Grok's host-wide customizations cannot be excluded there; Grok runs in `host` without `--no-web` normally.
 
 Exact resumes inherit the original `--no-web` policy and private provider state. For batch
 manifests, set `no_web = true` on a task.
-
-Codex runs use app-server for new turns and exact resumes. When `--timeout` expires, AOP requests native turn interruption and allows up to five additional seconds only for terminal accounting and process teardown. That grace does not extend the requested work budget, and the result remains timed out.
 
 ## Sealed runtime storage
 
@@ -110,7 +106,7 @@ For long-running sealed workloads that would exhaust `/run/user` tmpfs, set `AOP
 
 ## Machine-readable results
 
-Add `--json` to `run` or `resume` for the stable machine interface. Stdout then contains only the
+Add `--json` to `run` or `resume` for the stable machine interface. [Running unattended](unattended.md#how-a-run-ended) lists every `status` and exit code. Stdout then contains only the
 normalized result object, including its run ID, harness session ID, status, timing, token usage,
 final message, and artifacts. See [Token usage and pricing](token-usage.md) for the usage contract.
 
@@ -144,7 +140,7 @@ AOP checks every input before it creates any run state, and `--dry-run` runs the
 
 Each snapshot records its followed and skipped links and its excluded paths in `input-manifest.json`, and the run's `request.json` keeps `input_excludes` and `skip_external_links` so resumes apply them again.
 
-While a harness runs, its output grows in `events.jsonl` and `stderr.log` in the run directory, so `tail -f .aop/runs/RUN_ID/events.jsonl` shows its tool calls and messages as they happen. Codex and ZCode, which AOP drives through their own protocols, write these files when the run ends.
+While a harness runs, its output grows in `events.jsonl` and `stderr.log` in the run directory, so `tail -f .aop/runs/RUN_ID/events.jsonl` shows its tool calls and messages as they happen. Codex and Zcode, which AOP drives through their own protocols, write these files only when the run ends.
 
 An exact `sealed` resume inherits the parent run's snapshots unless new `--input` arguments replace
 them. Other profiles snapshot the recorded source paths again, so they receive the current files.
@@ -239,7 +235,7 @@ Cleanup removes the task worktree, scratch data, overlays, and private harness s
 request, input snapshots, normalized result, logs, final message, and archived artifacts. Repeating
 cleanup is safe, but an active task cannot be cleaned while it holds its execution lock. Cleanup prints each runtime directory it removes to stderr.
 
-AOP never removes runtime state on its own, because a task stays resumable until it is cleaned up. Each sealed run keeps a private harness home, scratch, and cache directory until then, so a caller that starts many sealed runs should clean up each task once it no longer needs to resume it. Run AOP, including cleanup, from the caller's own project directory: run records live under that directory's `.aop/runs`, and sealed runtime directories are named after it.
+AOP never removes runtime state on its own, because a task stays resumable until it is cleaned up. Each sealed run keeps a private harness home, scratch, and cache directory until then, so a caller that starts many sealed runs should clean up each task once it no longer needs to resume it. Start runs from the directory whose `.aop` should hold their records, such as your project's; `resume` and `cleanup` then work from anywhere.
 
 Inspect or explicitly manage task worktrees when needed:
 

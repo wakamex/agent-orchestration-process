@@ -20,10 +20,15 @@ PAGES = [
     ("README.md", ""),
     ("docs/cli.md", "cli/"),
     ("docs/profiles.md", "profiles/"),
+    ("docs/unattended.md", "unattended/"),
     ("docs/harnesses.md", "harnesses/"),
     ("docs/token-usage.md", "token-usage/"),
     ("docs/integration.md", "integration/"),
+    ("docs/glossary.md", "glossary/"),
 ]
+# Links to repository files that are not pages, such as CONTRIBUTING.md.
+REPO_FILE = re.compile(r"\]\(([A-Z][A-Za-z_-]*\.md)\)")
+GITHUB = "https://github.com/wakamex/agent-orchestration-process/blob/main/"
 LINK = re.compile(r"\]\((?:docs/)?([a-z-]+)\.md(#[^)]*)?\)")
 
 
@@ -59,6 +64,7 @@ def main() -> None:
                 extra.append(
                     f"{key} = {{ title = {toml_string(other_title)}, path = {toml_string(other_path)} }}"
                 )
+        body = REPO_FILE.sub(lambda m: f"]({GITHUB}{m.group(1)})", body)
         body = LINK.sub(lambda m: f"](@/{m.group(1)}.md{m.group(2) or ''})", body)
         if path == "":
             front = ["+++", f"title = {toml_string(title)}", 'sort_by = "none"', "", "[extra]", "toc = false", *extra, "+++"]

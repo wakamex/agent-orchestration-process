@@ -23,22 +23,22 @@ Use `aop models` to inspect installed or configured inventories and see whether 
 the authenticated harness, an installed default, or AOP's catalog. Exact resume retains the original
 harness, model, effort, inference provider, mode, and execution profile.
 
-Every adapter supports bounded execution, exact resume, all four execution profiles, input
-snapshots, validated artifacts, normalized terminal results and token usage, and retained
-provenance. Harness-native automation surfaces determine the remaining feature differences:
+Every adapter supports bounded execution, exact resume, the `edit`, `review`, `sealed`, and `host` profiles, input snapshots, validated artifacts, normalized results and token usage, and retained provenance. The rest differs by harness. The last column is the version each adapter was last tested with on 2026-10-22; newer versions usually work, and a harness change that breaks one is fixed in the next AOP release.
 
-| Harness | Enforced no-web | Participant | Model inventory | Provider override | Calculated cost | Provider-reported cost |
-| --- | --- | --- | --- | --- | --- | --- |
-| Codex | Yes | No | Account or authenticated route | Z.AI Coding Plan | API-equivalent | No |
-| Claude Code | Yes | No | Native SDK inventory plus catalog | No | CLI-calculated | No |
-| Cursor Agent | No | No | Account | No | No | No |
-| Devin CLI | No | No | Account | No | No | No |
-| OpenCode | Yes | No | Account | No | API-equivalent | When emitted |
-| Antigravity | No | No | Account | No | API-equivalent | No |
-| Grok Build | Isolated profiles only | No | Account | No | API-equivalent | When emitted |
-| Hermes | Yes | Experimental | Configured route | Yes | API-equivalent or CLI-calculated | When emitted |
-| DeepSeek Harness | No | No | Bundled defaults | Yes | Known provider routes | No |
-| Zcode | No | No | Authenticated Z.ai route or configured models | Through the model ID | Canonical Z.ai route, API-equivalent | No |
+| Harness | Enforced `--no-web` | Participant mode | Model inventory | Provider override | Calculated cost | Provider-reported cost | Minimum version | Last tested |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Codex | All profiles | No | Account or authenticated route | Z.AI Coding Plan | API-equivalent | No | 0.150.1 | 0.163.0 |
+| Claude Code | All profiles | No | Native inventory plus catalog | No | Claude Code's own figure | No | | 2.1.308 |
+| Cursor Agent | No | No | Account | No | No | No | | 2026.10.16 |
+| Devin CLI | Sandboxed profiles | No | Account | No | No | No | | 3000.11.92 |
+| OpenCode | All profiles | No | Account | No | API-equivalent | When emitted | | 1.19.3 |
+| Antigravity | No | No | Account | No | API-equivalent | No | 1.1.16 | 1.4.5 |
+| Grok Build | Sandboxed profiles | No | Account | No | API-equivalent | When emitted | | 1.0.60 |
+| Hermes | All profiles | Experimental | Configured route | Yes | API-equivalent or Hermes's own figure | When emitted | | 0.22.2 |
+| DeepSeek Harness | Sandboxed profiles | No | Bundled defaults | Yes | Known provider routes | No | | 0.2.1-rc.2 |
+| Zcode | No | No | Authenticated Z.ai route or configured models | Through the model ID | Canonical Z.ai route, API-equivalent | No | | 0.16.9 |
+
+"Sandboxed profiles" means `edit`, `review`, and `sealed`: these harnesses rely on AOP's network namespace for `--no-web`, so a `host` run with `--no-web` is refused.
 
 Calculated cost is an API-equivalent comparison unless the table identifies a native CLI
 calculation. Provider-reported cost remains separate and is retained only when the harness exposes
@@ -55,12 +55,12 @@ retrieval. Enforcement differs because the harnesses expose different native con
 | Codex | Native web search and tool network access disabled; local shell and file tools remain available inside Codex's network-disabled workspace sandbox. Native routes use authentication-only state; selected external routes receive an AOP-generated provider-only config. |
 | Claude Code | Local file-tool allowlist; safe mode, Chrome, and MCP restrictions enabled. |
 | OpenCode | All model tool calls denied; external plugins disabled. |
-| Grok Build | Isolated profiles only; local file-tool allowlist (`read_file`, `search_replace`, `grep`, `list_dir`, `todo_write`); native web, subagent, shell, fetch, and MCP routes denied, including the `search_tool` and `use_tool` MCP catalog tools; authentication-only state. Check with `AOP_TEST_GROK_BIN=/path/to/grok uv run --locked python -m unittest discover -s tests -p test_grok_native.py`, which needs no quota. |
+| Grok Build | Sandboxed profiles only; local file-tool allowlist (`read_file`, `search_replace`, `grep`, `list_dir`, `todo_write`); native web, subagent, shell, fetch, and MCP routes denied, including the `search_tool` and `use_tool` MCP catalog tools; authentication-only state. |
 | Hermes | `file` and `todo` toolsets only; safe mode disables customizations and MCP. |
 | Cursor Agent | Unsupported; the run fails before dispatch. |
-| Devin CLI | Unsupported; the run fails before dispatch. |
+| Devin CLI | Sandboxed profiles only; its shell and server-side web search tools denied, since Devin's web search runs on its own servers through the inference host; other tools remain. |
 | Antigravity | Unsupported; the run fails before dispatch. |
-| DeepSeek Harness | Unsupported; the run fails before dispatch. |
+| DeepSeek Harness | Sandboxed profiles only; its web, search, fetch, shell, jobs, and workflow plugins disabled, since its `web_search` runs on DeepSeek's servers through the inference host; file, subagent, skill, todo, and goal tools remain. |
 | Zcode | Unsupported; the run fails before dispatch. |
 
 The complete effective policy and adapter mechanisms are retained in each run's `request.json`.
@@ -128,7 +128,7 @@ only. Repository access is constrained by the selected AOP profile.
 aop run --agent claude --profile sealed --system-prompt '' --tools Bash,Read,Write,Edit --prompt-file prompt.txt
 ```
 
-`--prompt-parts PATH` sends the prompt as separate content blocks so that Anthropic's [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) can reuse a long shared prefix across runs. PATH holds a JSON list such as `[{"text": "...", "cache": true}, {"text": "..."}]`; the blocks are sent in order, and marking one with `"cache": true` places a cache mark on it, so a later request that starts with the same blocks reads them from cache. Anthropic allows four marks per request and Claude Code already places three (two on its system prompt and one on the context it appends after the prompt), so a prompt can mark one block. The mark uses Claude Code's one-hour cache lifetime, because the API rejects a five-minute mark placed before a one-hour one. A request finds a cached prefix only at a mark or up to 20 blocks before it, so a caller that grows a long shared prefix splits it into small blocks and marks the last block that later prompts will repeat. In two sealed Haiku runs whose shared prefix grew by 10 blocks between calls, the second read 92% of its input from cache. `request.json` keeps the joined text as `prompt` and the block lengths and marks as `prompt_parts`. `aop resume` accepts `--prompt-parts` for its new prompt; other harnesses reject the option.
+`--prompt-parts PATH` sends the prompt as separate content blocks, so Anthropic's [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) can reuse a long prefix shared across runs. PATH holds a JSON list such as `[{"text": "...", "cache": true}, {"text": "..."}]`, sent in order. Mark the last block that later prompts will repeat with `"cache": true`; a request finds a cached prefix only at that block or up to 20 blocks before its own mark, so split a long shared prefix into small blocks. Claude Code uses three of the four cache marks a request may carry, so a prompt can mark one block. `request.json` keeps the joined text as `prompt` and the block lengths and mark as `prompt_parts`. `aop resume` accepts `--prompt-parts` too; other harnesses reject it.
 
 ### Cursor Agent
 
@@ -150,6 +150,8 @@ On SSH, authenticate with `devin auth login --force-manual-token-flow`. Set `AOP
 Trajectory Interchange Format (ATIF) export containing its terminal response and resume identity.
 
 ### OpenCode
+
+AOP preserves OpenCode's native `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` environment setting in sealed runs. OpenCode owns validation and the model-capacity bound. It can raise OpenCode's default output ceiling for reasoning-heavy tasks without changing reasoning effort; record the selected value alongside experiment inputs. For example, prefix an invocation with `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=64000`.
 
 `aop models --agent opencode --refresh` refreshes both AOP's model catalog and OpenCode's native models.dev cache. Regular listings use OpenCode's native cache policy.
 
@@ -196,7 +198,7 @@ For `edit` and `review`, AOP seeds configuration, skills, hooks, and memories wh
 logs, databases, and caches private. `sealed` receives credentials without extensions or other user
 instruction sources.
 
-AOP asks the installed launcher for its own launch command with `hermes --print-runtime-command`, following one-line `exec` wrappers such as `~/.local/bin/hermes`. Isolated profiles mount the reported Python and checkout read-only, the user's `~/.hermes/tools` read-only, and the dependency store `~/.hermes/installs` under a temporary overlay: Hermes takes a lock and leases its dependency generation at every start, and those writes are discarded when the run ends. Each task's private home is `hermes/profiles/aop` beneath its provider state, the layout in which Hermes treats the enclosing folder as its data root and finds the store through links there. Runs set `HERMES_DISABLE_LAZY_INSTALLS=1`, so a task neither installs dependencies nor finishes a pending Hermes update, and never rewrites the checkout's launchers.
+AOP asks the installed launcher for its own launch command with `hermes --print-runtime-command`, so it supports Hermes installed by Hermes's own installer. Each run sets `HERMES_DISABLE_LAZY_INSTALLS=1`, so a task never installs dependencies, finishes a pending Hermes update, or rewrites Hermes's launchers. Do not run Hermes by hand with an AOP task's home as `HERMES_HOME`: without that setting Hermes treats the task as its installation's owner and rewrites the launchers to point into it.
 
 Some Hermes OAuth refresh tokens rotate after use. AOP keeps the freshest credentials in
 repository-private shared state and serializes Hermes turns so concurrent tasks cannot consume the
@@ -209,9 +211,7 @@ Hermes alone supports experimental participant mode:
 aop run player --agent hermes --mode participant --profile review --prompt "Submit one move"
 ```
 
-AOP requests one turn without model tools, but Hermes 0.20 does not have a supported no-tools
-option. Participant mode is therefore not a durable tool-security boundary. The selected AOP
-profile remains the filesystem boundary.
+Participant mode is for an agent that takes one turn in a structured exchange, such as a game move or a vote, rather than doing open-ended work. AOP asks Hermes for one turn without model tools, but Hermes has no supported way to remove its tools entirely, so participant mode is not a tool-security boundary; the AOP profile remains the filesystem boundary.
 
 ### DeepSeek Harness
 
@@ -225,9 +225,9 @@ The default route is `deepseek-official` with `deepseek-flash` (DeepSeek-V4.1-Fl
 
 The adapter targets dsh `0.2.1-rc.2`, which calls DeepSeek's Anthropic-compatible Messages API at `https://api.deepseek.com/anthropic`, and uses its public `Session.snapshotEvents()` interface and native user-message constructor. It sets the harness sandbox to `danger-full-access` with approval policy `never`, because dsh's workspace-only write policy excludes AOP's separate artifact directory. The AOP sandbox continues to enforce `edit`, `review`, and `sealed`; `host` retains host access. The effective harness policy is recorded in `request.json`. The optional DeepSeek plugin-package inventory is disabled: its new default-on collector rejects the generated profile's unversioned manifest when AOP installs its loose runner. dsh 0.2 attaches each session's log to every DeepSeek request by default; AOP turns that off. dsh installed with npm under any prefix works, including a user prefix that needs no `sudo`.
 
-Use Node.js 22.19 or newer within 22.x, or Node.js 24 or newer. The `host` profile inherits PATH; AOP rejects an unsupported Node version before dispatch. On this host, NVM's Node 22.14 failed to start the driver, while `/usr/bin/node` 22.22.2 passed. Set `PATH="/usr/bin:$PATH"` when running `host` with the system Node, or select a supported Node through your runtime manager. Isolated profiles use the Node visible inside the AOP sandbox.
+dsh needs Node.js 22.19 or newer within 22.x, or Node.js 24 or newer. The `host` profile uses the Node.js on your PATH, and AOP refuses an unsupported version before starting; the sandboxed profiles use the Node.js visible inside the sandbox.
 
-Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`. Run native integration checks with `AOP_TEST_DSH_BIN=/path/to/dsh uv run --locked python -m unittest discover -s tests -p test_dsh_native.py`. These use a local server that speaks the Messages API and test authentication projection, tools, artifacts, usage, and exact resume under all four profiles, and the tools a `--no-web` run offers the model, without real API credentials. Historical session-format migration remains owned by dsh; these tests exercise sessions created by the installed version.
+Set `AOP_DSH_SOURCE_HOME` when the source state is not `${DSH_HOME:-~/.dsh}`. dsh owns migrating its own historical session formats.
 
 ### Zcode
 

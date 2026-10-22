@@ -14,7 +14,11 @@ from agent_orchestration_process.runner import (
     CodexAdapter,
     adapter_for,
 )
-from agent_orchestration_process.worktrees import AOPError, WorktreeManager
+from agent_orchestration_process.worktrees import (
+    AOPError,
+    WorktreeManager,
+    results_archive_dir,
+)
 
 
 class ProfilesTest(AOPTestCase):
@@ -521,3 +525,33 @@ class ProfilesTest(AOPTestCase):
         assert result.command[result.command.index("--mcp-config") + 1] == (
             '{"mcpServers":{}}'
         )
+
+    def test_resume_and_cleanup_find_a_run_from_any_directory(
+        self,
+        tmp_path: Path,
+        fake_codex: Path,
+        monkeypatch: MonkeyPatch,
+        capsys: Capture,
+    ) -> None:
+        recorded = tmp_path / "recorded"
+        elsewhere = tmp_path / "elsewhere"
+        recorded.mkdir()
+        elsewhere.mkdir()
+        monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+        monkeypatch.chdir(recorded)
+        assert main(["run", "--profile", "sealed", "--prompt", "hello", "--json"]) == 0
+        run_id = json.loads(capsys.readouterr().out)["run_id"]
+
+        monkeypatch.chdir(elsewhere)
+        assert main(["resume", run_id, "--prompt", "again", "--json"]) == 0
+        resumed = json.loads(capsys.readouterr().out)
+        assert resumed["succeeded"], resumed["error"]
+        assert (recorded / ".aop" / "runs" / resumed["run_id"]).is_dir()
+        assert not (elsewhere / ".aop").exists()
+
+        # Without the archived copy, the registered state roots still find it.
+        (results_archive_dir() / f"{resumed['run_id']}.json").unlink()
+        assert main(["cleanup", resumed["run_id"]]) == 0
+        capsys.readouterr()
+        assert not (elsewhere / ".aop").exists()
+

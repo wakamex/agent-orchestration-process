@@ -26,6 +26,8 @@ Resume the exact harness session with the AOP run ID:
 aop resume <run-id> --prompt "Address the review findings"
 ```
 
+`aop resume` and `aop cleanup` work from any directory: they look for the run in the current repository and directory first, then in the state root its archived result names, then in every registered state root.
+
 Use `--prompt-file` for a prompt stored on disk, `--prompt-parts` for a Claude prompt split into cacheable blocks, and `--timeout` to set a wall-clock deadline. Model,
 effort, inference-provider, and resume behavior vary by harness. See
 [Harness adapters](harnesses.md).

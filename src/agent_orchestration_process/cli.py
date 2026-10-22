@@ -749,20 +749,36 @@ def _report_policy(
 
 
 def _manager_holding_run(run_id: str) -> WorktreeManager:
-    """The state of the run: the repository's, or the current directory's.
+    """The state that holds the run, found from any directory.
 
-    Sealed runs record themselves under the current directory even inside a
-    repository, so a resume or cleanup looks in both places.
+    The repository or current directory comes first, since sealed runs
+    record themselves under the current directory even inside a repository.
+    Otherwise the run's archived result names its state root, and failing
+    that the registered state roots are searched.
     """
     try:
         repository = WorktreeManager.discover(Path.cwd())
     except AOPError:
         repository = None
-    if repository is not None and (repository.state_dir / "runs" / run_id).is_dir():
-        return repository
-    if repository is None or (Path.cwd() / ".aop" / "runs" / run_id).is_dir():
-        return WorktreeManager.standalone(Path.cwd())
-    return repository
+    for state_dir in (
+        repository.state_dir if repository is not None else None,
+        Path.cwd() / ".aop",
+        _archived_state_root(run_id),
+        *registered_state_roots(),
+    ):
+        if state_dir is not None and (state_dir / "runs" / run_id).is_dir():
+            return WorktreeManager(state_dir.parent)
+    return repository or WorktreeManager.standalone(Path.cwd())
+
+
+def _archived_state_root(run_id: str) -> Path | None:
+    try:
+        recorded = json.loads(
+            (results_archive_dir() / f"{run_id}.json").read_text()
+        )["state_root"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return Path(recorded) if isinstance(recorded, str) else None
 
 
 def _migrate_results(runs_dirs: Sequence[Path], *, dry_run: bool) -> int:

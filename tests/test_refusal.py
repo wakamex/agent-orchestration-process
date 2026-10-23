@@ -106,3 +106,21 @@ class RefusalTest(AOPTestCase):
                    "retracted_messages": [], "event_line": 4}
         loaded = RunResult.from_dict({**record, "refusal": refusal})
         assert RunResult.from_dict(loaded.to_dict()).refusal == refusal
+
+
+class UnansweredTest(AOPTestCase):
+    def test_empty_answers_and_tool_calls_written_as_text_are_not_answers(self) -> None:
+        from agent_orchestration_process.runner import _unanswered
+
+        dsml = (
+            '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="bash">\n'
+            '<｜｜DSML｜｜ parameter name="command" string="true">cat /inputs/a.txt'
+            "</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"
+        )
+        assert "tool call as text" in _unanswered(dsml)
+        assert "tool call as text" in _unanswered("Let me look.\n\n<｜DSML｜tool_calls>")
+        assert _unanswered("\n\n") == "the harness returned an empty answer"
+        assert _unanswered("") == "the harness returned an empty answer"
+        assert _unanswered("", artifacts_declared=True) is None
+        assert _unanswered("The answer is 4.") is None
+        assert _unanswered(None) is None

@@ -179,6 +179,33 @@ def _check_resumed_session(
     )
 
 
+# DeepSeek's tool-call markup, as in "<｜DSML｜invoke name=...>". A final answer
+# made of it is a tool call the harness did not recognize or run.
+_TOOL_CALL_AS_TEXT = re.compile(r"<｜+\s*DSML\s*｜+")
+
+
+def _unanswered(
+    final_message: str | None, *, artifacts_declared: bool = False
+) -> str | None:
+    """Why a final message that a harness reported is not an answer, if it is not.
+
+    A run that declares artifacts delivers them as files, so an empty closing
+    message is acceptable there; AOP checks the artifacts themselves.
+    """
+    if final_message is None:
+        return None
+    if not final_message.strip():
+        if artifacts_declared:
+            return None
+        return "the harness returned an empty answer"
+    if _TOOL_CALL_AS_TEXT.search(final_message):
+        return (
+            "the model wrote a tool call as text instead of making it, "
+            "so the harness never ran it"
+        )
+    return None
+
+
 def _build_run_result(
     request: RunRequest,
     capture: _ProcessCapture | zcode_protocol.Capture,
@@ -199,6 +226,8 @@ def _build_run_result(
     provider_error: str | None = None,
     refusal: dict[str, Any] | None = None,
 ) -> RunResult:
+    if error is None:
+        error = _unanswered(final_message, artifacts_declared=bool(request.artifacts))
     return RunResult(
         run_id=request.run_id,
         provider=request.provider,

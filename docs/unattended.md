@@ -27,7 +27,7 @@ Every result has three fields that say how it ended:
 | --- | --- |
 | `succeeded` | The harness finished, reported its session, and returned an answer with no error. |
 | `response_available_with_provider_error` | The harness returned an answer but its provider also reported an error, for example a failed tool call late in the turn. Read `final_message` and `provider_error`. |
-| `failed` | Anything else: the harness exited with an error, timed out, returned no answer, or AOP rejected the result. `error` says why. |
+| `failed` | Anything else: the harness exited with an error, timed out, or returned no answer, or AOP rejected the result. An empty answer counts as none unless the run declared artifacts, and so does an answer that is a tool call the model wrote as text instead of making it. `error` says why. |
 
 - `timed_out` is true when `--timeout` ended the run.
 - `refusal` is set when the provider refused the input, with its category and the models that refused. A refusal never succeeds on retry; an outage, quota limit, or expired login has `refusal: null` and may.

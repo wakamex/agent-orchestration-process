@@ -4374,8 +4374,10 @@ def _hermes_runtime(
     python = Path(command[0])
     if root is None or not python.is_absolute() or not Path(root.group(1)).is_dir():
         raise AOPError("Hermes reported a launch command without its installation")
-    sources = {python.resolve().parent.parent, Path(root.group(1)).resolve()}
-    return command, [(os.fspath(path), os.fspath(path)) for path in sorted(sources)]
+    # Mount each tree at the path Hermes reported, which may run through a
+    # symlink, from its resolved location.
+    trees = {python.parent.parent, Path(root.group(1))}
+    return command, sorted((os.fspath(tree.resolve()), os.fspath(tree)) for tree in trees)
 
 
 def _guest_path(value: str, mappings: tuple[tuple[Path, Path], ...]) -> str:

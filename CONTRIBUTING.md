@@ -20,9 +20,12 @@ These tests run a real installed harness and are skipped unless its variable nam
 | --- | --- |
 | `AOP_TEST_DSH_BIN=/path/to/dsh` | DeepSeek Harness run and exact resume under all four profiles against a local Messages API server, and the tools a `--no-web` run offers |
 | `AOP_TEST_GROK_BIN=/path/to/grok` | the tools a sealed `--no-web` Grok run offers |
+| `AOP_TEST_HERMES_BIN=/path/to/hermes` | Hermes run and exact resume in the `sealed` and `host` profiles against a local OpenAI-compatible server; `AOP_TEST_HERMES_HOME` names the Hermes home whose dependency store and tools to use, by default `~/.hermes` |
+| `AOP_TEST_AGY_BIN=/path/to/agy` | Antigravity starts inside the `sealed`, `edit`, and `host` profiles with its tools and working directory, using your signed-in Antigravity home; it sends no prompt |
 
 ```sh
-AOP_TEST_DSH_BIN=$(command -v dsh) uv run --locked python -m unittest discover -s tests -p 'test_*native.py'
+AOP_TEST_DSH_BIN=$(command -v dsh) AOP_TEST_HERMES_BIN=$(command -v hermes) AOP_TEST_AGY_BIN=$(command -v agy) \
+  uv run --locked python -m unittest discover -s tests -p 'test_*native.py'
 ```
 
 Run them after updating a harness, before relying on it through AOP.

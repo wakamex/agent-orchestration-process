@@ -267,11 +267,26 @@ class WorktreeManager:
                 return worktree
         raise AOPError(f"unknown task worktree: {task}")
 
-    def remove(self, task: str, *, force: bool = False) -> None:
+    def remove(self, task: str, *, force: bool = False) -> str | None:
+        """Remove a task's worktree and private state.
+
+        A worktree whose commit no branch or tag contains would lose it, so the
+        commit is first kept at refs/aop-archive/<task>/<commit>, whose name is
+        returned.
+        """
         from .locks import exclusive_lock, task_lock_path
 
         with exclusive_lock(task_lock_path(self.state_dir, task), f"task {task}"):
             worktree = self.get(task)
+            archived = None
+            head = worktree.head
+            reachable = git(
+                self.root, "for-each-ref", "--count=1", "--contains", head,
+                "refs/heads", "refs/tags", "refs/aop-archive",
+            ).stdout.strip()
+            if not reachable:
+                archived = f"refs/aop-archive/{task}/{head[:12]}"
+                git(self.root, "update-ref", archived, head)
             with self._lock():
                 args = ["worktree", "remove"]
                 if force:
@@ -286,6 +301,7 @@ class WorktreeManager:
                     self.state_dir / "provider-state" / task, ignore_errors=True
                 )
                 shutil.rmtree(self.state_dir / "scratch" / task, ignore_errors=True)
+            return archived
 
     def metadata(self, task: str) -> TaskMetadata:
         self._validate_task(task)

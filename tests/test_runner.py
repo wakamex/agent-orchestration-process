@@ -37,6 +37,7 @@ from agent_orchestration_process.runner import (
 from agent_orchestration_process.worktrees import (
     AOPError,
     WorktreeManager,
+    git,
     results_archive_dir,
 )
 
@@ -1588,6 +1589,61 @@ class RunnerTest(AOPTestCase):
 
         assert main(["cleanup", result.run_id]) == 0
         assert capsys.readouterr().out == "disposable\n"
+
+    def test_cleanup_keeps_a_task_commit_no_branch_contains(
+        self, repository: Path, capsys: Capture
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        merged = manager.create("merged")
+        unmerged = manager.create("unmerged")
+        (unmerged.path / "work.txt").write_text("work\n")
+        git(unmerged.path, "add", "work.txt")
+        git(unmerged.path, "commit", "-m", "Task work")
+        head = git(unmerged.path, "rev-parse", "HEAD").stdout.strip()
+
+        assert manager.remove("merged") is None
+        archived = manager.remove("unmerged")
+
+        assert archived == f"refs/aop-archive/unmerged/{head[:12]}"
+        assert git(repository, "rev-parse", archived).stdout.strip() == head
+        assert not merged.path.exists() and not unmerged.path.exists()
+
+    def test_cli_cleanup_all_removes_idle_tasks_and_skips_busy_ones(
+        self,
+        repository: Path,
+        fake_codex: Path,
+        monkeypatch: MonkeyPatch,
+        capsys: Capture,
+    ) -> None:
+        monkeypatch.chdir(repository)
+        manager = WorktreeManager.discover(repository)
+        AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+            task="recorded", prompt="first"
+        )
+        manager.create("unrecorded")
+        manager.create("busy")
+
+        assert main(["cleanup", "--all", "--dry-run"]) == 0
+        assert capsys.readouterr().out.splitlines() == [
+            "would remove task busy",
+            "would remove task recorded",
+            "would remove task unrecorded",
+        ]
+        assert len(manager.list()) == 3
+
+        with exclusive_lock(task_lock_path(manager.state_dir, "busy"), "task busy"):
+            assert main(["cleanup", "--all"]) == 1
+        output = capsys.readouterr()
+        assert output.out.splitlines() == [
+            "removed task recorded",
+            "removed task unrecorded",
+        ]
+        assert "skipped task busy: task busy is busy" in output.err
+        assert [item.task for item in manager.list()] == ["busy"]
+
+        assert main(["cleanup", "--all"]) == 0
+        assert manager.list() == []
+        assert main(["cleanup", "--dry-run", "x"]) == 2
 
     @parametrize("legacy_field", ["sandbox", "read_paths"])
     def test_requests_from_before_profiles_and_inputs_migrate_for_cleanup(

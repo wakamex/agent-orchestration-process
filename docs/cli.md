@@ -231,9 +231,16 @@ When you no longer need to resume or integrate a task, clean it up using any of 
 aop cleanup <run-id>
 ```
 
-Cleanup removes the task worktree, scratch data, overlays, and private harness state. It retains the
-request, input snapshots, normalized result, logs, final message, and archived artifacts. Repeating
-cleanup is safe, but an active task cannot be cleaned while it holds its execution lock. Cleanup prints each runtime directory it removes to stderr.
+Cleanup removes the task worktree, scratch data, overlays, and private harness state. It retains the request, input snapshots, normalized result, logs, final message, and archived artifacts. Repeating cleanup is safe, but an active task cannot be cleaned while it holds its execution lock. Cleanup prints each runtime directory it removes to stderr. A task commit that no branch or tag contains is kept at `refs/aop-archive/<task>/<commit>`, and cleanup prints that ref to stderr; integrated work is already on main and needs no such ref.
+
+To clean every task and sealed run in the current project's AOP state at once, including worktrees left without a run record:
+
+```sh
+aop cleanup --all --dry-run   # list what would be removed
+aop cleanup --all
+```
+
+Tasks that are still running are skipped and reported, and the command then exits 1, so it is safe to run while other runs are in progress.
 
 AOP never removes runtime state on its own, because a task stays resumable until it is cleaned up. Each sealed run keeps a private harness home, scratch, and cache directory until then, so a caller that starts many sealed runs should clean up each task once it no longer needs to resume it. Start runs from the directory whose `.aop` should hold their records, such as your project's; `resume` and `cleanup` then work from anywhere.
 

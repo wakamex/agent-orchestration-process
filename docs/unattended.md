@@ -58,7 +58,7 @@ A run whose AOP process died has a `request.json` but no `result.json`, and cann
 
 ## Cleanup and disk use
 
-AOP never deletes run state on its own, because a task stays resumable until it is cleaned up. Each task keeps its worktree or private sealed workspace, harness home, scratch, and cache until `aop cleanup <run-id>`, so a caller that starts many runs should clean up each one once it no longer needs to resume it. Cleanup keeps the run's request, input snapshots, result, logs, and archived artifacts.
+AOP never deletes run state on its own, because a task stays resumable until it is cleaned up. Each task keeps its worktree or private sealed workspace, harness home, scratch, and cache until `aop cleanup <run-id>`, so a caller that starts many runs should clean up each one once it no longer needs to resume it, or run `aop cleanup --all`, which skips tasks that are still running. Cleanup keeps the run's request, input snapshots, result, logs, and archived artifacts.
 
 AOP also keeps a copy of every result, about 10 KB each, in `~/.local/state/aop/results/`. It is never pruned.
 

@@ -96,7 +96,20 @@ def build_parser() -> argparse.ArgumentParser:
         "cleanup",
         help="discard the task worktree and private runtime state of a run's task",
     )
-    cleanup.add_argument("run_id")
+    targets = cleanup.add_mutually_exclusive_group(required=True)
+    targets.add_argument("run_id", nargs="?")
+    targets.add_argument(
+        "--all",
+        action="store_true",
+        help="clean every task and sealed run of this project's AOP state that "
+        "is not running; commits no branch contains are kept under "
+        "refs/aop-archive/",
+    )
+    cleanup.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --all, list what would be removed without removing it",
+    )
 
     checkpoint = commands.add_parser(
         "checkpoint", help="commit all current changes in a task worktree"
@@ -345,6 +358,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "run" and (args.profile == "sealed" or args.workdir):
             manager = WorktreeManager.standalone(Path.cwd())
+        elif args.command == "cleanup" and args.all:
+            try:
+                manager = WorktreeManager.discover(Path.cwd())
+            except AOPError:
+                manager = WorktreeManager.standalone(Path.cwd())
         elif args.command in {"resume", "cleanup"}:
             manager = _manager_holding_run(args.run_id)
         else:
@@ -355,6 +373,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"initialized AOP state in {manager.state_dir}")
             return 0
 
+        if args.command == "cleanup" and args.dry_run and not args.all:
+            raise AOPError("--dry-run requires --all")
+        if args.command == "cleanup" and args.all:
+            return _cleanup_all(manager, dry_run=args.dry_run)
         if args.command == "cleanup":
             request = RunStore(manager.state_dir / "runs").load_request(args.run_id)
             if request.profile == "sealed":
@@ -362,7 +384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif request.workdir is not None:
                 pass  # The caller's directory is not AOP's to remove.
             elif any(item.task == request.task for item in manager.list()):
-                manager.remove(request.task, force=True)
+                _report_archived(manager.remove(request.task, force=True))
             print(request.task)
             return 0
 
@@ -519,7 +541,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(manager.get(args.task).path)
             return 0
         if args.worktree_command == "remove":
-            manager.remove(args.task, force=args.force)
+            _report_archived(manager.remove(args.task, force=args.force))
             return 0
 
         raise AOPError("unsupported command")
@@ -808,8 +830,66 @@ def _migrate_results(runs_dirs: Sequence[Path], *, dry_run: bool) -> int:
     return 1 if errors else 0
 
 
+def _report_archived(ref: str | None) -> None:
+    if ref is not None:
+        print(f"aop: kept its unmerged commit at {ref}", file=sys.stderr)
+
+
+def _cleanup_all(manager: WorktreeManager, *, dry_run: bool) -> int:
+    """Clean every task worktree and sealed run in this state, skipping busy ones.
+
+    Worktrees are found from Git, so a task whose run record is missing is
+    cleaned too. Run records, results, logs, and artifacts are kept.
+    """
+    skipped = 0
+    try:
+        tasks = [item.task for item in manager.list()]
+    except AOPError:
+        tasks = []  # Not a Git repository: only sealed runs.
+    sealed = []
+    runs = manager.state_dir / "runs"
+    for run_dir in sorted(runs.iterdir()) if runs.is_dir() else []:
+        try:
+            request = RunStore(runs).load_request(run_dir.name)
+        except AOPError as error:
+            skipped += 1
+            print(f"aop: skipped run {run_dir.name}: {error}", file=sys.stderr)
+            continue
+        if request.profile == "sealed" and _sealed_paths(manager, request):
+            sealed.append(request)
+    for task in tasks:
+        if dry_run:
+            print(f"would remove task {task}")
+            continue
+        try:
+            _report_archived(manager.remove(task, force=True))
+            print(f"removed task {task}")
+        except AOPError as error:
+            skipped += 1
+            print(f"aop: skipped task {task}: {error}", file=sys.stderr)
+    for request in sealed:
+        if dry_run:
+            print(f"would clean sealed run {request.run_id}")
+            continue
+        try:
+            _cleanup_sealed(manager, request)
+            print(f"cleaned sealed run {request.run_id}")
+        except AOPError as error:
+            skipped += 1
+            print(f"aop: skipped sealed run {request.run_id}: {error}", file=sys.stderr)
+    return 1 if skipped else 0
+
+
 def _cleanup_sealed(manager: WorktreeManager, request: RunRequest) -> None:
-    task = request.task
+    with exclusive_lock(
+        task_lock_path(manager.state_dir, request.task), f"task {request.task}"
+    ):
+        for path in _sealed_paths(manager, request):
+            shutil.rmtree(path)
+            print(f"aop: removed {path}", file=sys.stderr)
+
+
+def _sealed_paths(manager: WorktreeManager, request: RunRequest) -> list[Path]:
     policy = request.effective_policy
     workspace = policy.get("workspace", {})
     controller = policy.get("controller", {})
@@ -824,12 +904,8 @@ def _cleanup_sealed(manager: WorktreeManager, request: RunRequest) -> None:
         (controller.get("cache"), "sealed-cache"),
         (controller.get("input_projection_root"), "input-projections"),
     ]
-    with exclusive_lock(task_lock_path(manager.state_dir, task), f"task {task}"):
-        for value, kind in recorded:
-            path = _sealed_runtime_path(manager, value, kind)
-            if path is not None:
-                shutil.rmtree(path)
-                print(f"aop: removed {path}", file=sys.stderr)
+    paths = (_sealed_runtime_path(manager, value, kind) for value, kind in recorded)
+    return [path for path in paths if path is not None]
 
 
 def _sealed_runtime_path(

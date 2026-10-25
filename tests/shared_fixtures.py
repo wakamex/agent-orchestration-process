@@ -1783,3 +1783,108 @@ print(json.dumps(terminal), flush=True)
     )
     executable.chmod(0o755)
     return executable
+
+
+# Writes the records `muse exec --json` writes for one turn: the session's own
+# stream, a model task's stream, the run's usage, and its terminal record.
+FAKE_MUSE = """#!{python}
+import json, os, pathlib, sys, uuid
+
+args = sys.argv[1:]
+assert args[:3] == ["exec", "--json", "--yolo"], args
+config = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "muse"
+data = pathlib.Path(os.environ["XDG_DATA_HOME"]) / "muse"
+if not (config / "auth.json").is_file():
+    raise SystemExit("missing private Muse login")
+if any(pathlib.Path(os.environ["HOME"]).iterdir()):
+    raise SystemExit("home is not empty")
+prompt = pathlib.Path(args[args.index("--prompt-file") + 1]).read_text()
+sessions = data / "fake-sessions.json"
+known = json.loads(sessions.read_text()) if sessions.is_file() else []
+if "--session-id" in args:
+    session = args[args.index("--session-id") + 1]
+    if session not in known:
+        raise SystemExit("unknown session")
+else:
+    session = str(uuid.uuid4())
+    data.mkdir(parents=True, exist_ok=True)
+    sessions.write_text(json.dumps([*known, session]))
+command = str(uuid.uuid4())
+model = args[args.index("--model") + 1] if "--model" in args else None
+if prompt == "LIST_CONFIG":
+    text = " ".join(sorted(p.name for p in config.iterdir()))
+    settings = config / "settings.json"
+    if settings.is_file():
+        text += " " + " ".join(sorted(json.loads(settings.read_text())))
+else:
+    text = "answer:" + prompt
+terminal = "failed" if prompt == "MUSE_FAIL" else "completed"
+
+def emit(stream_kind, stream_id, payload_type, payload):
+    print(json.dumps({{
+        "schema_version": 1,
+        "stream": {{"kind": stream_kind, "id": stream_id}},
+        "payload_type": payload_type,
+        "payload": {{"command_id": command, **payload}},
+    }}), flush=True)
+
+emit("session", session, "turn.input.user", {{"prompt": prompt}})
+emit("task", str(uuid.uuid4()), "run.terminal.completed", {{"terminal": "completed", "text": "reminder"}})
+emit("session", session, "run.output.delta", {{"text": text}})
+emit("run", command, "run.usage", {{"models": [{{
+    "model": model, "input_tokens": 120, "cached_tokens": 40,
+    "output_tokens": 30, "reasoning_tokens": 10,
+}}]}})
+emit("session", session, "run.terminal." + terminal, {{
+    "terminal": terminal,
+    "reason": "model call failed" if terminal == "failed" else None,
+    "text": "" if terminal == "failed" else text,
+}})
+"""
+
+
+@fixture
+def fake_muse(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
+    binary = tmp_path / "muse"
+    binary.write_text(FAKE_MUSE.format(python=sys.executable))
+    binary.chmod(0o755)
+    config = tmp_path / "muse-config"
+    config.mkdir()
+    (config / "auth.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "providers": {"meta": {"subs_active": True}}}
+        )
+    )
+    (config / "settings.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "contributor_mode_enabled": False,
+                "telemetry": {"enabled": False},
+                "hooks": {"secret": "instruction"},
+            }
+        )
+    )
+    (tmp_path / "codex-agents.md").write_text("rules\n")
+    (config / "AGENTS.md").symlink_to(tmp_path / "codex-agents.md")
+    catalog = tmp_path / "muse-data" / "model-catalog"
+    catalog.mkdir(parents=True)
+    (catalog / "meta.json").write_text(
+        json.dumps(
+            {
+                "provider_id": "meta",
+                "rows": [
+                    {"model_id": "muse-spark-1.3", "visibility": "visible"},
+                    {
+                        "model_id": "muse-wonder-1.0",
+                        "visibility": "visible",
+                        "is_default": True,
+                    },
+                ],
+            }
+        )
+    )
+    monkeypatch.setenv("AOP_MUSE_CONFIG_DIR", os.fspath(config))
+    monkeypatch.setenv("AOP_MUSE_DATA_DIR", os.fspath(tmp_path / "muse-data"))
+    return binary
+

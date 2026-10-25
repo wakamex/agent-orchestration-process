@@ -18,6 +18,7 @@ session mechanism while giving every run the same AOP access controls and result
 | [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes` | Hermes's configured default; AOP records the model from its session | Uses the configured inference provider unless both `--provider` and `--model` override it. |
 | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | `dsh` | `deepseek-flash` through `deepseek-official` | Also supports `deepseek-v4-pro`; another configured route requires both `--provider` and `--model`. |
 | Zcode | `zcode` | Native configured model | Uses native `provider/model` IDs and model-specific effort levels verified through the app-server. |
+| [Muse Code](https://dev.meta.ai/) | `muse` | the `model` in Muse's settings, else the default in its cached model catalog | Accepts native effort from `none` through `ultra`. |
 
 Use `aop models` to inspect installed or configured inventories and see whether each entry came from
 the authenticated harness, an installed default, or AOP's catalog. Exact resume retains the original
@@ -37,6 +38,7 @@ Every adapter supports bounded execution, exact resume, the `edit`, `review`, `s
 | Hermes | All profiles | Experimental | Configured route | Yes | API-equivalent or Hermes's own figure | When emitted | | 0.22.2 |
 | DeepSeek Harness | Sandboxed profiles | No | Bundled defaults | Yes | Known provider routes | No | | 0.2.1-rc.2 |
 | Zcode | No | No | Authenticated Z.ai route or configured models | Through the model ID | Canonical Z.ai route, API-equivalent | No | | 0.16.9 |
+| Muse Code | No | No | Cached account catalog | No | No | No | | 1.4.12 |
 
 "Sandboxed profiles" means `edit`, `review`, and `sealed`: these harnesses rely on AOP's network namespace for `--no-web`, so a `host` run with `--no-web` is refused.
 
@@ -253,6 +255,14 @@ All profiles, including `host`, use a task-private Zcode home. AOP projects the 
 
 Set `AOP_ZCODE_BIN` to a specific executable and `AOP_ZCODE_SOURCE_HOME` to a nonstandard source `.zcode` directory. AOP mounts the resolved CLI bundle and its sibling `packages` directory into isolated profiles, including installations launched through the stable `~/.local/bin/zcode` symlink. The integration is tested against the native 0.16.9 executable using a local inference server for run and exact resume under all four profiles, including effort values and the actual provider request body. Native Bash tool tests verify worktree edits, artifact collection, read-only workspace enforcement in `review`, and workspace invisibility in `sealed`.
 
+### Muse Code
+
+AOP runs `muse exec --json --yolo` with the prompt in a file. `--yolo` turns off Muse's approval prompts and its own command sandbox, so the AOP profile is the boundary, as for every harness. Resume passes the recorded session to `--session-id`. AOP reads the session ID, the final answer, and token usage from the `--json` records, and records the model from the usage record, or else the model Muse uses by default.
+
+Each task gets a private Muse config, data, and state directory and an empty home, so Muse does not read other agents' instructions and skills from `~/.claude`, `~/.codex`, or `~/.agents`. The config directory is seeded from `$XDG_CONFIG_HOME/muse`, by default `~/.config/muse`, and must hold the login that `muse login` saved in `auth.json`. `edit`, `review`, and `host` receive the whole config directory, with symbolic links such as `AGENTS.md` copied as the files they point to. `sealed` receives only `auth.json` and the `settings.json` members that choose the provider, the model and effort defaults, contributor mode, and telemetry, and runs with `--no-foreign-personal-context`. Keep `contributor_mode_enabled` and `telemetry` set in `settings.json`: without them, Muse sends turns to models whose content Meta may use and sends telemetry.
+
+Set `AOP_MUSE_BIN` when `muse` is not on `PATH`, `AOP_MUSE_CONFIG_DIR` for a nonstandard config directory, and `AOP_MUSE_DATA_DIR` for the data directory whose model catalog `aop models --agent muse` and the default model come from.
+
 ## Current limitations
 
 | Harness | Current limitation |
@@ -266,6 +276,7 @@ Set `AOP_ZCODE_BIN` to a specific executable and `AOP_ZCODE_SOURCE_HOME` to a no
 | Grok Build | No participant mode. |
 | Hermes | Participant mode is experimental; rotating OAuth credentials serialize Hermes turns. |
 | DeepSeek Harness | Developer-preview CLI; inventory lists bundled defaults rather than the selected provider; no participant mode. |
+| Muse Code | No `--no-web` or participant mode; no API-equivalent cost, since Meta publishes no token prices. |
 | Zcode | Live inventory requires a canonical Z.ai Coding Plan route and API key; other inventories are configuration-based. Requires the native app-server v4 command interface and selected provider API key. No standalone OAuth, no-web, participant mode, or provider-reported monetary cost. Project model selection must agree with an explicit override. |
 
 Antigravity integration requires Agy 1.1.16 or newer. AOP checks the installed version before
@@ -291,6 +302,7 @@ AOP_GROK_BIN
 AOP_HERMES_BIN
 AOP_DSH_BIN
 AOP_ZCODE_BIN
+AOP_MUSE_BIN
 AOP_BWRAP_BIN
 ```
 

@@ -41,6 +41,7 @@ AGENTS = (
     "hermes",
     "dsh",
     "zcode",
+    "muse",
 )
 NOUS_MODELS_URL = "https://inference-api.nousresearch.com/v1/models"
 
@@ -109,6 +110,8 @@ def list_models(
         return _grok_models(catalog)
     if agent == "zcode":
         return _zcode_models(catalog)
+    if agent == "muse":
+        return _muse_models()
     if agent == "dsh":
         _binary("dsh", "AOP_DSH_BIN", "dsh")
         return [
@@ -643,6 +646,28 @@ def _grok_models(catalog: ModelCatalog) -> list[AvailableModel]:
     if not records:
         raise AOPError("Grok did not return any models")
     return records
+
+
+def _muse_models() -> list[AvailableModel]:
+    from .runner import _muse_catalog_rows
+
+    _binary("muse", "AOP_MUSE_BIN", "muse")
+    rows = _muse_catalog_rows(dict(os.environ))
+    if not rows:
+        raise AOPError(
+            "Muse has no cached model catalog; run one Muse turn to fetch it"
+        )
+    return [
+        AvailableModel(
+            agent="muse",
+            model=row["model_id"],
+            name=str(row.get("display_label") or row["model_id"]),
+            availability="account",
+            price_scope="unknown",
+        )
+        for row in rows
+        if isinstance(row.get("model_id"), str)
+    ]
 
 
 def _devin_models() -> list[AvailableModel]:

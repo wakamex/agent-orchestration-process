@@ -2877,6 +2877,229 @@ class DevinAdapter:
         }
 
 
+class MuseAdapter:
+    provider = "muse"
+    modes = frozenset({"agent"})
+    EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+
+    def __init__(self, binary: str | None = None):
+        self.binary = binary or os.environ.get("AOP_MUSE_BIN", "muse")
+
+    def normalize_options(
+        self, model: str | None, effort: str | None
+    ) -> tuple[str | None, str | None]:
+        if effort is not None and effort not in self.EFFORTS:
+            raise AOPError(
+                f"Muse effort must be one of: {', '.join(sorted(self.EFFORTS))}"
+            )
+        return model or self.native_default_model(dict(os.environ)), effort
+
+    @staticmethod
+    def native_default_model(environment: dict[str, str]) -> str | None:
+        """The model Muse uses without --model: its settings' model, or else
+        the default in the model catalog it last fetched."""
+        settings = _muse_source_config(environment) / "settings.json"
+        try:
+            model = json.loads(settings.read_text()).get("model")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            model = None
+        if isinstance(model, str) and model:
+            return model
+        for row in _muse_catalog_rows(environment):
+            if row.get("is_default") is True and isinstance(row.get("model_id"), str):
+                return row["model_id"]
+        # With neither, the result records the model Muse reports using.
+        return None
+
+    def execute(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        run_dir: Path,
+        environment: dict[str, str],
+    ) -> RunResult:
+        billing = _prepare_muse_environment(environment)
+        prompt_path = prompt_transport.stage_prompt(
+            Path(environment["AOP_SCRATCH_DIR"]), request.run_id, request.prompt
+        )
+        command = _provider_command(
+            self._command(request, worktree, prompt_path, environment),
+            request,
+            worktree,
+            environment,
+        )
+        started_at = _now()
+        capture = _capture_process(
+            command,
+            cwd=worktree.path,
+            environment=environment,
+            prompt=None,
+            timeout_seconds=request.timeout_seconds,
+            is_response=self._is_response,
+            live_dir=run_dir,
+        )
+        parsed = self._parse(capture.stdout)
+        final_message = parsed["final_message"]
+        _write_run_logs(run_dir, capture, final_message)
+        reported_session_id = parsed["session_id"]
+        session_id, resume_error = _check_resumed_session(
+            "Muse", "session", request.session_id, reported_session_id
+        )
+
+        if capture.timed_out:
+            error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif capture.exit_code:
+            error = (
+                parsed["error"]
+                or capture.stderr.strip()
+                or f"Muse exited with status {capture.exit_code}"
+            )
+        elif resume_error:
+            error = resume_error
+        elif reported_session_id is None:
+            error = "Muse did not report a session ID"
+        elif parsed["terminal"] is None:
+            error = "Muse did not emit a terminal run event"
+        elif parsed["error"]:
+            error = parsed["error"]
+        else:
+            error = None
+
+        accounting = _finalize_accounting(
+            timed_out=capture.timed_out,
+            usage=parsed["usage"],
+            usage_observed=parsed["usage_observed"],
+            calculated_cost=None,
+            require_observed=True,
+        )
+        return _build_run_result(
+            request,
+            capture,
+            model=parsed["model"] or request.model,
+            session_id=session_id,
+            command=command,
+            started_at=started_at,
+            finished_at=_now(),
+            error=error,
+            final_message=final_message,
+            accounting=accounting,
+            billing=billing,
+            provider_status=parsed["terminal"],
+        )
+
+    def _command(
+        self,
+        request: RunRequest,
+        worktree: Worktree,
+        prompt_path: Path,
+        environment: dict[str, str],
+    ) -> list[str]:
+        # --yolo turns off Muse's approvals and its own command sandbox; the
+        # AOP profile is the boundary, as for every harness.
+        command = [
+            self.binary,
+            "exec",
+            "--json",
+            "--yolo",
+            "--workspace",
+            os.fspath(worktree.path),
+            "--prompt-file",
+            os.fspath(prompt_path),
+        ]
+        if _sealed(environment):
+            command.append("--no-foreign-personal-context")
+        if request.model:
+            command.extend(["--model", request.model])
+        if request.effort:
+            command.extend(["--reasoning-effort", request.effort])
+        if request.session_id:
+            command.extend(["--session-id", request.session_id])
+        return command
+
+    @staticmethod
+    def _is_response(line: str) -> bool:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        return (
+            isinstance(event, dict)
+            and event.get("payload_type") == "run.output.delta"
+            and isinstance(event.get("payload"), dict)
+            and bool(event["payload"].get("text"))
+        )
+
+    @staticmethod
+    def _parse(output: str) -> dict[str, object]:
+        """Read Muse's `exec --json` records.
+
+        The session's own stream carries the run's terminal record; reminder
+        and model tasks run on streams of their own.
+        """
+        session_id = None
+        terminal = None
+        final_message = None
+        error = None
+        usage_by_command: dict[object, dict[str, object]] = {}
+        command_id = None
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or not isinstance(
+                payload := event.get("payload"), dict
+            ):
+                continue
+            stream = event.get("stream")
+            on_session = isinstance(stream, dict) and stream.get("kind") == "session"
+            if on_session and session_id is None and isinstance(stream.get("id"), str):
+                session_id = stream["id"] or None
+            payload_type = event.get("payload_type")
+            if payload_type == "run.usage":
+                usage_by_command[payload.get("command_id")] = payload
+            elif (
+                on_session
+                and isinstance(payload_type, str)
+                and payload_type.startswith("run.terminal.")
+            ):
+                terminal = payload.get("terminal")
+                terminal = terminal if isinstance(terminal, str) else payload_type
+                command_id = payload.get("command_id")
+                text = payload.get("text")
+                final_message = text if isinstance(text, str) and text else None
+                reason = payload.get("reason")
+                error = (
+                    None
+                    if terminal == "completed"
+                    else f"Muse run ended {terminal}"
+                    + (f": {reason}" if isinstance(reason, str) and reason else "")
+                )
+        reported = usage_by_command.get(command_id)
+        models = reported.get("models") if reported else None
+        models = [item for item in models if isinstance(item, dict)] if isinstance(models, list) else []
+        usage = TokenUsage(
+            input_tokens=sum(nonnegative_int(item.get("input_tokens")) for item in models),
+            cached_input_tokens=sum(
+                nonnegative_int(item.get("cached_tokens")) for item in models
+            ),
+            output_tokens=sum(nonnegative_int(item.get("output_tokens")) for item in models),
+            reasoning_output_tokens=sum(
+                nonnegative_int(item.get("reasoning_tokens")) for item in models
+            ),
+        )
+        named = {item["model"] for item in models if isinstance(item.get("model"), str)}
+        return {
+            "session_id": session_id,
+            "terminal": terminal,
+            "final_message": final_message,
+            "error": error,
+            "usage": usage,
+            "usage_observed": bool(models),
+            "model": next(iter(named)) if len(named) == 1 else None,
+        }
+
+
 class OpenCodeAdapter:
     provider = "opencode"
     modes = frozenset({"agent"})
@@ -4173,6 +4396,7 @@ def _provider_command(
         "dsh",
         "grok",
         "hermes",
+        "muse",
         "opencode",
         "zcode",
     }:
@@ -5309,6 +5533,131 @@ def _devin_session_for_prompt(environment: dict[str, str], prompt: str) -> str |
     )
 
 
+def _muse_source_config(environment: dict[str, str]) -> Path:
+    configured = environment.get("AOP_MUSE_CONFIG_DIR")
+    base = Path(
+        environment.get("XDG_CONFIG_HOME", Path(environment["HOME"]) / ".config")
+    )
+    source = Path(configured).expanduser() if configured else base / "muse"
+    if not (source / "auth.json").is_file():
+        raise AOPError(
+            f"Muse authentication does not exist: {source / 'auth.json'}; "
+            "run `muse login` first"
+        )
+    return source.resolve()
+
+
+def _muse_catalog_rows(environment: dict[str, str]) -> list[dict[str, object]]:
+    """Visible rows of the Meta model catalog Muse caches in its data directory."""
+    configured = environment.get("AOP_MUSE_DATA_DIR")
+    base = Path(
+        environment.get("XDG_DATA_HOME", Path(environment["HOME"]) / ".local" / "share")
+    )
+    catalog = (Path(configured).expanduser() if configured else base / "muse") / "model-catalog"
+    rows: list[dict[str, object]] = []
+    for path in sorted(catalog.glob("*.json")) if catalog.is_dir() else []:
+        try:
+            value = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict) or value.get("provider_id") != "meta":
+            continue
+        rows.extend(
+            row
+            for row in value.get("rows") or []
+            if isinstance(row, dict) and row.get("visibility") == "visible"
+        )
+    return rows
+
+
+# Settings a sealed Muse run keeps: the provider and model defaults, and
+# whether Meta may use the run's content and receive telemetry. Rules, skills,
+# hooks, plugins, MCP servers, and agent definitions stay out.
+_MUSE_SEALED_SETTINGS = (
+    "schema_version",
+    "provider",
+    "model",
+    "reasoning_effort",
+    "model_reasoning_efforts",
+    "contributor_mode_enabled",
+    "contributor_mode_disclosure_acknowledged",
+    "telemetry",
+)
+
+
+def _prepare_muse_environment(environment: dict[str, str]) -> BillingProvenance:
+    source = _muse_source_config(environment)
+    destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "muse"
+    if not destination.is_dir():
+        temporary = destination.with_name(
+            f".{destination.name}.{uuid.uuid4().hex}.tmp"
+        )
+        private_config = temporary / "config" / "muse"
+        try:
+            for directory in ("home", "data", "state"):
+                (temporary / directory).mkdir(parents=True, mode=0o700)
+            private_config.mkdir(parents=True, mode=0o700)
+            if _sealed(environment):
+                shutil.copy2(source / "auth.json", private_config / "auth.json")
+                settings = source / "settings.json"
+                if settings.is_file():
+                    value = json.loads(settings.read_text())
+                    if not isinstance(value, dict):
+                        raise AOPError("Muse settings.json is not an object")
+                    private_config.joinpath("settings.json").write_text(
+                        json.dumps(
+                            {
+                                key: value[key]
+                                for key in _MUSE_SEALED_SETTINGS
+                                if key in value
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+            else:
+                # Links such as AGENTS.md -> ~/.codex/AGENTS.md are copied as
+                # their targets, which the sandbox does not mount.
+                for entry in source.iterdir():
+                    target = private_config / entry.name
+                    if entry.is_dir():
+                        shutil.copytree(
+                            entry, target, ignore_dangling_symlinks=True
+                        )
+                    elif entry.is_file():
+                        shutil.copy2(entry, target)
+            _make_tree_user_writable(temporary)
+            os.replace(temporary, destination)
+        except (OSError, json.JSONDecodeError) as error:
+            raise AOPError(f"could not prepare isolated Muse state: {error}") from error
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+    cache = Path(environment["AOP_CACHE_DIR"]) / "muse"
+    cache.mkdir(parents=True, exist_ok=True)
+    environment.update(
+        {
+            # An empty home: Muse also reads other agents' instructions and
+            # skills from ~/.claude, ~/.codex, and ~/.agents.
+            "HOME": os.fspath(destination / "home"),
+            "XDG_CONFIG_HOME": os.fspath(destination / "config"),
+            "XDG_DATA_HOME": os.fspath(destination / "data"),
+            "XDG_STATE_HOME": os.fspath(destination / "state"),
+            "XDG_CACHE_HOME": os.fspath(cache),
+        }
+    )
+    try:
+        meta = json.loads((source / "auth.json").read_text())["providers"]["meta"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        meta = {}
+    if isinstance(meta, dict) and meta.get("subs_active") is True:
+        return BillingProvenance(
+            route="subscription",
+            credential_source="muse-login",
+            detected_by="Muse auth.json with an active subscription",
+        )
+    return BillingProvenance(credential_source="muse-login")
+
+
 def _devin_source_data(environment: dict[str, str]) -> Path:
     configured = environment.get("AOP_DEVIN_DATA_DIR")
     base = Path(
@@ -5978,6 +6327,8 @@ def adapter_for(agent: str) -> AgentAdapter:
         return AgyAdapter()
     if agent == "hermes":
         return HermesAdapter()
+    if agent == "muse":
+        return MuseAdapter()
     raise AOPError(f"unknown agent: {agent}")
 
 
@@ -6840,6 +7191,12 @@ def _instruction_sources(
     elif request.provider == "hermes":
         home = _hermes_source_home(environment)
         candidates.extend(home / name for name in sorted(_HERMES_SEED_DIRECTORIES))
+    elif request.provider == "muse":
+        config = _muse_source_config(environment)
+        candidates.extend(
+            config / name
+            for name in ("AGENTS.md", "CLAUDE.md", "settings.json", "skills", "workflows")
+        )
     candidates.extend(worktree.path / name for name in ("AGENTS.md", "CLAUDE.md"))
     records = []
     for candidate in candidates:

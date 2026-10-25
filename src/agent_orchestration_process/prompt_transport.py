@@ -23,6 +23,7 @@ TRANSPORTS = {
     "dsh": "file",
     "zcode": "protocol",
     "hermes": "runtime-file",
+    "muse": "file",
 }
 
 

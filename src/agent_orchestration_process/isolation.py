@@ -329,6 +329,18 @@ _NO_WEB_POLICIES: dict[str, dict[str, object]] = {
         # Its shell keeps network access unless the sandbox removes it.
         "requires_network_sandbox": True,
     },
+    "muse": {
+        "model_tools": "denylist",
+        "allowed_toolsets": ["file tools"],
+        "enforcement": [
+            "muse --disable-web-tools",
+            "muse --disable-shell",
+            "AOP authentication-only Muse state",
+        ],
+        # web_search runs on Meta's servers through the inference host, which a
+        # shell holding the run's login could call directly.
+        "requires_network_sandbox": True,
+    },
     "opencode": {
         "model_tools": "denied",
         "allowed_toolsets": [],

@@ -2918,7 +2918,7 @@ class MuseAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
-        billing = _prepare_muse_environment(environment)
+        billing = _prepare_muse_environment(environment, no_web=request.no_web)
         prompt_path = prompt_transport.stage_prompt(
             Path(environment["AOP_SCRATCH_DIR"]), request.run_id, request.prompt
         )
@@ -3006,8 +3006,12 @@ class MuseAdapter:
             "--prompt-file",
             os.fspath(prompt_path),
         ]
-        if _sealed(environment):
+        if _sealed(environment) or request.no_web:
             command.append("--no-foreign-personal-context")
+        if request.no_web:
+            # web_search runs on Meta's servers through api.meta.ai, which the
+            # network sandbox must allow and a shell could call directly.
+            command.extend(["--disable-web-tools", "--disable-shell"])
         if request.model:
             command.extend(["--model", request.model])
         if request.effort:
@@ -5585,7 +5589,9 @@ _MUSE_SEALED_SETTINGS = (
 )
 
 
-def _prepare_muse_environment(environment: dict[str, str]) -> BillingProvenance:
+def _prepare_muse_environment(
+    environment: dict[str, str], *, no_web: bool = False
+) -> BillingProvenance:
     source = _muse_source_config(environment)
     destination = Path(environment["AOP_PROVIDER_STATE_DIR"]) / "muse"
     if not destination.is_dir():
@@ -5597,7 +5603,9 @@ def _prepare_muse_environment(environment: dict[str, str]) -> BillingProvenance:
             for directory in ("home", "data", "state"):
                 (temporary / directory).mkdir(parents=True, mode=0o700)
             private_config.mkdir(parents=True, mode=0o700)
-            if _sealed(environment):
+            # A --no-web run also leaves out MCP servers, plugins, and hooks,
+            # which could reach the web outside Muse's own web tools.
+            if _sealed(environment) or no_web:
                 shutil.copy2(source / "auth.json", private_config / "auth.json")
                 settings = source / "settings.json"
                 if settings.is_file():

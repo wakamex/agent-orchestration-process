@@ -68,7 +68,7 @@ class MuseAdapterTest(AOPTestCase):
         )
         assert not copied.is_symlink() and copied.read_text() == "rules\n"
 
-    def test_muse_failed_run_and_missing_login_and_no_web(
+    def test_muse_failed_run_no_web_and_missing_login(
         self, repository: Path, tmp_path: Path, fake_muse: Path
     ) -> None:
         binary = fake_muse
@@ -77,8 +77,9 @@ class MuseAdapterTest(AOPTestCase):
         runner = AgentRunner(manager, MuseAdapter(os.fspath(binary)))
 
         failed = runner.run(task="muse-fail", prompt="MUSE_FAIL")
-        with raises(AOPError, match="cannot enforce --no-web"):
-            runner.run(task="muse-web", prompt="x", no_web=True)
+        no_web = runner.run(task="muse-web", prompt="LIST_CONFIG", no_web=True)
+        with raises(AOPError, match="needs the network sandbox"):
+            runner.run(task="muse-host", prompt="x", profile="host", no_web=True)
         (config / "auth.json").unlink()
         with raises(AOPError, match="run `muse login` first"):
             runner.run(task="muse-login", prompt="x")
@@ -86,3 +87,8 @@ class MuseAdapterTest(AOPTestCase):
         assert not failed.succeeded
         assert failed.error == "Muse run ended failed: model call failed"
         assert failed.session_id
+        assert no_web.succeeded, no_web.error
+        assert {"--disable-web-tools", "--disable-shell"} <= set(no_web.command)
+        assert no_web.final_message == (
+            "auth.json settings.json contributor_mode_enabled schema_version telemetry"
+        )

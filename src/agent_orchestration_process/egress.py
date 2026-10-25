@@ -34,6 +34,8 @@ HARNESS_ENDPOINTS: dict[str, tuple[str, ...]] = {
     "grok": ("auth.x.ai:443", "cli-chat-proxy.grok.com:443"),
     # Devin's API server: inference, login, and its model list.
     "devin": ("server.codeium.com:443",),
+    # Muse Code's Meta API: inference and its model list.
+    "muse": ("api.meta.ai:443",),
     # OpenCode Zen inference.
     "opencode": ("opencode.ai:443",),
     # DeepSeek Harness and Hermes endpoints depend on their inference provider.

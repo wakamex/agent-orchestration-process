@@ -38,7 +38,7 @@ Every adapter supports bounded execution, exact resume, the `edit`, `review`, `s
 | Hermes | All profiles | Experimental | Configured route | Yes | API-equivalent or Hermes's own figure | When emitted | | 0.22.2 |
 | DeepSeek Harness | Sandboxed profiles | No | Bundled defaults | Yes | Known provider routes | No | | 0.2.1-rc.2 |
 | Zcode | No | No | Authenticated Z.ai route or configured models | Through the model ID | Canonical Z.ai route, API-equivalent | No | | 0.16.9 |
-| Muse Code | No | No | Cached account catalog | No | No | No | | 1.4.12 |
+| Muse Code | Sandboxed profiles | No | Cached account catalog | No | No | No | | 1.4.12 |
 
 "Sandboxed profiles" means `edit`, `review`, and `sealed`: these harnesses rely on AOP's network namespace for `--no-web`, so a `host` run with `--no-web` is refused.
 
@@ -261,7 +261,9 @@ AOP runs `muse exec --json --yolo` with the prompt in a file. `--yolo` turns off
 
 Each task gets a private Muse config, data, and state directory and an empty home, so Muse does not read other agents' instructions and skills from `~/.claude`, `~/.codex`, or `~/.agents`. The config directory is seeded from `$XDG_CONFIG_HOME/muse`, by default `~/.config/muse`, and must hold the login that `muse login` saved in `auth.json`. `edit`, `review`, and `host` receive the whole config directory, with symbolic links such as `AGENTS.md` copied as the files they point to. `sealed` receives only `auth.json` and the `settings.json` members that choose the provider, the model and effort defaults, contributor mode, and telemetry, and runs with `--no-foreign-personal-context`. Keep `contributor_mode_enabled` and `telemetry` set in `settings.json`: without them, Muse sends turns to models whose content Meta may use and sends telemetry.
 
-Set `AOP_MUSE_BIN` when `muse` is not on `PATH`, `AOP_MUSE_CONFIG_DIR` for a nonstandard config directory, and `AOP_MUSE_DATA_DIR` for the data directory whose model catalog `aop models --agent muse` and the default model come from.
+Under `--no-web`, AOP passes `--disable-web-tools`, which removes Muse's `web_search` and `web_fetch` tools, and `--disable-shell`. `web_search` runs on Meta's servers through `api.meta.ai`, which the network sandbox must allow for inference, so the network block alone could not stop it, and a shell holding the run's login could call it directly. File tools remain, and the network sandbox limits every connection the run makes to `api.meta.ai`, so `--no-web` needs a sandboxed profile. The run's config holds only what a sealed run receives, so MCP servers, plugins, and hooks stay out.
+
+Set `AOP_MUSE_BIN` when `muse` is not on `PATH` or is a wrapper rather than the Muse executable, `AOP_MUSE_CONFIG_DIR` for a nonstandard config directory, and `AOP_MUSE_DATA_DIR` for the data directory whose model catalog `aop models --agent muse` and the default model come from.
 
 ## Current limitations
 
@@ -276,7 +278,7 @@ Set `AOP_MUSE_BIN` when `muse` is not on `PATH`, `AOP_MUSE_CONFIG_DIR` for a non
 | Grok Build | No participant mode. |
 | Hermes | Participant mode is experimental; rotating OAuth credentials serialize Hermes turns. |
 | DeepSeek Harness | Developer-preview CLI; inventory lists bundled defaults rather than the selected provider; no participant mode. |
-| Muse Code | No `--no-web` or participant mode; no API-equivalent cost, since Meta publishes no token prices. |
+| Muse Code | No participant mode; no API-equivalent cost, since Meta publishes no token prices. |
 | Zcode | Live inventory requires a canonical Z.ai Coding Plan route and API key; other inventories are configuration-based. Requires the native app-server v4 command interface and selected provider API key. No standalone OAuth, no-web, participant mode, or provider-reported monetary cost. Project model selection must agree with an explicit override. |
 
 Antigravity integration requires Agy 1.1.16 or newer. AOP checks the installed version before

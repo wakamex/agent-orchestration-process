@@ -86,14 +86,16 @@ aop run --agent codex --profile sealed --no-web \
 | Grok | `auth.x.ai:443`, `cli-chat-proxy.grok.com:443` |
 | DeepSeek Harness on its `deepseek-official` route | `api.deepseek.com:443` |
 | Devin | `server.codeium.com:443` |
+| Muse Code | `api.meta.ai:443` |
 | Hermes with the `xai-oauth` provider | `auth.x.ai:443`, `api.x.ai:443` |
 
 A harness or Hermes provider without an entry reaches only the URLs the run names, so a sandboxed `--no-web` run on another Hermes provider must name its inference endpoint with `--allow-url`. The network boundary cannot stop retrieval that a provider performs on its own servers through an allowed inference endpoint, such as a server-side search tool, and a shell holding the run's credentials could call such a tool directly. The harness-level restrictions above therefore still apply, and harnesses whose web search runs server-side also lose their shell tools:
 
 - DeepSeek Harness: AOP's patch disables the `web`, `web-search-deepseek`, `web-deepseek-api`, `web-fetch-http`, `tool-web`, `tool-bash`, `tool-pwsh`, `tool-jobs`, and `tool-workflow` plugins, because its `web_search` is a server-side tool call through the DeepSeek API host. File, subagent, skill, todo, and goal tools remain.
 - Devin: AOP adds the permission deny rules `exec` and `web_search` to the run's private Devin config, because `web_search` runs on Devin's API server. Its `webfetch` tool runs on the client, where the proxy refuses it. When a deny rule refuses a call, Devin ends the turn without a final message, so a run whose model insists on searching fails instead of continuing offline.
+- Muse Code: AOP passes `--disable-web-tools`, which removes `web_search` and `web_fetch`, and `--disable-shell`, because `web_search` runs on Meta's servers through `api.meta.ai`. File tools remain.
 
-Both require a sandboxed profile, because their remaining tools rely on the network namespace. The `host` profile has no sandbox and keeps only the harness-level restrictions.
+All three require a sandboxed profile, because their remaining tools rely on the network namespace. The `host` profile has no sandbox and keeps only the harness-level restrictions.
 
 The effective policy is stored in `request.json` under `model_capabilities`. Some harnesses require a stronger restriction than the name suggests. OpenCode currently runs without any model-visible tools, while Codex, Claude, Grok, and Hermes retain local-only tools. Cursor and Antigravity currently reject `--no-web`: Antigravity's `search_web` and `read_url_content` run on Google's servers through its inference backend, and neither its `disabledTools` setting nor its permission rules removed them in a real run. Grok with `--no-web` also refuses the `host` profile, because Grok's host-wide customizations cannot be excluded there; Grok runs in `host` without `--no-web` normally.
 

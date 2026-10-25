@@ -17,9 +17,12 @@ from agent_orchestration_process.worktrees import WorktreeManager
 
 
 class MuseNativeTest(AOPTestCase):
-    @parametrize("profile", ["sealed", "edit", "host"])
+    @parametrize(
+        "profile,no_web",
+        [("sealed", False), ("edit", False), ("host", False), ("edit", True)],
+    )
     def test_installed_muse_answers_and_resumes_inside_each_profile(
-        self, repository, tmp_path, monkeypatch, profile
+        self, repository, tmp_path, monkeypatch, profile, no_web
     ):
         binary = os.environ.get("AOP_TEST_MUSE_BIN")
         if not binary:
@@ -47,7 +50,11 @@ class MuseNativeTest(AOPTestCase):
         runner = AgentRunner(manager, MuseAdapter(binary))
 
         first = runner.run(
-            task="native-muse", prompt="say copper", profile=profile, timeout_seconds=60
+            task="native-muse",
+            prompt="say copper",
+            profile=profile,
+            no_web=no_web,
+            timeout_seconds=60,
         )
         resumed = runner.resume(run_id=first.run_id, prompt="say silver")
 

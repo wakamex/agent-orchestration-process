@@ -3075,6 +3075,10 @@ class MuseAdapter:
             command.extend(["--reasoning-effort", request.effort])
         if request.session_id:
             command.extend(["--session-id", request.session_id])
+        if request.reminders == "none":
+            command.append("--disable-reminders")
+        elif request.reminders is not None:
+            command.extend(["-c", _muse_reminder_setting(request.reminders, environment)])
         return command
 
     @staticmethod
@@ -5595,6 +5599,62 @@ def _devin_session_for_prompt(environment: dict[str, str], prompt: str) -> str |
     )
 
 
+MUSE_REMINDERS = ("goal", "verify", "skill")
+
+
+def muse_reminders(value: str | None) -> str | None:
+    """Normalize a Muse reminder selection: all, none, or a subset in order."""
+    if value is None or value in {"all", "none"}:
+        return value
+    names = {name.strip() for name in value.split(",") if name.strip()}
+    unknown = names - set(MUSE_REMINDERS)
+    if not names or unknown:
+        raise AOPError(
+            "--reminders must be all, none, or a comma-separated subset of "
+            + ", ".join(MUSE_REMINDERS)
+        )
+    return ",".join(name for name in MUSE_REMINDERS if name in names)
+
+
+def _profile_default(setting: str | None, profile: str) -> str | None:
+    """The value for `profile` in a setting such as "goal,verify sealed=none".
+
+    Space-separated entries give a default and PROFILE=VALUE overrides.
+    """
+    default = None
+    for entry in (setting or "").split():
+        name, separator, value = entry.rpartition("=")
+        if not separator:
+            default = value
+        elif name not in PROFILES:
+            raise AOPError(f"unknown profile in AOP_MUSE_REMINDERS: {name}")
+        elif name == profile:
+            return value
+    return default
+
+
+def _muse_reminder_setting(reminders: str, environment: dict[str, str]) -> str:
+    """A -c runtime_capabilities value turning each Muse reminder on or off.
+
+    -c replaces the whole member, so the run's other capability settings are
+    carried over from its private settings.json.
+    """
+    settings = Path(environment["XDG_CONFIG_HOME"]) / "muse" / "settings.json"
+    try:
+        capabilities = json.loads(settings.read_text()).get("runtime_capabilities")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        capabilities = None
+    capabilities = dict(capabilities) if isinstance(capabilities, dict) else {}
+    enabled = MUSE_REMINDERS if reminders == "all" else reminders.split(",")
+    for name in MUSE_REMINDERS:
+        # Muse also reads an older key for each reminder; keep only one.
+        capabilities.pop(f"plugin:tbh-reminders:reminder:{name}-reminder", None)
+        capabilities[f"plugin:{name}-reminder:reminder:{name}-reminder"] = {
+            "enabled": name in enabled
+        }
+    return "runtime_capabilities=" + json.dumps(capabilities, sort_keys=True)
+
+
 def _muse_run_usage(
     environment: dict[str, str], session_id: object, run_id: object
 ) -> list[tuple[str, TokenUsage, str]] | None:
@@ -5764,16 +5824,22 @@ def _prepare_muse_environment(
                     value = json.loads(settings.read_text())
                     if not isinstance(value, dict):
                         raise AOPError("Muse settings.json is not an object")
+                    kept = {
+                        key: value[key] for key in _MUSE_SEALED_SETTINGS if key in value
+                    }
+                    capabilities = value.get("runtime_capabilities")
+                    if isinstance(capabilities, dict):
+                        # Reminder switches choose which model calls run; the
+                        # other capabilities can add tools and extensions.
+                        reminders = {
+                            key: setting
+                            for key, setting in capabilities.items()
+                            if ":reminder:" in key
+                        }
+                        if reminders:
+                            kept["runtime_capabilities"] = reminders
                     private_config.joinpath("settings.json").write_text(
-                        json.dumps(
-                            {
-                                key: value[key]
-                                for key in _MUSE_SEALED_SETTINGS
-                                if key in value
-                            },
-                            sort_keys=True,
-                        )
-                        + "\n"
+                        json.dumps(kept, sort_keys=True) + "\n"
                     )
             else:
                 # Links such as AGENTS.md -> ~/.codex/AGENTS.md are copied as
@@ -6531,6 +6597,7 @@ class AgentRunner:
         skip_external_links: bool = False,
         workdir: str | os.PathLike[str] | None = None,
         native_state: bool = False,
+        reminders: str | None = None,
     ) -> RunResult:
         self._validate_mode(mode)
         workdir = self._validated_workdir(workdir, profile)
@@ -6560,6 +6627,14 @@ class AgentRunner:
                     "--thinking-display must be one of: "
                     + ", ".join(CLAUDE_THINKING_DISPLAYS)
                 )
+        if self.adapter.provider == "muse":
+            reminders = muse_reminders(
+                reminders
+                if reminders is not None
+                else _profile_default(os.environ.get("AOP_MUSE_REMINDERS"), profile)
+            )
+        elif reminders is not None:
+            raise AOPError(f"{self.adapter.provider} does not support --reminders")
         tools = self._validated_framing(system_prompt, tools, no_web)
         self._validate_provider_base_url(provider_base_url, profile)
         allowed_urls = tuple(allowed_urls)
@@ -6598,6 +6673,7 @@ class AgentRunner:
             skip_external_links=skip_external_links,
             workdir=workdir,
             native_state=native_state,
+            reminders=reminders,
         )
         worktree = (
             Worktree(task=task, path=Path(workdir), head="")
@@ -6740,6 +6816,7 @@ class AgentRunner:
             skip_external_links=parent_request.skip_external_links,
             workdir=parent_request.workdir,
             native_state=parent_request.native_state,
+            reminders=parent_request.reminders,
         )
         return self._execute(
             request,
@@ -7111,6 +7188,7 @@ class AgentRunner:
         skip_external_links: bool = False,
         workdir: str | None = None,
         native_state: bool = False,
+        reminders: str | None = None,
     ) -> RunRequest:
         return RunRequest(
             run_id=str(uuid.uuid4()),
@@ -7143,6 +7221,7 @@ class AgentRunner:
             skip_external_links=skip_external_links,
             workdir=workdir,
             native_state=native_state,
+            reminders=reminders,
         )
 
     @staticmethod

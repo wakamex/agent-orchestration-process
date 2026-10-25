@@ -118,6 +118,9 @@ class RunRequest:
     # whether the harness keeps its own home and state there.
     workdir: str | None = None
     native_state: bool = False
+    # Which Muse reminder agents run: "all", "none", or a comma-separated
+    # subset such as "goal,verify"; None leaves Muse's own settings in charge.
+    reminders: str | None = None
     # How `aop migrate-results` converted an older record, if it did.
     migration: dict[str, Any] | None = None
 

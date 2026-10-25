@@ -209,6 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="exact comma-separated built-in tool set (claude only; '' for none)",
     )
     run.add_argument(
+        "--reminders",
+        metavar="WHICH",
+        help="which Muse reminder agents run: all, none, or a comma-separated "
+        "subset of goal, verify, skill; default AOP_MUSE_REMINDERS, else Muse's "
+        "own settings (muse only)",
+    )
+    run.add_argument(
         "--thinking-display",
         choices=["summarized", "omitted", "highlights"],
         help="how Claude returns the model's thinking, such as official summaries "
@@ -514,6 +521,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 allowed_urls=args.allowed_urls,
                 writable_workspace=args.writable_workspace,
                 thinking_display=args.thinking_display,
+                reminders=args.reminders,
             )
             return _report_run(result, manager, json_output=args.json)
 

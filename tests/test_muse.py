@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -110,3 +111,67 @@ class MuseAdapterTest(AOPTestCase):
         assert no_web.final_message == (
             "auth.json settings.json contributor_mode_enabled schema_version telemetry"
         )
+
+
+class MuseReminderTest(AOPTestCase):
+    def test_reminders_select_per_run_and_by_profile_default(
+        self, repository: Path, tmp_path: Path, fake_muse: Path, monkeypatch
+    ) -> None:
+        config = Path(os.environ["AOP_MUSE_CONFIG_DIR"])
+        settings = json.loads((config / "settings.json").read_text())
+        settings["runtime_capabilities"] = {
+            "plugin:other:tool:x": {"enabled": True},
+            "plugin:tbh-reminders:reminder:goal-reminder": {"enabled": False},
+        }
+        (config / "settings.json").write_text(json.dumps(settings))
+        monkeypatch.setenv("AOP_MUSE_REMINDERS", "goal,verify sealed=none")
+        edit = AgentRunner(
+            WorktreeManager.discover(repository), MuseAdapter(os.fspath(fake_muse))
+        )
+        sealed = AgentRunner(
+            WorktreeManager.standalone(tmp_path / "controller"),
+            MuseAdapter(os.fspath(fake_muse)),
+        )
+
+        default = edit.run(task="default", prompt="x")
+        resumed = edit.resume(run_id=default.run_id, prompt="y")
+        off = sealed.run(task="sealed", prompt="LIST_CONFIG", profile="sealed")
+        explicit = edit.run(task="explicit", prompt="x", reminders="all")
+
+        def setting(result):
+            value = result.command[result.command.index("-c") + 1]
+            name, _, encoded = value.partition("=")
+            assert name == "runtime_capabilities"
+            return json.loads(encoded)
+
+        assert setting(default) == {
+            "plugin:other:tool:x": {"enabled": True},
+            "plugin:goal-reminder:reminder:goal-reminder": {"enabled": True},
+            "plugin:verify-reminder:reminder:verify-reminder": {"enabled": True},
+            "plugin:skill-reminder:reminder:skill-reminder": {"enabled": False},
+        }
+        assert setting(resumed) == setting(default)
+        assert "--disable-reminders" in off.command and "-c" not in off.command
+        # A sealed run keeps the reminder switches, not other capabilities.
+        assert off.final_message.endswith("runtime_capabilities schema_version telemetry")
+        assert all(
+            value["enabled"]
+            for key, value in setting(explicit).items()
+            if key.startswith("plugin:") and ":reminder:" in key and "tbh" not in key
+        )
+
+    def test_reminder_selection_is_validated(
+        self, repository: Path, fake_muse: Path, monkeypatch
+    ) -> None:
+        runner = AgentRunner(
+            WorktreeManager.discover(repository), MuseAdapter(os.fspath(fake_muse))
+        )
+        with raises(AOPError, match="--reminders must be"):
+            runner.run(task="bad", prompt="x", reminders="goal,memory")
+        monkeypatch.setenv("AOP_MUSE_REMINDERS", "edits=none")
+        with raises(AOPError, match="unknown profile in AOP_MUSE_REMINDERS"):
+            runner.run(task="bad-env", prompt="x")
+        with raises(AOPError, match="does not support --reminders"):
+            AgentRunner(WorktreeManager.discover(repository)).run(
+                task="codex", prompt="x", reminders="none"
+            )

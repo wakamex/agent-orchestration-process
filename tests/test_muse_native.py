@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from support import AOPTestCase, parametrize, skip
 
@@ -65,3 +66,30 @@ class MuseNativeTest(AOPTestCase):
         assert resumed.succeeded, resumed.error
         assert resumed.session_id == first.session_id
         assert resumed.final_message == "echo: say silver"
+
+    @parametrize("reminders,expected", [("goal", {"goal"}), ("none", set())])
+    def test_installed_muse_runs_only_the_selected_reminders(
+        self, repository, tmp_path, monkeypatch, reminders, expected
+    ):
+        binary = os.environ.get("AOP_TEST_MUSE_BIN")
+        if not binary:
+            skip("set AOP_TEST_MUSE_BIN to test installed Muse Code")
+        config = tmp_path / "muse-config"
+        config.mkdir()
+        (config / "auth.json").write_text('{"schema_version": 1, "providers": {}}\n')
+        (config / "settings.json").write_text(
+            '{"schema_version": 1, "provider": "echo", '
+            '"contributor_mode_enabled": false, "telemetry": {"enabled": false}}\n'
+        )
+        monkeypatch.setenv("AOP_MUSE_CONFIG_DIR", os.fspath(config))
+        monkeypatch.setenv("AOP_MUSE_DATA_DIR", os.fspath(tmp_path / "muse-data"))
+        manager = WorktreeManager.discover(repository)
+
+        result = AgentRunner(manager, MuseAdapter(binary)).run(
+            task="reminders", prompt="hi", reminders=reminders, timeout_seconds=60
+        )
+
+        events = (manager.state_dir / "runs" / result.run_id / "events.jsonl").read_text()
+        started = set(re.findall(r'"task_kind":"reminder\.agent\.([a-z]+)-reminder"', events))
+        assert result.succeeded, result.error
+        assert started == expected

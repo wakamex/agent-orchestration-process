@@ -2965,21 +2965,29 @@ class MuseAdapter:
         else:
             error = None
 
+        model = parsed["model"] or request.model
+        finished_at = _now()
         accounting = _finalize_accounting(
             timed_out=capture.timed_out,
             usage=parsed["usage"],
             usage_observed=parsed["usage_observed"],
-            calculated_cost=None,
+            calculated_cost=estimate_api_cost(
+                model,
+                parsed["usage"],
+                provider="meta",
+                started_at=started_at,
+                finished_at=finished_at,
+            ),
             require_observed=True,
         )
         return _build_run_result(
             request,
             capture,
-            model=parsed["model"] or request.model,
+            model=model,
             session_id=session_id,
             command=command,
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             error=error,
             final_message=final_message,
             accounting=accounting,

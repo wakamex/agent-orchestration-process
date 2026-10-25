@@ -38,7 +38,7 @@ Every adapter supports bounded execution, exact resume, the `edit`, `review`, `s
 | Hermes | All profiles | Experimental | Configured route | Yes | API-equivalent or Hermes's own figure | When emitted | | 0.22.2 |
 | DeepSeek Harness | Sandboxed profiles | No | Bundled defaults | Yes | Known provider routes | No | | 0.2.1-rc.2 |
 | Zcode | No | No | Authenticated Z.ai route or configured models | Through the model ID | Canonical Z.ai route, API-equivalent | No | | 0.16.9 |
-| Muse Code | Sandboxed profiles | No | Cached account catalog | No | No | No | | 1.4.12 |
+| Muse Code | Sandboxed profiles | No | Cached account catalog | No | API-equivalent | No | | 1.4.12 |
 
 "Sandboxed profiles" means `edit`, `review`, and `sealed`: these harnesses rely on AOP's network namespace for `--no-web`, so a `host` run with `--no-web` is refused.
 
@@ -278,7 +278,7 @@ Set `AOP_MUSE_BIN` when `muse` is not on `PATH` or is a wrapper rather than the 
 | Grok Build | No participant mode. |
 | Hermes | Participant mode is experimental; rotating OAuth credentials serialize Hermes turns. |
 | DeepSeek Harness | Developer-preview CLI; inventory lists bundled defaults rather than the selected provider; no participant mode. |
-| Muse Code | No participant mode; no API-equivalent cost, since Meta publishes no token prices. |
+| Muse Code | No participant mode; usage and cost leave out the reminder subagents Muse runs each turn, which `muse exec --json` does not report. |
 | Zcode | Live inventory requires a canonical Z.ai Coding Plan route and API key; other inventories are configuration-based. Requires the native app-server v4 command interface and selected provider API key. No standalone OAuth, no-web, participant mode, or provider-reported monetary cost. Project model selection must agree with an explicit override. |
 
 Antigravity integration requires Agy 1.1.16 or newer. AOP checks the installed version before

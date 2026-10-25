@@ -257,7 +257,9 @@ Set `AOP_ZCODE_BIN` to a specific executable and `AOP_ZCODE_SOURCE_HOME` to a no
 
 ### Muse Code
 
-AOP runs `muse exec --json --yolo` with the prompt in a file. `--yolo` turns off Muse's approval prompts and its own command sandbox, so the AOP profile is the boundary, as for every harness. Resume passes the recorded session to `--session-id`. AOP reads the session ID, the final answer, and token usage from the `--json` records, and records the model from the usage record, or else the model Muse uses by default.
+AOP runs `muse exec --json --yolo` with the prompt in a file. `--yolo` turns off Muse's approval prompts and its own command sandbox, so the AOP profile is the boundary, as for every harness. Resume passes the recorded session to `--session-id`. AOP reads the session ID and the final answer from the `--json` records, and records the model from their usage record, or else the model Muse uses by default.
+
+Muse also runs reminder agents that call the model on their own: a goal and a verify reminder after each turn, and a skill reminder beside each main model call. `--json` reports only the main agent's usage, which on short turns is about half of the run's input tokens. AOP therefore takes the run's usage from the session log in the task's private Muse state, which records every call, after checking that the log's main-agent calls add up exactly to what `--json` reported. It prices main-agent calls at the run's model and reminder calls at `muse-spark-1.3`, the model Muse 1.4.12 requests for them. When the log is missing or does not add up, the result keeps the `--json` usage, has no calculated cost, and reports `accounting_status: partial`.
 
 Each task gets a private Muse config, data, and state directory and an empty home, so Muse does not read other agents' instructions and skills from `~/.claude`, `~/.codex`, or `~/.agents`. The config directory is seeded from `$XDG_CONFIG_HOME/muse`, by default `~/.config/muse`, and must hold the login that `muse login` saved in `auth.json`. `edit`, `review`, and `host` receive the whole config directory, with symbolic links such as `AGENTS.md` copied as the files they point to. `sealed` receives only `auth.json` and the `settings.json` members that choose the provider, the model and effort defaults, contributor mode, and telemetry, and runs with `--no-foreign-personal-context`. Keep `contributor_mode_enabled` and `telemetry` set in `settings.json`: without them, Muse sends turns to models whose content Meta may use and sends telemetry.
 
@@ -278,7 +280,7 @@ Set `AOP_MUSE_BIN` when `muse` is not on `PATH` or is a wrapper rather than the 
 | Grok Build | No participant mode. |
 | Hermes | Participant mode is experimental; rotating OAuth credentials serialize Hermes turns. |
 | DeepSeek Harness | Developer-preview CLI; inventory lists bundled defaults rather than the selected provider; no participant mode. |
-| Muse Code | No participant mode; usage and cost leave out the reminder subagents Muse runs each turn, which `muse exec --json` does not report. |
+| Muse Code | No participant mode; reminder calls are priced as `muse-spark-1.3`, because their usage records name no model. |
 | Zcode | Live inventory requires a canonical Z.ai Coding Plan route and API key; other inventories are configuration-based. Requires the native app-server v4 command interface and selected provider API key. No standalone OAuth, no-web, participant mode, or provider-reported monetary cost. Project model selection must agree with an explicit override. |
 
 Antigravity integration requires Agy 1.1.16 or newer. AOP checks the installed version before

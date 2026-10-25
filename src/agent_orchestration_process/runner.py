@@ -54,6 +54,8 @@ from .pricing import (
     estimate_api_cost,
     nonnegative_float,
     nonnegative_int,
+    merge_periods,
+    merge_suffixes,
     sum_usage,
 )
 from .provider_versions import require_supported_agy
@@ -2881,6 +2883,10 @@ class MuseAdapter:
     provider = "muse"
     modes = frozenset({"agent"})
     EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+    # Muse's goal, verify, and skill reminders run on its background model.
+    # Their usage records name no model; Muse 1.4.12's requests for them all
+    # asked for this one.
+    REMINDER_MODEL = "muse-spark-1.3"
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_MUSE_BIN", "muse")
@@ -2967,18 +2973,8 @@ class MuseAdapter:
 
         model = parsed["model"] or request.model
         finished_at = _now()
-        accounting = _finalize_accounting(
-            timed_out=capture.timed_out,
-            usage=parsed["usage"],
-            usage_observed=parsed["usage_observed"],
-            calculated_cost=estimate_api_cost(
-                model,
-                parsed["usage"],
-                provider="meta",
-                started_at=started_at,
-                finished_at=finished_at,
-            ),
-            require_observed=True,
+        accounting = self._accounting(
+            parsed, model, environment, capture.timed_out, started_at, finished_at
         )
         return _build_run_result(
             request,
@@ -2993,6 +2989,59 @@ class MuseAdapter:
             accounting=accounting,
             billing=billing,
             provider_status=parsed["terminal"],
+        )
+
+    def _accounting(
+        self,
+        parsed: dict[str, object],
+        model: str | None,
+        environment: dict[str, str],
+        timed_out: bool,
+        started_at: str,
+        finished_at: str,
+    ) -> _Accounting:
+        """Usage of every model call the run made, reminders included.
+
+        `muse exec --json` reports only the main agent's calls. Muse's session
+        log also records each reminder call, so the run's total comes from
+        there when its main-agent records add up to what the JSON reported;
+        otherwise the result keeps the JSON's usage and says it is partial.
+        """
+        reported = parsed["usage"]
+        ledger = (
+            _muse_run_usage(environment, parsed["session_id"], parsed["run_id"])
+            if parsed["usage_observed"] and not timed_out
+            else None
+        )
+        main = (
+            [(usage, at) for owner, usage, at in ledger if owner == "main_root"]
+            if ledger is not None
+            else None
+        )
+        if not main or sum_usage(usage for usage, _ in main) != reported:
+            accounting = _finalize_accounting(
+                timed_out=timed_out,
+                usage=reported,
+                usage_observed=parsed["usage_observed"],
+                calculated_cost=None,
+                require_observed=True,
+            )
+            if accounting.status == "complete":
+                accounting = replace(accounting, status="partial")
+            return accounting
+        requests = [
+            (model if owner == "main_root" else self.REMINDER_MODEL, usage, at)
+            if owner in {"main_root", "reminder_child"}
+            else (None, usage, at)
+            for owner, usage, at in ledger
+        ]
+        return _finalize_accounting(
+            timed_out=False,
+            usage=sum_usage(usage for _, usage, _ in requests),
+            usage_observed=True,
+            calculated_cost=_priced_requests(
+                model, requests, "meta", started_at, finished_at
+            ),
         )
 
     def _command(
@@ -3103,6 +3152,7 @@ class MuseAdapter:
         named = {item["model"] for item in models if isinstance(item.get("model"), str)}
         return {
             "session_id": session_id,
+            "run_id": command_id if isinstance(command_id, str) else None,
             "terminal": terminal,
             "final_message": final_message,
             "error": error,
@@ -5542,6 +5592,100 @@ def _devin_session_for_prompt(environment: dict[str, str], prompt: str) -> str |
             if isinstance(content, str) and content.strip() == prompt.strip()
         ),
         None,
+    )
+
+
+def _muse_run_usage(
+    environment: dict[str, str], session_id: object, run_id: object
+) -> list[tuple[str, TokenUsage, str]] | None:
+    """Each model call one Muse run made, from its private session log.
+
+    Returns (owner type, usage, ISO time) for the run's reported provider
+    usage records, or None when the log is missing or unreadable.
+    """
+    if not isinstance(session_id, str) or not isinstance(run_id, str):
+        return None
+    sessions = Path(environment["XDG_DATA_HOME"]) / "muse" / "sessions"
+    logs = list(sessions.glob(f"*/*/*/{session_id}/session.jsonl"))
+    if len(logs) != 1:
+        return None
+    calls = []
+    try:
+        lines = logs[0].read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = event.get("payload") if isinstance(event, dict) else None
+        if not isinstance(payload, dict) or payload.get("run_id") != run_id:
+            continue
+        inner = payload.get("event")
+        record = inner.get("record") if isinstance(inner, dict) else None
+        if (
+            not isinstance(record, dict)
+            or inner.get("kind") != "goal_usage_attribution"
+            or record.get("usage_family") != "provider"
+        ):
+            continue
+        quantity = record.get("quantity")
+        owner = record.get("owner")
+        recorded_at = event.get("recorded_at")
+        if not isinstance(quantity, dict) or quantity.get("reported") is not True:
+            continue
+        if not isinstance(owner, dict) or not isinstance(recorded_at, int):
+            return None
+        calls.append(
+            (
+                str(owner.get("owner_type")),
+                TokenUsage(
+                    input_tokens=nonnegative_int(quantity.get("input_tokens")),
+                    cached_input_tokens=nonnegative_int(quantity.get("cached_tokens")),
+                    output_tokens=nonnegative_int(quantity.get("output_tokens")),
+                    reasoning_output_tokens=nonnegative_int(
+                        quantity.get("reasoning_tokens")
+                    ),
+                ),
+                datetime.fromtimestamp(recorded_at / 1_000_000, UTC).isoformat(),
+            )
+        )
+    return calls
+
+
+def _priced_requests(
+    model: str | None,
+    requests: Sequence[tuple[str | None, TokenUsage, str | None]],
+    provider: str,
+    started_at: str,
+    finished_at: str,
+) -> CalculatedCost | None:
+    """Price each request at its own model; unknown if any one cannot be."""
+    if model is None or not requests:
+        return None
+    costs = [
+        estimate_api_cost(
+            name,
+            usage,
+            provider=provider,
+            started_at=started_at,
+            finished_at=finished_at,
+            requests=[(usage, at)],
+        )
+        for name, usage, at in requests
+    ]
+    if any(cost is None for cost in costs):
+        return None
+    return replace(
+        costs[0],
+        model=model,
+        amount_usd=round(sum(cost.amount_usd for cost in costs), 8),
+        priced_as=" + ".join(sorted({cost.priced_as for cost in costs})),
+        pricing_source=" ".join(sorted({cost.pricing_source for cost in costs})),
+        long_context_pricing=any(cost.long_context_pricing for cost in costs),
+        pricing_period=merge_periods(cost.pricing_period for cost in costs),
+        removed_suffix=merge_suffixes(cost.removed_suffix for cost in costs),
     )
 
 

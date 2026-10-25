@@ -1835,6 +1835,31 @@ emit("run", command, "run.usage", {{"models": [{{
     "model": model, "input_tokens": 120, "cached_tokens": 40,
     "output_tokens": 30, "reasoning_tokens": 10,
 }}]}})
+# Muse's session log attributes each model call, reminders included, to the run.
+log = data / "sessions" / "2026" / "10" / "25" / session / "session.jsonl"
+log.parent.mkdir(parents=True, exist_ok=True)
+calls = [] if prompt == "MUSE_NO_LEDGER" else [
+    ("main_root", 120 if prompt != "MUSE_LEDGER_MISMATCH" else 119, 40, 30, 10),
+    ("reminder_child", 3500, 0, 100, 20),
+]
+with log.open("a") as stream:
+    for owner, input_tokens, cached, output, reasoning in calls:
+        stream.write(json.dumps({{
+            "recorded_at": 1792939841690697,
+            "payload_type": "runtime.session",
+            "payload": {{"kind": "run", "run_id": command, "event": {{
+                "kind": "goal_usage_attribution",
+                "record": {{
+                    "owner": {{"owner_type": owner, "run_id": command}},
+                    "usage_family": "provider",
+                    "quantity": {{
+                        "input_tokens": input_tokens, "cached_tokens": cached,
+                        "output_tokens": output, "reasoning_tokens": reasoning,
+                        "reported": True,
+                    }},
+                }},
+            }}}},
+        }}) + "\\n")
 emit("session", session, "run.terminal." + terminal, {{
     "terminal": terminal,
     "reason": "model call failed" if terminal == "failed" else None,

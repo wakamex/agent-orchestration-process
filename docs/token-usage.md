@@ -24,7 +24,7 @@ a subset exceeds its total.
 
 ## Deadline accounting
 
-Every result records an `accounting_status` of `complete`, `partial`, or `unavailable`. A normally terminated invocation is `complete`, and its `usage` object may legitimately contain six measured zero counters. A timed-out invocation is `partial` when AOP captured provider usage or monetary evidence before terminating it. A timed-out invocation is `unavailable` when the provider emitted no accounting evidence, in which case `usage`, `calculated_cost`, and `provider_reported_cost` are null rather than measured zero.
+Every result records an `accounting_status` of `complete`, `partial`, or `unavailable`. A normally terminated invocation is `complete`, and its `usage` object may legitimately contain six measured zero counters. A timed-out invocation is `partial` when AOP captured provider usage or monetary evidence before terminating it. An invocation is also `partial` when the harness reported only part of its usage, such as a Muse Code run whose session log does not reconcile with its reported usage. A timed-out invocation is `unavailable` when the provider emitted no accounting evidence, in which case `usage`, `calculated_cost`, and `provider_reported_cost` are null rather than measured zero.
 
 Calculated cost is retained for a partial result only when token usage was observed. Provider-reported cost can be retained independently because it is direct monetary evidence. These rules are adapter-neutral; each adapter only identifies whether its native event or session export contained usage evidence.
 
@@ -58,6 +58,8 @@ steps after the current user prompt. A fresh run whose run-owned ATIF export omi
 uses all agent steps from that new private session. The other adapters consume per-invocation
 terminal events. Resuming a session therefore does not turn a new run's usage into a cumulative
 session total.
+
+Muse Code reports only its main agent's usage in `muse exec --json`. AOP sums every model call of the run, including Muse's reminder agents, from the session log in the task's private state, after checking that its main-agent calls equal the reported usage; see [Harness adapters](harnesses.md#muse-code).
 
 Zcode uses the native terminal `usage` summary for the current turn. If the terminal summary is missing, it sums observed `model_request_completed` measurements for that turn, deduplicated by request and attempt, and marks accounting partial. Timeouts retain these measurements. Cumulative session projection totals are never substituted for per-turn usage. For the canonical Z.ai Coding Plan route, AOP calculates API-equivalent cost for each measured model request at its completion time, including compaction and lite-model calls. A cost is available only when all measured models have prices and the measurements reconcile with reported turn usage. Native credential provenance identifies the subscription route separately; provider-reported monetary cost remains unavailable.
 

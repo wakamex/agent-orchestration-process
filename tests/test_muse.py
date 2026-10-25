@@ -23,10 +23,12 @@ class MuseAdapterTest(AOPTestCase):
         assert first.succeeded, first.error
         assert first.final_message == "answer:first"
         assert first.model == "muse-wonder-1.0"
-        assert first.usage.input_tokens == 120
+        # The main call's 120 input tokens plus a reminder call's 3,500.
+        assert first.accounting_status == "complete"
+        assert first.usage.input_tokens == 3620
         assert first.usage.cached_input_tokens == 40
-        assert first.usage.output_tokens == 30
-        assert first.usage.reasoning_output_tokens == 10
+        assert first.usage.output_tokens == 130
+        assert first.usage.reasoning_output_tokens == 30
         assert first.billing.route == "subscription"
         assert first.time_to_first_response_seconds is not None
         assert ["--reasoning-effort", "low"] == first.command[
@@ -38,6 +40,22 @@ class MuseAdapterTest(AOPTestCase):
         assert ["--session-id", first.session_id] == resumed.command[
             resumed.command.index("--session-id") :
         ][:2]
+
+    def test_muse_usage_is_partial_when_its_session_log_does_not_reconcile(
+        self, repository: Path, fake_muse: Path
+    ) -> None:
+        runner = AgentRunner(
+            WorktreeManager.discover(repository), MuseAdapter(os.fspath(fake_muse))
+        )
+
+        mismatch = runner.run(task="mismatch", prompt="MUSE_LEDGER_MISMATCH")
+        missing = runner.run(task="missing", prompt="MUSE_NO_LEDGER")
+
+        for result in (mismatch, missing):
+            assert result.succeeded, result.error
+            assert result.accounting_status == "partial"
+            assert result.usage.input_tokens == 120
+            assert result.calculated_cost is None
 
     def test_sealed_muse_keeps_only_login_and_privacy_settings(
         self, repository: Path, tmp_path: Path, fake_muse: Path

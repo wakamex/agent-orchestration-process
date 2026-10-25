@@ -757,6 +757,54 @@ class ProvidersTest(AOPTestCase):
             f"session {first.session_id}"
         )
 
+    def test_devin_matches_the_prompt_it_records_without_trailing_whitespace(
+        self, repository: Path, fake_devin: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+
+        result = runner.run(task="devin-newline", prompt="first\n")
+
+        assert result.succeeded, result.error
+        assert result.session_id == "tested-basil"
+
+    def test_devin_waits_for_a_usage_limit_reset_and_continues_the_session(
+        self, repository: Path, fake_devin: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(DevinAdapter, "_LIMIT_MARGIN_SECONDS", 0.0)
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+
+        result = runner.run(
+            task="devin-limit", prompt="DEVIN_RATE_LIMIT", timeout_seconds=120
+        )
+
+        assert result.succeeded, result.error
+        assert result.session_id == "tested-basil"
+        assert result.final_message.startswith("answer:Your previous turn stopped")
+        assert result.usage.input_tokens == 150
+        assert result.usage.output_tokens == 25
+        stderr = (manager.state_dir / "runs" / result.run_id / "stderr.log").read_text()
+        assert "Reached free model rate limit" in stderr
+
+    def test_devin_limit_past_the_deadline_fails_with_a_resumable_session(
+        self, repository: Path, fake_devin: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+
+        limited = runner.run(
+            task="devin-late", prompt="DEVIN_RATE_LIMIT_LATE", timeout_seconds=60
+        )
+        resumed = runner.resume(run_id=limited.run_id, prompt="second")
+
+        assert not limited.succeeded
+        assert "Reached free model rate limit" in limited.error
+        assert limited.duration_seconds < 30
+        assert limited.session_id == "tested-basil"
+        assert resumed.succeeded, resumed.error
+        assert resumed.session_id == "tested-basil"
+
     def test_devin_workspace_sandbox_and_artifact(
         self,
         repository: Path, fake_devin: Path

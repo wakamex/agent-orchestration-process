@@ -11,7 +11,9 @@ import queue
 import re
 import shutil
 import stat
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -19,7 +21,7 @@ import urllib.parse
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Protocol, Sequence, TypeVar
 
@@ -1175,9 +1177,11 @@ def _capture_process(
     timeout_seconds: float | None,
     is_response: Callable[[str], bool],
     live_dir: Path | None = None,
+    live_append: bool = False,
 ) -> _ProcessCapture:
     """Run a harness to completion; with `live_dir`, its stdout and stderr also
-    grow in live_dir/events.jsonl and live_dir/stderr.log while it runs."""
+    grow in live_dir/events.jsonl and live_dir/stderr.log while it runs, after
+    any earlier attempt's output when `live_append` is set."""
     started = time.monotonic()
     timed_out = False
     first_event_seconds = None
@@ -1211,8 +1215,9 @@ def _capture_process(
     live = contextlib.ExitStack()
     live_stdout = live_stderr = None
     if live_dir is not None:
-        live_stdout = live.enter_context((live_dir / "events.jsonl").open("w"))
-        live_stderr = live.enter_context((live_dir / "stderr.log").open("w"))
+        mode = "a" if live_append else "w"
+        live_stdout = live.enter_context((live_dir / "events.jsonl").open(mode))
+        live_stderr = live.enter_context((live_dir / "stderr.log").open(mode))
 
     def read_stdout() -> None:
         nonlocal first_event_seconds, first_response_seconds
@@ -1265,6 +1270,21 @@ def _capture_process(
         duration_seconds=round(time.monotonic() - started, 6),
         first_event_seconds=_rounded(first_event_seconds),
         first_response_seconds=_rounded(first_response_seconds),
+    )
+
+
+def _joined_captures(first: _ProcessCapture, then: _ProcessCapture) -> _ProcessCapture:
+    """One capture for consecutive attempts of the same run, ending as the last one."""
+    return replace(
+        then,
+        stdout=first.stdout + then.stdout,
+        stderr=first.stderr + then.stderr,
+        first_event_seconds=first.first_event_seconds
+        if first.first_event_seconds is not None
+        else then.first_event_seconds,
+        first_response_seconds=first.first_response_seconds
+        if first.first_response_seconds is not None
+        else then.first_response_seconds,
     )
 
 
@@ -2561,6 +2581,16 @@ class DevinAdapter:
     provider = "devin"
     modes = frozenset({"agent"})
     DEFAULT_MODEL = "swe-1-7"
+    # Devin gives up on a usage limit after three retries within a second, even
+    # when its error names a reset minutes away. AOP waits for that reset and
+    # continues the same session, as long as the run's deadline allows.
+    _LIMIT_RESET = re.compile(r"will reset in [^()]*\(at (\d{1,2}):(\d{2}) UTC\)")
+    _LIMIT_MARGIN_SECONDS = 30.0
+    _MAX_LIMIT_WAITS = 10
+    CONTINUE_PROMPT = (
+        "Your previous turn stopped at a usage limit, which has now reset. "
+        "Continue the task from where you stopped."
+    )
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_DEVIN_BIN", "devin")
@@ -2591,20 +2621,62 @@ class DevinAdapter:
             self._command(request, export_path), request, worktree, environment
         )
         started_at = _now()
-        capture = _capture_process(
-            command,
-            cwd=worktree.path,
-            environment=environment,
-            prompt=None,
-            timeout_seconds=request.timeout_seconds,
-            is_response=lambda line: bool(line.strip()),
-            live_dir=run_dir,
+        started = time.monotonic()
+        deadline = (
+            None if request.timeout_seconds is None else started + request.timeout_seconds
+        )
+        turn, turn_command = request, command
+        capture = None
+        for waits in range(self._MAX_LIMIT_WAITS + 1):
+            attempt = _capture_process(
+                turn_command,
+                cwd=worktree.path,
+                environment=environment,
+                prompt=None,
+                timeout_seconds=None if deadline is None else deadline - time.monotonic(),
+                is_response=lambda line: bool(line.strip()),
+                live_dir=run_dir,
+                live_append=capture is not None,
+            )
+            capture = attempt if capture is None else _joined_captures(capture, attempt)
+            wait = self._limit_wait(attempt)
+            if wait is None or waits == self._MAX_LIMIT_WAITS or export_path.is_file():
+                break
+            session = request.session_id or _devin_session_for_prompt(
+                environment, request.prompt
+            )
+            if session is None or (
+                deadline is not None and time.monotonic() + wait >= deadline
+            ):
+                break
+            print(
+                f"aop: Devin reached a usage limit; waiting {wait:.0f}s for its "
+                f"reset to continue session {session}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(wait)
+            turn = replace(request, session_id=session, prompt=self.CONTINUE_PROMPT)
+            turn_command = _provider_command(
+                self._command(turn, export_path), turn, worktree, environment
+            )
+        capture = replace(
+            capture, duration_seconds=round(time.monotonic() - started, 6)
         )
         parsed = self._parse_export(
             export_path,
             request.prompt,
             allow_missing_prompt=request.session_id is None,
         )
+        if parsed["error"] and turn is not request:
+            # An export that starts at the continuation still holds its answer.
+            parsed = self._parse_export(export_path, turn.prompt)
+        if parsed["session_id"] is None and not export_path.is_file():
+            # Devin writes no export when a turn fails, but its session can
+            # still be resumed from the task's private state.
+            parsed["session_id"] = request.session_id or _devin_session_for_prompt(
+                environment, request.prompt
+            )
         if export_path.is_file():
             _atomic_write(run_dir / "provider-result.json", export_path.read_text())
             export_path.unlink()
@@ -2657,6 +2729,25 @@ class DevinAdapter:
             ),
         )
 
+    @classmethod
+    def _limit_wait(cls, capture: _ProcessCapture) -> float | None:
+        """Seconds until the usage limit Devin stopped at resets, if it did."""
+        if not capture.exit_code or capture.timed_out:
+            return None
+        match = cls._LIMIT_RESET.search(capture.stderr)
+        if match is None:
+            return None
+        now = datetime.now(UTC)
+        reset = now.replace(
+            hour=int(match[1]), minute=int(match[2]), second=0, microsecond=0
+        )
+        # The error names only a time of day: take the one nearest to now.
+        if reset < now - timedelta(hours=12):
+            reset += timedelta(days=1)
+        elif reset > now + timedelta(hours=12):
+            reset -= timedelta(days=1)
+        return max(0.0, (reset - now).total_seconds()) + cls._LIMIT_MARGIN_SECONDS
+
     def _command(self, request: RunRequest, export_path: Path) -> list[str]:
         command = [
             self.binary,
@@ -2704,7 +2795,9 @@ class DevinAdapter:
         for index, step in enumerate(steps):
             if isinstance(step, dict) and step.get("source") == "user":
                 has_user_step = True
-                if step.get("message") == prompt:
+                # Devin records the prompt without its surrounding whitespace.
+                message = step.get("message")
+                if isinstance(message, str) and message.strip() == prompt.strip():
                     turn_start = index
         if turn_start is None:
             if has_user_step or not allow_missing_prompt:
@@ -5186,6 +5279,33 @@ def _prepare_devin_environment(
             "XDG_STATE_HOME": os.fspath(destination / "state"),
             "XDG_CACHE_HOME": os.fspath(cache),
         }
+    )
+
+
+def _devin_session_for_prompt(environment: dict[str, str], prompt: str) -> str | None:
+    """The private Devin session most recently given this prompt, if any."""
+    database = (
+        Path(environment["AOP_PROVIDER_STATE_DIR"])
+        / "devin" / "data" / "devin" / "cli" / "sessions.db"
+    )
+    if not database.is_file():
+        return None
+    try:
+        with contextlib.closing(
+            sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+        ) as connection:
+            rows = connection.execute(
+                "SELECT session_id, content FROM prompt_history ORDER BY timestamp DESC, id DESC"
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    return next(
+        (
+            session
+            for session, content in rows
+            if isinstance(content, str) and content.strip() == prompt.strip()
+        ),
+        None,
     )
 
 

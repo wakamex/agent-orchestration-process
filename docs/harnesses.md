@@ -149,6 +149,8 @@ On SSH, authenticate with `devin auth login --force-manual-token-flow`. Set `AOP
 `AOP_DEVIN_CONFIG_DIR` for nonstandard source locations. Each invocation must produce a valid Agent
 Trajectory Interchange Format (ATIF) export containing its terminal response and resume identity.
 
+When Devin stops at a usage limit, such as its free-model rate limit, it retries for under a second and exits, though its error names the time the limit resets. AOP then waits until that time plus 30 seconds and continues the same Devin session with a prompt saying the limit has reset, up to 10 times per run, as long as the reset comes before the run's `--timeout` deadline. The wait counts toward the deadline, and AOP prints each wait to stderr. When the reset is past the deadline, the run fails with the limit error and its session ID, so `aop resume` can continue it later. AOP keeps the model the run asked for rather than switching to another one.
+
 ### OpenCode
 
 AOP preserves OpenCode's native `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` environment setting in sealed runs. OpenCode owns validation and the model-capacity bound. It can raise OpenCode's default output ceiling for reasoning-heavy tasks without changing reasoning effort; record the selected value alongside experiment inputs. For example, prefix an invocation with `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=64000`.

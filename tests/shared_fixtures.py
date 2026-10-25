@@ -977,6 +977,43 @@ if prompt == "DEVIN_INCOMPLETE":
 if prompt == "DEVIN_FAIL":
     print("synthetic Devin failure", file=sys.stderr)
     raise SystemExit(2)
+if prompt.startswith("DEVIN_RATE_LIMIT"):
+    import datetime
+    import sqlite3
+
+    database = sqlite3.connect(data_dir / "cli" / "sessions.db")
+    database.execute(
+        "CREATE TABLE IF NOT EXISTS prompt_history (id INTEGER PRIMARY KEY "
+        "AUTOINCREMENT, content TEXT NOT NULL, timestamp INTEGER NOT NULL, "
+        "session_id TEXT NOT NULL)"
+    )
+    database.execute(
+        "INSERT INTO prompt_history (content, timestamp, session_id) VALUES (?, ?, ?)",
+        (prompt.strip(), int(time.time()), session_id),
+    )
+    database.commit()
+    database.close()
+    reset = datetime.datetime.now(datetime.UTC) + datetime.timedelta(
+        hours=2 if prompt == "DEVIN_RATE_LIMIT_LATE" else 0
+    )
+    print(
+        "Error: Agent error: Reached free model rate limit. Upgrade to Max for "
+        "higher limits, or switch to a different model. Your limit will reset in "
+        f"1 minute (at {{reset:%H:%M}} UTC).",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+earlier = []
+if "has now reset" in prompt:
+    earlier = [
+        {{"step_id": 0, "source": "user", "message": "DEVIN_RATE_LIMIT"}},
+        {{
+            "step_id": 1,
+            "source": "agent",
+            "message": "working",
+            "metrics": {{"prompt_tokens": 50, "completion_tokens": 5}},
+        }},
+    ]
 if prompt.startswith("WRITE_ARTIFACT"):
     pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("report.md").write_text(
         "# Devin artifact\\n"
@@ -1000,10 +1037,11 @@ export_path.write_text(json.dumps({{
     "session_id": session_id,
     "agent": {{"name": "devin", "model_name": "SWE-1.7"}},
     "steps": [
+        *earlier,
         *(
             []
             if concurrent_export
-            else [{{"step_id": 1, "source": "user", "message": prompt}}]
+            else [{{"step_id": 1, "source": "user", "message": prompt.strip()}}]
         ),
         {{
             "step_id": 2,

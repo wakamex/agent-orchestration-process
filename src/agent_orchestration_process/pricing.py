@@ -122,6 +122,9 @@ class CalculatedCost:
     pricing_period: str | None = None
     # Text model-prices removed from the model name to find its price, such as "-max".
     removed_suffix: str | None = None
+    # For a model sold with no per-token price, the "provider/model" whose
+    # rates model-prices uses as its estimate; None when every rate is a price.
+    estimated_from: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -141,12 +144,15 @@ def estimate_api_cost(
     started_at: str,
     finished_at: str,
     requests: Sequence[tuple[TokenUsage, str | None]] | None = None,
+    estimate: bool = False,
 ) -> CalculatedCost | None:
     """Price usage at model-prices API rates in effect when each request ran.
 
     `requests` lists each measured request's usage and, when the provider
     reported it, the time it was served, which must fall within the run. A
     request without a time is priced only when one price covered the whole run.
+    With `estimate`, a model sold with no per-token price is priced at the
+    rates model-prices names as its stand-in, and the cost records which model.
     """
     if model is None:
         return None
@@ -159,7 +165,7 @@ def estimate_api_cost(
     long_context = False
     found = []
     for request_usage, at in priced:
-        rates = _request_rates(model, provider, at, started_at, finished_at)
+        rates = _request_rates(model, provider, at, started_at, finished_at, estimate)
         if rates is None:
             return None
         breakdown = rates.breakdown(
@@ -192,6 +198,7 @@ def estimate_api_cost(
         pricing_basis=model_prices.pricing_basis(),
         pricing_period=merge_periods(rates.period for rates in found),
         removed_suffix=merge_suffixes(rates.removed_suffix for rates in found),
+        estimated_from=merge_estimates(rates.estimated_from for rates in found),
     )
 
 
@@ -222,20 +229,35 @@ def merge_periods(periods: Iterable[str | None]) -> str | None:
     return distinct.pop() if len(distinct) == 1 else "mixed"
 
 
+def merge_estimates(sources: Iterable[str | None]) -> str | None:
+    """Join the stand-in models of estimated rates, if any rate was estimated."""
+    return " + ".join(sorted(set(sources) - {None})) or None
+
+
 def merge_suffixes(suffixes: Iterable[str | None]) -> str | None:
     """Join the name suffixes model-prices removed to find a price, if any."""
     return " ".join(sorted(set(suffixes) - {"", None})) or None
 
 
 def _request_rates(
-    model: str, provider: str | None, at: str | None, started_at: str, finished_at: str
+    model: str,
+    provider: str | None,
+    at: str | None,
+    started_at: str,
+    finished_at: str,
+    estimate: bool = False,
 ) -> model_prices.Rates | None:
     if at is not None:
         # A reported time outside the run is a clock or parsing error.
         if not _utc(started_at) <= _utc(at) <= _utc(finished_at):
             return None
-        return model_prices.rates(model, at=at, provider=provider)
+        return model_prices.rates(model, at=at, provider=provider, estimate=estimate)
     spans = model_prices.rates_between(model, started_at, finished_at, provider=provider)
+    if not spans and estimate:
+        # Stand-in rates have no schedule of their own to span the run.
+        return model_prices.rates(
+            model, at=started_at, provider=provider, estimate=True
+        )
     # Without a request time, only one price covering the whole run applies.
     return spans[0][1] if len(spans) == 1 else None
 

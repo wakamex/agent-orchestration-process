@@ -54,6 +54,7 @@ from .pricing import (
     estimate_api_cost,
     nonnegative_float,
     nonnegative_int,
+    merge_estimates,
     merge_periods,
     merge_suffixes,
     sum_usage,
@@ -3039,8 +3040,10 @@ class MuseAdapter:
             timed_out=False,
             usage=sum_usage(usage for _, usage, _ in requests),
             usage_observed=True,
+            # Muse Wonder Full is sold only by subscription, with no
+            # per-token price; model-prices estimates it from a stand-in.
             calculated_cost=_priced_requests(
-                model, requests, "meta", started_at, finished_at
+                model, requests, "meta", started_at, finished_at, estimate=True
             ),
         )
 
@@ -5729,6 +5732,8 @@ def _priced_requests(
     provider: str,
     started_at: str,
     finished_at: str,
+    *,
+    estimate: bool = False,
 ) -> CalculatedCost | None:
     """Price each request at its own model; unknown if any one cannot be."""
     if model is None or not requests:
@@ -5741,6 +5746,7 @@ def _priced_requests(
             started_at=started_at,
             finished_at=finished_at,
             requests=[(usage, at)],
+            estimate=estimate,
         )
         for name, usage, at in requests
     ]
@@ -5755,6 +5761,7 @@ def _priced_requests(
         long_context_pricing=any(cost.long_context_pricing for cost in costs),
         pricing_period=merge_periods(cost.pricing_period for cost in costs),
         removed_suffix=merge_suffixes(cost.removed_suffix for cost in costs),
+        estimated_from=merge_estimates(cost.estimated_from for cost in costs),
     )
 
 

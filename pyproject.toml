@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dependencies = [
-    "model-prices>=0.0.3",
+    "model-prices>=0.0.5",
     "pyyaml>=6.0.2",
 ]
 

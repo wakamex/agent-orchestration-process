@@ -403,6 +403,7 @@ class PricingTest(AOPTestCase):
             **legacy,
             "pricing_period": None,
             "removed_suffix": None,
+            "estimated_from": None,
         }
 
     @mark("real_price_refresh")

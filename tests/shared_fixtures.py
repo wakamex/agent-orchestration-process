@@ -1788,7 +1788,7 @@ print(json.dumps(terminal), flush=True)
 # Writes the records `muse exec --json` writes for one turn: the session's own
 # stream, a model task's stream, the run's usage, and its terminal record.
 FAKE_MUSE = """#!{python}
-import json, os, pathlib, sys, uuid
+import json, os, pathlib, sys, time, uuid
 
 args = sys.argv[1:]
 assert args[:3] == ["exec", "--json", "--yolo"], args
@@ -1858,7 +1858,7 @@ if prompt == "MUSE_TWO_TURNS":
 with log.open("a") as stream:
     for run, owner, input_tokens, cached, output, reasoning in calls:
         stream.write(json.dumps({{
-            "recorded_at": 1792939841690697,
+            "recorded_at": time.time_ns() // 1000,
             "payload_type": "runtime.session",
             "payload": {{"kind": "run", "run_id": run, "event": {{
                 "kind": "goal_usage_attribution",

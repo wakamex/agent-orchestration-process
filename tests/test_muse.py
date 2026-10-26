@@ -74,6 +74,20 @@ class MuseAdapterTest(AOPTestCase):
         assert result.usage.input_tokens == 4620
         assert result.usage.output_tokens == 135
 
+    def test_muse_wonder_full_is_priced_at_its_estimate(
+        self, repository: Path, fake_muse: Path
+    ) -> None:
+        runner = AgentRunner(
+            WorktreeManager.discover(repository), MuseAdapter(os.fspath(fake_muse))
+        )
+
+        result = runner.run(task="full", prompt="x", model="muse-wonder-full-1.0")
+
+        cost = result.calculated_cost
+        assert cost is not None
+        assert cost.estimated_from == "meta/muse-wonder-1.0"
+        assert "meta/muse-spark-1.3" in cost.priced_as
+
     def test_sealed_muse_keeps_only_login_and_privacy_settings(
         self, repository: Path, tmp_path: Path, fake_muse: Path
     ) -> None:

@@ -805,6 +805,19 @@ class ProvidersTest(AOPTestCase):
         assert resumed.succeeded, resumed.error
         assert resumed.session_id == "tested-basil"
 
+    def test_devin_refuses_a_prompt_it_would_read_as_a_slash_command(
+        self, repository: Path, fake_devin: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+        first = runner.run(task="devin-slash", prompt="first")
+
+        with raises(AOPError, match="slash command"):
+            runner.run(task="devin-slash-new", prompt="/workspace is a worktree")
+        with raises(AOPError, match="slash command"):
+            runner.resume(run_id=first.run_id, prompt="  /compact")
+        assert not any(item.task == "devin-slash-new" for item in manager.list())
+
     def test_devin_workspace_sandbox_and_artifact(
         self,
         repository: Path, fake_devin: Path

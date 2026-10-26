@@ -276,7 +276,7 @@ Set `AOP_MUSE_BIN` when `muse` is not on `PATH` or is a wrapper rather than the 
 | Codex | No participant mode. |
 | Claude Code | Native inventory advertises models without proving entitlement; no participant mode. |
 | Cursor Agent | Effort is part of the model ID; no participant mode. |
-| Devin CLI | Effort is part of the model ID; successful runs require a valid ATIF export; no participant mode. |
+| Devin CLI | Effort is part of the model ID; successful runs require a valid ATIF export; a prompt that starts with `/` is refused, because Devin runs it as a slash command instead of sending it to the model; no participant mode. |
 | OpenCode | No participant mode. |
 | Antigravity | Exact resume fails if the conversation ID changes; no participant mode. |
 | Grok Build | No participant mode. |

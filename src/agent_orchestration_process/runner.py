@@ -7272,6 +7272,14 @@ class AgentRunner:
     def _validated_prompt_parts(
         self, prompt: str, parts: Sequence[PromptPart] | None
     ) -> tuple[PromptPart, ...] | None:
+        if self.adapter.provider == "devin" and prompt.lstrip().startswith("/"):
+            # Devin's ACP server runs such a prompt as a slash command and ends
+            # the session at once, with no model request and no export.
+            raise AOPError(
+                "Devin reads a prompt that starts with '/' as a slash command and "
+                "ends the session without sending it to the model; start the "
+                "prompt with other text"
+            )
         if parts is None:
             return None
         if self.adapter.provider != "claude":

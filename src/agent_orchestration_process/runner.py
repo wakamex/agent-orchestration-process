@@ -3009,7 +3009,7 @@ class MuseAdapter:
         """
         reported = parsed["usage"]
         ledger = (
-            _muse_run_usage(environment, parsed["session_id"], parsed["run_id"])
+            _muse_run_usage(environment, parsed["session_id"], parsed["run_ids"])
             if parsed["usage_observed"] and not timed_out
             else None
         )
@@ -3098,15 +3098,17 @@ class MuseAdapter:
     def _parse(output: str) -> dict[str, object]:
         """Read Muse's `exec --json` records.
 
-        The session's own stream carries the run's terminal record; reminder
-        and model tasks run on streams of their own.
+        The session's own stream carries each turn's terminal record; reminder
+        and model tasks run on streams of their own. One exec can run several
+        turns, since Muse may continue on its own after a turn ends, so usage
+        covers every turn and the answer is the last turn's.
         """
         session_id = None
         terminal = None
         final_message = None
         error = None
         usage_by_command: dict[object, dict[str, object]] = {}
-        command_id = None
+        run_ids: list[str] = []
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -3131,6 +3133,8 @@ class MuseAdapter:
                 terminal = payload.get("terminal")
                 terminal = terminal if isinstance(terminal, str) else payload_type
                 command_id = payload.get("command_id")
+                if isinstance(command_id, str) and command_id not in run_ids:
+                    run_ids.append(command_id)
                 text = payload.get("text")
                 final_message = text if isinstance(text, str) and text else None
                 reason = payload.get("reason")
@@ -3140,9 +3144,14 @@ class MuseAdapter:
                     else f"Muse run ended {terminal}"
                     + (f": {reason}" if isinstance(reason, str) and reason else "")
                 )
-        reported = usage_by_command.get(command_id)
-        models = reported.get("models") if reported else None
-        models = [item for item in models if isinstance(item, dict)] if isinstance(models, list) else []
+        reported = [usage_by_command[run] for run in run_ids if run in usage_by_command]
+        models = [
+            item
+            for record in reported
+            if isinstance(record.get("models"), list)
+            for item in record["models"]
+            if isinstance(item, dict)
+        ]
         usage = TokenUsage(
             input_tokens=sum(nonnegative_int(item.get("input_tokens")) for item in models),
             cached_input_tokens=sum(
@@ -3156,12 +3165,12 @@ class MuseAdapter:
         named = {item["model"] for item in models if isinstance(item.get("model"), str)}
         return {
             "session_id": session_id,
-            "run_id": command_id if isinstance(command_id, str) else None,
+            "run_ids": tuple(run_ids),
             "terminal": terminal,
             "final_message": final_message,
             "error": error,
             "usage": usage,
-            "usage_observed": bool(models),
+            "usage_observed": bool(reported),
             "model": next(iter(named)) if len(named) == 1 else None,
         }
 
@@ -5656,14 +5665,14 @@ def _muse_reminder_setting(reminders: str, environment: dict[str, str]) -> str:
 
 
 def _muse_run_usage(
-    environment: dict[str, str], session_id: object, run_id: object
+    environment: dict[str, str], session_id: object, run_ids: Sequence[str]
 ) -> list[tuple[str, TokenUsage, str]] | None:
-    """Each model call one Muse run made, from its private session log.
+    """Each model call one Muse invocation's turns made, from its session log.
 
-    Returns (owner type, usage, ISO time) for the run's reported provider
+    Returns (owner type, usage, ISO time) for the turns' reported provider
     usage records, or None when the log is missing or unreadable.
     """
-    if not isinstance(session_id, str) or not isinstance(run_id, str):
+    if not isinstance(session_id, str) or not run_ids:
         return None
     sessions = Path(environment["XDG_DATA_HOME"]) / "muse" / "sessions"
     logs = list(sessions.glob(f"*/*/*/{session_id}/session.jsonl"))
@@ -5680,7 +5689,7 @@ def _muse_run_usage(
         except json.JSONDecodeError:
             continue
         payload = event.get("payload") if isinstance(event, dict) else None
-        if not isinstance(payload, dict) or payload.get("run_id") != run_id:
+        if not isinstance(payload, dict) or payload.get("run_id") not in run_ids:
             continue
         inner = payload.get("event")
         record = inner.get("record") if isinstance(inner, dict) else None

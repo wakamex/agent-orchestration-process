@@ -58,6 +58,22 @@ class MuseAdapterTest(AOPTestCase):
             assert result.usage.input_tokens == 120
             assert result.calculated_cost is None
 
+    def test_muse_usage_covers_every_turn_of_one_invocation(
+        self, repository: Path, fake_muse: Path
+    ) -> None:
+        runner = AgentRunner(
+            WorktreeManager.discover(repository), MuseAdapter(os.fspath(fake_muse))
+        )
+
+        result = runner.run(task="turns", prompt="MUSE_TWO_TURNS")
+
+        assert result.succeeded, result.error
+        assert result.final_message == "answer:MUSE_TWO_TURNS"
+        assert result.accounting_status == "complete"
+        # 1,000 from the failed first turn, 120 and a 3,500 reminder from the last.
+        assert result.usage.input_tokens == 4620
+        assert result.usage.output_tokens == 135
+
     def test_sealed_muse_keeps_only_login_and_privacy_settings(
         self, repository: Path, tmp_path: Path, fake_muse: Path
     ) -> None:

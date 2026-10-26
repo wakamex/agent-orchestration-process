@@ -1839,18 +1839,31 @@ emit("run", command, "run.usage", {{"models": [{{
 log = data / "sessions" / "2026" / "10" / "25" / session / "session.jsonl"
 log.parent.mkdir(parents=True, exist_ok=True)
 calls = [] if prompt == "MUSE_NO_LEDGER" else [
-    ("main_root", 120 if prompt != "MUSE_LEDGER_MISMATCH" else 119, 40, 30, 10),
-    ("reminder_child", 3500, 0, 100, 20),
+    (command, "main_root", 120 if prompt != "MUSE_LEDGER_MISMATCH" else 119, 40, 30, 10),
+    (command, "reminder_child", 3500, 0, 100, 20),
 ]
+if prompt == "MUSE_TWO_TURNS":
+    # Muse continued on its own after a first turn that ended failed.
+    earlier = str(uuid.uuid4())
+    command, current = earlier, command
+    emit("run", earlier, "run.usage", {{"models": [{{
+        "model": model, "input_tokens": 1000, "cached_tokens": 0,
+        "output_tokens": 5, "reasoning_tokens": 0,
+    }}]}})
+    emit("session", session, "run.terminal.failed", {{
+        "terminal": "failed", "reason": "API error 429", "text": "",
+    }})
+    command = current
+    calls.append((earlier, "main_root", 1000, 0, 5, 0))
 with log.open("a") as stream:
-    for owner, input_tokens, cached, output, reasoning in calls:
+    for run, owner, input_tokens, cached, output, reasoning in calls:
         stream.write(json.dumps({{
             "recorded_at": 1792939841690697,
             "payload_type": "runtime.session",
-            "payload": {{"kind": "run", "run_id": command, "event": {{
+            "payload": {{"kind": "run", "run_id": run, "event": {{
                 "kind": "goal_usage_attribution",
                 "record": {{
-                    "owner": {{"owner_type": owner, "run_id": command}},
+                    "owner": {{"owner_type": owner, "run_id": run}},
                     "usage_family": "provider",
                     "quantity": {{
                         "input_tokens": input_tokens, "cached_tokens": cached,

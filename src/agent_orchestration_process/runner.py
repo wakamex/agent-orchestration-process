@@ -6114,6 +6114,18 @@ def _prepare_claude_environment(environment: dict[str, str]) -> None:
             raise AOPError(f"could not prepare isolated Claude state: {error}") from error
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
+    if environment.get("AOP_PROFILE") == "host":
+        # A host run keeps the user's HOME, which other tools resolve: rootless
+        # podman cannot use a HOME under a directory its user namespace cannot
+        # traverse. Claude finds its private copy through CLAUDE_CONFIG_DIR,
+        # which then also holds .claude.json.
+        config = destination / ".claude"
+        config.mkdir(mode=0o700, exist_ok=True)
+        settings = destination / ".claude.json"
+        if settings.is_file() and not (config / ".claude.json").exists():
+            os.replace(settings, config / ".claude.json")
+        environment["CLAUDE_CONFIG_DIR"] = os.fspath(config)
+        return
     environment["HOME"] = os.fspath(destination)
     # The run uses the private copy in its standard place.
     environment.pop("CLAUDE_CONFIG_DIR", None)

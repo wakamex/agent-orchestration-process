@@ -2487,6 +2487,28 @@ class ProvidersTest(AOPTestCase):
             "home"
         ]
 
+    def test_host_claude_keeps_home_and_uses_its_private_config_dir(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "source"
+        (source / ".claude").mkdir(parents=True)
+        (source / ".claude" / "settings.json").write_text("{}")
+        (source / ".claude.json").write_text('{"user": "main"}')
+        environment = {
+            "HOME": os.fspath(source),
+            "AOP_PROFILE": "host",
+            "AOP_PROVIDER_STATE_DIR": os.fspath(tmp_path / "state"),
+        }
+
+        runner_module._prepare_claude_environment(environment)
+
+        config = tmp_path / "state" / "claude" / "home" / ".claude"
+        assert environment["HOME"] == os.fspath(source)
+        assert environment["CLAUDE_CONFIG_DIR"] == os.fspath(config)
+        assert (config / "settings.json").is_file()
+        assert (config / ".claude.json").read_text() == '{"user": "main"}'
+        assert (source / ".claude.json").read_text() == '{"user": "main"}'
+
     def test_failed_claude_home_seed_leaves_no_partial_home(
         self,
         tmp_path: Path, monkeypatch: MonkeyPatch
@@ -2763,11 +2785,13 @@ class ProvidersTest(AOPTestCase):
         assert resumed["session_id"] == result["session_id"]
         assert json.loads(resumed["final_message"])["cwd"] == os.fspath(workdir)
 
-        # Without --native-state the harness keeps AOP's private home.
+        # Without --native-state Claude uses AOP's private config, while the
+        # host run keeps the user's HOME for other tools.
         assert main(["run", *base, "--prompt", "WHERE", "--json"]) == 0
         private = json.loads(json.loads(capsys.readouterr().out)["final_message"])
         assert private["cwd"] == os.fspath(workdir)
-        assert private["home"] != os.environ["HOME"]
+        assert private["home"] == os.environ["HOME"]
+        assert private["config_dir"].endswith("/claude/home/.claude")
 
         assert main(["cleanup", result["run_id"]]) == 0
         capsys.readouterr()

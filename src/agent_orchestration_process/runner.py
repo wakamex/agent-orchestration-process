@@ -6114,6 +6114,7 @@ def _prepare_claude_environment(environment: dict[str, str]) -> None:
             raise AOPError(f"could not prepare isolated Claude state: {error}") from error
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
+    _refresh_claude_credentials(source_config, destination / ".claude")
     if environment.get("AOP_PROFILE") == "host":
         # A host run keeps the user's HOME, which other tools resolve: rootless
         # podman cannot use a HOME under a directory its user namespace cannot
@@ -6159,6 +6160,45 @@ def _seed_claude_home(
         )
     if source_settings.is_file() and not sealed:
         shutil.copy2(source_settings, destination / ".claude.json")
+
+
+def _refresh_claude_credentials(source_config: Path, private_config: Path) -> None:
+    """Give a task's private Claude home the user's newer sign-in.
+
+    A task's home is seeded once and reused by every resume, so a sign-in the
+    user renewed after seeding would otherwise never reach it. The private
+    copy is kept when it is at least as new, since Claude may have refreshed
+    it during an earlier run.
+    """
+    source = source_config / ".credentials.json"
+    private = private_config / ".credentials.json"
+    if not source.is_file() or not private_config.is_dir():
+        return
+    if private.is_file() and _claude_login_expiry(private) >= _claude_login_expiry(source):
+        return
+    temporary = private.with_name(f".{private.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copyfile(source, temporary)
+        temporary.chmod(0o600)
+        os.replace(temporary, private)
+    except OSError as error:
+        raise AOPError(f"could not refresh the private Claude login: {error}") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _claude_login_expiry(credentials: Path) -> float:
+    """When a Claude credentials file's login expires, or else when it was written."""
+    try:
+        expires = json.loads(credentials.read_text())["claudeAiOauth"]["expiresAt"]
+        if isinstance(expires, (int, float)) and not isinstance(expires, bool):
+            return expires / 1000
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        return credentials.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _copy_unless_removed(source: str, target: str) -> None:

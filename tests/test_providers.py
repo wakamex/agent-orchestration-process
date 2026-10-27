@@ -2509,6 +2509,44 @@ class ProvidersTest(AOPTestCase):
         assert (config / ".claude.json").read_text() == '{"user": "main"}'
         assert (source / ".claude.json").read_text() == '{"user": "main"}'
 
+    @parametrize("profile", ["host", "sealed", "edit"])
+    def test_reused_claude_home_takes_the_users_newer_sign_in(
+        self, tmp_path: Path, profile: str
+    ) -> None:
+        source = tmp_path / "source"
+        (source / ".claude").mkdir(parents=True)
+        credentials = source / ".claude" / ".credentials.json"
+
+        def sign_in(token: str, expires_at: int) -> None:
+            credentials.write_text(json.dumps(
+                {"claudeAiOauth": {"accessToken": token, "expiresAt": expires_at}}
+            ))
+
+        environment = {
+            "HOME": os.fspath(source),
+            "AOP_PROFILE": profile,
+            "AOP_PROVIDER_STATE_DIR": os.fspath(tmp_path / "state"),
+        }
+        private = tmp_path / "state" / "claude" / "home" / ".claude" / ".credentials.json"
+
+        sign_in("first", 1_000)
+        runner_module._prepare_claude_environment(dict(environment))
+        # The user signs in again after the task's home was seeded.
+        sign_in("renewed", 2_000)
+        runner_module._prepare_claude_environment(dict(environment))
+        renewed = json.loads(private.read_text())["claudeAiOauth"]["accessToken"]
+        # A login Claude refreshed inside the task is newer and is kept.
+        private.write_text(json.dumps(
+            {"claudeAiOauth": {"accessToken": "refreshed-in-task", "expiresAt": 3_000}}
+        ))
+        runner_module._prepare_claude_environment(dict(environment))
+
+        assert renewed == "renewed"
+        assert private.stat().st_mode & 0o777 == 0o600
+        assert json.loads(private.read_text())["claudeAiOauth"]["accessToken"] == (
+            "refreshed-in-task"
+        )
+
     def test_failed_claude_home_seed_leaves_no_partial_home(
         self,
         tmp_path: Path, monkeypatch: MonkeyPatch

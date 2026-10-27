@@ -1169,6 +1169,8 @@ class _ProcessCapture:
     first_event_seconds: float | None
     first_response_seconds: float | None
     protocol_error: str | None = None
+    # Why AOP stopped a harness that had not exited, when a stop_when check did.
+    stopped_reason: str | None = None
 
 
 def _capture_process(
@@ -1181,10 +1183,13 @@ def _capture_process(
     is_response: Callable[[str], bool],
     live_dir: Path | None = None,
     live_append: bool = False,
+    stop_when: Callable[[list[str]], str | None] | None = None,
 ) -> _ProcessCapture:
     """Run a harness to completion; with `live_dir`, its stdout and stderr also
     grow in live_dir/events.jsonl and live_dir/stderr.log while it runs, after
-    any earlier attempt's output when `live_append` is set."""
+    any earlier attempt's output when `live_append` is set. `stop_when` is
+    asked every few seconds with the stdout lines so far; a reason it returns
+    stops the harness as if its deadline had passed, without timing out."""
     started = time.monotonic()
     timed_out = False
     first_event_seconds = None
@@ -1248,8 +1253,23 @@ def _capture_process(
     stderr_reader = threading.Thread(target=read_stderr, daemon=True)
     stdout_reader.start()
     stderr_reader.start()
+    stopped_reason = None
     try:
-        process.wait(timeout=timeout_seconds)
+        if stop_when is None:
+            process.wait(timeout=timeout_seconds)
+        else:
+            deadline = None if timeout_seconds is None else started + timeout_seconds
+            while process.poll() is None:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout_seconds)
+                try:
+                    process.wait(timeout=min(_STOP_CHECK_SECONDS, remaining or _STOP_CHECK_SECONDS))
+                except subprocess.TimeoutExpired:
+                    stopped_reason = stop_when(list(stdout_parts))
+                    if stopped_reason is not None:
+                        sandbox_launch.stop(process, CodexAdapter._SHUTDOWN_GRACE_SECONDS)
+                        break
     except subprocess.TimeoutExpired:
         timed_out = True
         sandbox_launch.stop(process, CodexAdapter._SHUTDOWN_GRACE_SECONDS)
@@ -1273,7 +1293,11 @@ def _capture_process(
         duration_seconds=round(time.monotonic() - started, 6),
         first_event_seconds=_rounded(first_event_seconds),
         first_response_seconds=_rounded(first_response_seconds),
+        stopped_reason=stopped_reason,
     )
+
+
+_STOP_CHECK_SECONDS = 5.0
 
 
 def _joined_captures(first: _ProcessCapture, then: _ProcessCapture) -> _ProcessCapture:
@@ -2392,10 +2416,120 @@ class GrokAdapter:
         )
 
 
+class _CursorTurnEnd:
+    """Notice a Cursor turn that ended without Cursor exiting.
+
+    When background shell tasks finish late in a turn, Cursor Agent 2026.10
+    can answer them in a follow-up turn that its stream-json output never
+    shows, and then stay running. Its own transcript still records the answer
+    and a turn_ended line, so a run stops once that line appears for this run
+    and stdout has stayed silent for `grace` seconds. A turn that is still
+    working, such as a long silent build, has no new turn_ended line.
+    """
+
+    def __init__(
+        self, projects: Sequence[Path], session_id: str | None, grace: float
+    ):
+        self.projects = projects
+        self.grace = grace
+        self.session_id = session_id
+        self.transcript = self._find(session_id)
+        # A resumed chat's transcript already holds its earlier turns' ends.
+        self.ended_before = self._ends() if self.transcript else 0
+        self.noticed: tuple[float, int] | None = None
+
+    def __call__(self, lines: list[str]) -> str | None:
+        for line in lines:
+            if '"type":"result"' in line.replace(" ", ""):
+                return None  # Cursor is exiting normally.
+        if self.transcript is None:
+            self.session_id = self.session_id or self._session(lines)
+            self.transcript = self._find(self.session_id)
+            if self.transcript is None or self._ends() <= self.ended_before:
+                return None
+        elif self._ends() <= self.ended_before:
+            return None
+        now = time.monotonic()
+        if self.noticed is None or self.noticed[1] != len(lines):
+            self.noticed = (now, len(lines))
+            return None
+        if now - self.noticed[0] < self.grace:
+            return None
+        return (
+            "Cursor Agent ended its turn but neither reported a result nor "
+            f"exited; AOP stopped it after {self.grace:g} silent seconds. Its "
+            "answer is from Cursor's transcript, and its usage is unavailable"
+        )
+
+    def final_message(self) -> str | None:
+        """The last assistant text in the transcript, without redaction marks."""
+        found = None
+        for record in self._records():
+            if record.get("role") != "assistant":
+                continue
+            message = record.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, list):
+                continue
+            text = "".join(
+                item["text"]
+                for item in content
+                if isinstance(item, dict)
+                and item.get("type") == "text"
+                and isinstance(item.get("text"), str)
+            )
+            text = re.sub(r"\s*\[REDACTED\]\s*", "\n\n", text).strip()
+            if text:
+                found = text
+        return found
+
+    @staticmethod
+    def _session(lines: list[str]) -> str | None:
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and isinstance(event.get("session_id"), str):
+                return event["session_id"]
+        return None
+
+    def _find(self, session_id: str | None) -> Path | None:
+        if not session_id:
+            return None
+        found = [
+            path
+            for root in self.projects
+            for path in root.glob(f"*/agent-transcripts/{session_id}/{session_id}.jsonl")
+        ]
+        return found[0] if len(found) == 1 else None
+
+    def _records(self) -> list[dict[str, object]]:
+        try:
+            lines = self.transcript.read_text().splitlines() if self.transcript else []
+        except OSError:
+            return []
+        records = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
+
+    def _ends(self) -> int:
+        return sum(1 for record in self._records() if record.get("type") == "turn_ended")
+
+
 class CursorAdapter:
     provider = "cursor"
     modes = frozenset({"agent"})
     DEFAULT_MODEL = "composer-2.5"
+    # How long Cursor may stay running and silent after its transcript says
+    # the turn ended before AOP stops it.
+    TURN_END_GRACE_SECONDS = 60.0
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_CURSOR_BIN", "agent")
@@ -2420,6 +2554,14 @@ class CursorAdapter:
         command = _provider_command(
             self._command(request, worktree), request, worktree, environment
         )
+        # Transcripts are in ~/.cursor/projects on the host and in the private
+        # home's own projects directory in the sandboxed profiles.
+        home = Path(environment["HOME"])
+        watch = _CursorTurnEnd(
+            (home / ".cursor" / "projects", home / "projects"),
+            request.session_id,
+            self.TURN_END_GRACE_SECONDS,
+        )
         started_at = _now()
         capture = _capture_process(
             command,
@@ -2429,8 +2571,11 @@ class CursorAdapter:
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
             live_dir=run_dir,
+            stop_when=watch,
         )
         parsed = self._parse(capture.stdout)
+        if capture.stopped_reason is not None:
+            parsed["final_message"] = parsed["final_message"] or watch.final_message()
         reported_session_id = parsed["session_id"]
         session_id, resume_error = _check_resumed_session(
             "Cursor Agent", "chat", request.session_id, reported_session_id
@@ -2440,6 +2585,8 @@ class CursorAdapter:
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif capture.stopped_reason is not None:
+            error = capture.stopped_reason
         elif capture.exit_code:
             error = (
                 capture.stderr.strip()
@@ -2461,6 +2608,8 @@ class CursorAdapter:
             usage=parsed["usage"],
             usage_observed=parsed["usage_observed"],
             calculated_cost=None,
+            # Cursor reports usage only in its terminal result.
+            require_observed=not parsed["has_result"],
         )
         return _build_run_result(
             request,

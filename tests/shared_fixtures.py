@@ -860,6 +860,25 @@ print(json.dumps({{
     "message": {{"content": [{{"type": "text", "text": "working"}}]}},
     "session_id": session_id,
 }}), flush=True)
+# Cursor's own transcript of the chat, one line per message and turn end.
+transcript = project_dir / "agent-transcripts" / session_id / f"{{session_id}}.jsonl"
+transcript.parent.mkdir(parents=True, exist_ok=True)
+with transcript.open("a") as stream:
+    stream.write(json.dumps({{"role": "user", "message": {{"content": [{{"type": "text", "text": prompt}}]}}}}) + "\\n")
+if prompt == "CURSOR_HANG_AFTER_TURN":
+    # A follow-up turn Cursor never streams, after which it does not exit.
+    with transcript.open("a") as stream:
+        stream.write(json.dumps({{"role": "assistant", "message": {{"content": [
+            {{"type": "text", "text": "Task done.\\n\\n[REDACTED]"}},
+        ]}}}}) + "\\n")
+        stream.write(json.dumps({{"type": "turn_ended", "status": "success"}}) + "\\n")
+    import time
+    time.sleep(60)
+if prompt == "CURSOR_SILENT_WORK":
+    import time
+    time.sleep(1.5)
+with transcript.open("a") as stream:
+    stream.write(json.dumps({{"type": "turn_ended", "status": "success"}}) + "\\n")
 print(json.dumps({{
     "type": "result",
     "subtype": "error" if prompt == "CURSOR_ERROR_WITH_RESPONSE" else "success",

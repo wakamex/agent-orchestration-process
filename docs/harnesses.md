@@ -140,6 +140,8 @@ start empty. `sealed` receives authentication only, while `host` uses Cursor's n
 
 Set `AOP_CURSOR_HOME` or `AOP_CURSOR_CONFIG_DIR` for nonstandard source locations.
 
+When background shell tasks finish late in a turn, Cursor Agent 2026.10 can answer them in a follow-up turn that its `stream-json` output never shows, and then stay running without reporting a result. Cursor's own transcript of the chat still records the answer and a `turn_ended` line. AOP watches that transcript: once it records a turn end for this run and Cursor has been running and silent for 60 seconds afterwards, AOP stops Cursor. The run fails with an error saying so, keeps the answer from the transcript and the chat ID for `aop resume`, and has accounting `unavailable`, since Cursor reports usage only in its result. A turn still working, such as a long silent build, has recorded no turn end, so only `--timeout` limits it.
+
 ### Devin CLI
 
 AOP seeds authentication and configuration without copying installed versions, sessions,

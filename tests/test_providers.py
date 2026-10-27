@@ -693,6 +693,30 @@ class ProvidersTest(AOPTestCase):
         assert (manager.state_dir / "runs" / first.run_id / "result.json").is_file()
         assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
 
+    def test_cursor_that_ends_its_turn_without_exiting_is_stopped(
+        self, repository: Path, fake_cursor: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(CursorAdapter, "TURN_END_GRACE_SECONDS", 0.5)
+        monkeypatch.setattr(runner_module, "_STOP_CHECK_SECONDS", 0.2)
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, CursorAdapter(os.fspath(fake_cursor)))
+
+        hung = runner.run(
+            task="cursor-hang", prompt="CURSOR_HANG_AFTER_TURN", timeout_seconds=30
+        )
+        # The earlier turn's end must not stop a resumed turn still working.
+        working = runner.resume(run_id=hung.run_id, prompt="CURSOR_SILENT_WORK")
+
+        assert not hung.succeeded
+        assert not hung.timed_out
+        assert hung.duration_seconds < 20
+        assert "ended its turn" in hung.error
+        assert hung.final_message == "Task done."
+        assert hung.session_id == "b5b6dbdd-0d68-452f-9d5c-20238c970169"
+        assert hung.accounting_status == "unavailable"
+        assert working.succeeded, working.error
+        assert working.session_id == hung.session_id
+
     def test_devin_defaults_to_swe_and_resumes_exact_session(
         self,
         repository: Path, fake_devin: Path

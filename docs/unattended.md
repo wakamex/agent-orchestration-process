@@ -46,6 +46,14 @@ Every result has three fields that say how it ended:
 
 `aop batch` exits 0 only if every task succeeded, and 1 otherwise.
 
+## Long commands inside a run
+
+A run's only deadline is its `--timeout`. A harness may also limit each tool call, and a long check such as a full build or test suite can outlast one call. The supported way to run it is the harness's own shell tool: in the foreground when the command fits in one call, and otherwise in that tool's own background mode, checking on it with later calls. Everything started that way belongs to the run and ends with it.
+
+Every run has `AOP_RUN_ID` in its environment, so instructions and tools can tell that they are inside a run. Helpers that hand work to a terminal tab or a service manager, such as a user's job launcher or `systemd-run --user`, are not part of a run: in the sandboxed profiles they cannot reach the user's service manager at all, which AOP's tests check. With `--profile host` nothing stops them, and a unit they start outlives the run, so tell executors not to use them.
+
+A sentence that states this in a brief: "Run long commands, such as builds and test suites, inside this run with your own shell tool, in the foreground or in that tool's background mode, and never start services, timers, units, or detached processes that outlive the run."
+
 ## Deadlines
 
 When `--timeout` expires, AOP sends SIGTERM to the harness itself, so it can save its session and flush its output, waits five seconds, and then stops the sandbox. Codex receives a native turn interruption instead, which also keeps its usage for the turn. The grace period does not extend the work budget, and the result stays `timed_out`.

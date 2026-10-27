@@ -693,6 +693,23 @@ class ProvidersTest(AOPTestCase):
         assert (manager.state_dir / "runs" / first.run_id / "result.json").is_file()
         assert (manager.state_dir / "runs" / resumed.run_id / "result.json").is_file()
 
+    @parametrize("profile", ["edit", "review", "sealed"])
+    def test_sandboxed_runs_cannot_start_user_services(
+        self, repository: Path, fake_cursor: Path, tmp_path: Path, profile: str
+    ) -> None:
+        manager = (
+            WorktreeManager.standalone(tmp_path / "controller")
+            if profile == "sealed"
+            else WorktreeManager.discover(repository)
+        )
+        runner = AgentRunner(manager, CursorAdapter(os.fspath(fake_cursor)))
+
+        result = runner.run(
+            task=f"user-manager-{profile}", prompt="CHECK_NO_USER_MANAGER", profile=profile
+        )
+
+        assert result.succeeded, result.error
+
     def test_cursor_that_ends_its_turn_without_exiting_is_stopped(
         self, repository: Path, fake_cursor: Path, monkeypatch: MonkeyPatch
     ) -> None:

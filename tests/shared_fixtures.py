@@ -836,6 +836,16 @@ if prompt.startswith("WRITE_ARTIFACT"):
     pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("report.md").write_text(
         "# Cursor artifact\\n"
     )
+if prompt == "CHECK_NO_USER_MANAGER":
+    import shutil
+    import subprocess
+    if shutil.which("systemd-run"):
+        started = subprocess.run(
+            ["systemd-run", "--user", "--quiet", "--collect", "true"],
+            capture_output=True,
+        )
+        if started.returncode == 0:
+            raise RuntimeError("the run reached the user's service manager")
 if prompt == "CHECK_CURSOR_SANDBOX":
     pathlib.Path("agent-write.txt").write_text("allowed")
     for protected in [

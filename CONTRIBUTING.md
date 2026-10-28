@@ -12,6 +12,17 @@ uv run --locked ruff check src tests
 
 The sandbox tests need `bwrap` with unprivileged user namespaces; see the README's requirements.
 
+## Running AOP from a checkout
+
+Other projects can run AOP straight from a checkout, for example while testing an unreleased fix. Install it as an editable tool, so the `aop` command runs the checkout's current code:
+
+```sh
+uv tool install --editable /path/to/agent-orchestration-process
+aop run ...
+```
+
+Code changes take effect at once; rerun the install when the checkout's dependencies change. Launching through `uv run --project /path/to/agent-orchestration-process --locked aop ...` instead stops working whenever a uv command run in the checkout with a user-level uv configuration, such as one setting `exclude-newer`, records those options in `uv.lock`: `--locked` then refuses to start. Use `--frozen` when you need `uv run`; it installs exactly the packages `uv.lock` names without checking that file's other metadata.
+
 ## Tests against installed harnesses
 
 These tests run a real installed harness and are skipped unless its variable names the binary. None needs quota or credit: they use a local model server or stop before the first model request.

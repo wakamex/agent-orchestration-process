@@ -1364,8 +1364,15 @@ class ClaudeAdapter:
         run_dir: Path,
         environment: dict[str, str],
     ) -> RunResult:
+        login = None
         if not request.native_state:
+            source_config, _ = _claude_source(environment)
             _prepare_claude_environment(environment)
+            login = _ClaudeLogin(
+                source_config,
+                Path(environment["AOP_PROVIDER_STATE_DIR"]) / "claude" / "home" / ".claude",
+            )
+            login.start()
         if request.provider_base_url is not None:
             environment["ANTHROPIC_BASE_URL"] = request.provider_base_url
             environment["AOP_PROVIDER_BASE_URL_ENV"] = "ANTHROPIC_BASE_URL"
@@ -1385,7 +1392,10 @@ class ClaudeAdapter:
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
             live_dir=run_dir,
+            stop_when=None if login is None else lambda _lines: login.sync(),
         )
+        if login is not None:
+            login.sync()
         previous_total_cost_usd = (
             self._reported_total_cost_usd(
                 run_dir.parent / request.parent_run_id / "events.jsonl"
@@ -6114,7 +6124,6 @@ def _prepare_claude_environment(environment: dict[str, str]) -> None:
             raise AOPError(f"could not prepare isolated Claude state: {error}") from error
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
-    _refresh_claude_credentials(source_config, destination / ".claude")
     if environment.get("AOP_PROFILE") == "host":
         # A host run keeps the user's HOME, which other tools resolve: rootless
         # podman cannot use a HOME under a directory its user namespace cannot
@@ -6162,27 +6171,70 @@ def _seed_claude_home(
         shutil.copy2(source_settings, destination / ".claude.json")
 
 
-def _refresh_claude_credentials(source_config: Path, private_config: Path) -> None:
-    """Give a task's private Claude home the user's newer sign-in.
+class _ClaudeLogin:
+    """Keep a task's private Claude sign-in in step with the user's.
 
-    A task's home is seeded once and reused by every resume, so a sign-in the
-    user renewed after seeding would otherwise never reach it. The private
-    copy is kept when it is at least as new, since Claude may have refreshed
-    it during an earlier run.
+    A Claude sign-in refreshes with a rotating refresh token: each refresh
+    returns a new one and invalidates the old. Claude processes that share one
+    credentials file follow each other's refreshes, but a task's private copy
+    does not, so a refresh on either side used to break the other: the run
+    failed with "OAuth session expired", or the user's own sessions did. AOP
+    therefore copies whichever side refreshed onto the other, before the run,
+    every few seconds while it runs, and after it ends.
     """
-    source = source_config / ".credentials.json"
-    private = private_config / ".credentials.json"
-    if not source.is_file() or not private_config.is_dir():
-        return
-    if private.is_file() and _claude_login_expiry(private) >= _claude_login_expiry(source):
-        return
-    temporary = private.with_name(f".{private.name}.{uuid.uuid4().hex}.tmp")
+
+    def __init__(self, source_config: Path, private_config: Path):
+        self.source = source_config / ".credentials.json"
+        self.private = private_config / ".credentials.json"
+        self.shared: str | None = None
+
+    def start(self) -> None:
+        """Give the private copy the user's sign-in unless it holds a newer one."""
+        source, private = self._token(self.source), self._token(self.private)
+        if source is not None and (
+            private is None
+            or _claude_login_expiry(self.source) > _claude_login_expiry(self.private)
+        ):
+            _replace_private_file(self.source, self.private)
+            private = source
+        self.shared = private
+
+    def sync(self) -> None:
+        """Copy a refresh made on one side to the other."""
+        if self.shared is None:
+            return
+        source, private = self._token(self.source), self._token(self.private)
+        try:
+            if private is not None and private != self.shared and source == self.shared:
+                # The run refreshed, which invalidated the user's refresh token.
+                _replace_private_file(self.private, self.source)
+                self.shared = private
+            elif source is not None and source != self.shared:
+                # The user's sessions refreshed, or the user signed in again.
+                _replace_private_file(self.source, self.private)
+                self.shared = source
+        except AOPError:
+            pass  # A later check, or the next run, tries again.
+
+    @staticmethod
+    def _token(credentials: Path) -> str | None:
+        """The sign-in's refresh token, or None when there is no usable one."""
+        try:
+            token = json.loads(credentials.read_text())["claudeAiOauth"]["refreshToken"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return token if isinstance(token, str) and token else None
+
+
+def _replace_private_file(source: Path, target: Path) -> None:
+    """Replace `target` with a copy of `source` atomically, readable by the user only."""
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     try:
         shutil.copyfile(source, temporary)
         temporary.chmod(0o600)
-        os.replace(temporary, private)
+        os.replace(temporary, target)
     except OSError as error:
-        raise AOPError(f"could not refresh the private Claude login: {error}") from error
+        raise AOPError(f"could not update a Claude sign-in: {error}") from error
     finally:
         temporary.unlink(missing_ok=True)
 

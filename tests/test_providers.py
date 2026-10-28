@@ -2509,43 +2509,74 @@ class ProvidersTest(AOPTestCase):
         assert (config / ".claude.json").read_text() == '{"user": "main"}'
         assert (source / ".claude.json").read_text() == '{"user": "main"}'
 
-    @parametrize("profile", ["host", "sealed", "edit"])
-    def test_reused_claude_home_takes_the_users_newer_sign_in(
-        self, tmp_path: Path, profile: str
+    def test_claude_sign_in_follows_refreshes_on_either_side(
+        self, tmp_path: Path
     ) -> None:
         source = tmp_path / "source"
-        (source / ".claude").mkdir(parents=True)
-        credentials = source / ".claude" / ".credentials.json"
+        private = tmp_path / "private"
+        source.mkdir()
+        private.mkdir()
 
-        def sign_in(token: str, expires_at: int) -> None:
-            credentials.write_text(json.dumps(
-                {"claudeAiOauth": {"accessToken": token, "expiresAt": expires_at}}
-            ))
+        def write(directory: Path, refresh: str, expires_at: int) -> None:
+            (directory / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+                "accessToken": f"access-{refresh}",
+                "refreshToken": refresh,
+                "expiresAt": expires_at,
+            }}))
 
-        environment = {
-            "HOME": os.fspath(source),
-            "AOP_PROFILE": profile,
-            "AOP_PROVIDER_STATE_DIR": os.fspath(tmp_path / "state"),
-        }
-        private = tmp_path / "state" / "claude" / "home" / ".claude" / ".credentials.json"
+        def token(directory: Path) -> str:
+            value = json.loads((directory / ".credentials.json").read_text())
+            return value["claudeAiOauth"]["refreshToken"]
 
-        sign_in("first", 1_000)
-        runner_module._prepare_claude_environment(dict(environment))
-        # The user signs in again after the task's home was seeded.
-        sign_in("renewed", 2_000)
-        runner_module._prepare_claude_environment(dict(environment))
-        renewed = json.loads(private.read_text())["claudeAiOauth"]["accessToken"]
-        # A login Claude refreshed inside the task is newer and is kept.
-        private.write_text(json.dumps(
-            {"claudeAiOauth": {"accessToken": "refreshed-in-task", "expiresAt": 3_000}}
-        ))
-        runner_module._prepare_claude_environment(dict(environment))
+        login = runner_module._ClaudeLogin(source, private)
+        write(source, "old", 1_000)
+        write(private, "stale", 500)
+        login.start()
+        seeded = token(private)
+        # The run refreshes: the user's own copy now holds a revoked token.
+        write(private, "run", 2_000)
+        login.sync()
+        written_back = token(source)
+        # The user's sessions refresh next.
+        write(source, "user", 3_000)
+        login.sync()
+        followed = token(private)
+        # A failed refresh wipes the private copy; that never reaches the user.
+        write(private, "", 0)
+        login.sync()
 
-        assert renewed == "renewed"
-        assert private.stat().st_mode & 0o777 == 0o600
-        assert json.loads(private.read_text())["claudeAiOauth"]["accessToken"] == (
-            "refreshed-in-task"
+        assert seeded == "old"
+        assert written_back == "run"
+        assert followed == "user"
+        assert token(source) == "user"
+        assert (source / ".credentials.json").stat().st_mode & 0o777 == 0o600
+
+    @parametrize("profile", ["host", "edit", "sealed"])
+    def test_claude_run_refresh_reaches_the_users_sign_in(
+        self,
+        repository: Path,
+        fake_claude: Path,
+        tmp_path: Path,
+        profile: str,
+    ) -> None:
+        source = Path(os.environ["HOME"]) / ".claude" / ".credentials.json"
+        source.write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "access-1", "refreshToken": "refresh-1", "expiresAt": 1000,
+        }}))
+        manager = (
+            WorktreeManager.standalone(tmp_path / "controller")
+            if profile == "sealed"
+            else WorktreeManager.discover(repository)
         )
+        runner = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude)))
+
+        result = runner.run(
+            task=f"sign-in-{profile}", prompt="CLAUDE_REFRESH_SIGN_IN", profile=profile
+        )
+
+        assert result.succeeded, result.error
+        refreshed = json.loads(source.read_text())["claudeAiOauth"]["refreshToken"]
+        assert refreshed == "refresh-2"
 
     def test_failed_claude_home_seed_leaves_no_partial_home(
         self,

@@ -720,6 +720,14 @@ if args == ["auth", "status", "--json"]:
     raise SystemExit(0)
 prompt = sys.stdin.read()
 {SEALED_PROVIDER_PROBE}
+if prompt == "CLAUDE_REFRESH_SIGN_IN":
+    # Claude refreshes its sign-in, which rotates the refresh token.
+    config = pathlib.Path(
+        os.environ.get("CLAUDE_CONFIG_DIR") or pathlib.Path(os.environ["HOME"]) / ".claude"
+    )
+    (config / ".credentials.json").write_text(json.dumps({{"claudeAiOauth": {{
+        "accessToken": "access-2", "refreshToken": "refresh-2", "expiresAt": 2000,
+    }}}}))
 if prompt == "CHECK_SANDBOX":
     pathlib.Path("agent-write.txt").write_text("allowed")
     (pathlib.Path(os.environ["AOP_CACHE_DIR"]) / "provider-cache.txt").write_text(

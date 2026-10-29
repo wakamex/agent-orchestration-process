@@ -48,7 +48,7 @@ Every result has three fields that say how it ended:
 
 ## Admission before a run starts
 
-An admission command decides whether a run may start, for example by checking a subscription's remaining quota. AOP keeps no quota logic of its own: the command makes the decision. Every `aop run`, `aop resume`, batch task, and integration resume asks the first of these that is set:
+Admission is optional. With no admission command configured, every run starts without a check, as in releases before 0.6.3. When one is configured, it decides whether each run may start, for example by checking a subscription's remaining quota; AOP keeps no quota logic of its own. Every `aop run`, `aop resume`, batch task, and integration resume asks the first of these that is set, so no run needs an extra argument once one of them is:
 
 1. `--admit-command CMD` on `run` or `resume`;
 2. the `AOP_ADMIT_COMMAND` environment variable;

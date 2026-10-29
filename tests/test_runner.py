@@ -35,6 +35,7 @@ from agent_orchestration_process.runner import (
     _provider_runtime,
 )
 from agent_orchestration_process.worktrees import (
+    AdmissionRefused,
     AOPError,
     WorktreeManager,
     git,
@@ -1744,3 +1745,91 @@ class RunnerTest(AOPTestCase):
         )
 
         assert args.tools == expected
+
+
+class AdmissionTest(AOPTestCase):
+    def _hook(self, tmp_path: Path, exit_code: int, answer: str = "") -> Path:
+        hook = tmp_path / f"admit-{exit_code}"
+        hook.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, sys\n"
+            "route = json.load(sys.stdin)\n"
+            f"pathlib.Path({os.fspath(tmp_path / 'seen.jsonl')!r}).open('a').write(\n"
+            "    json.dumps({**route, 'env_agent': os.environ['AOP_ADMIT_AGENT']}) + '\\n'\n"
+            ")\n"
+            f"print({answer!r})\n"
+            f"raise SystemExit({exit_code})\n"
+        )
+        hook.chmod(0o755)
+        return hook
+
+    def _seen(self, tmp_path: Path) -> list[dict[str, object]]:
+        path = tmp_path / "seen.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_admitted_run_and_resume_record_the_decision(
+        self, repository: Path, fake_codex: Path, tmp_path: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+        admit = os.fspath(self._hook(tmp_path, 0, '{"admitted": true}'))
+
+        first = runner.run(task="admitted", prompt="first", admit_command=admit)
+        resumed = runner.resume(run_id=first.run_id, prompt="second", admit_command=admit)
+
+        assert first.succeeded and resumed.succeeded
+        seen = self._seen(tmp_path)
+        assert [item["run_id"] for item in seen] == [first.run_id, resumed.run_id]
+        assert seen[0]["agent"] == seen[0]["env_agent"] == "codex"
+        assert seen[0]["profile"] == "edit" and seen[0]["parent_run_id"] is None
+        assert seen[1]["parent_run_id"] == first.run_id
+        assert seen[1]["session_id"] == first.session_id
+        request = RunStore(manager.state_dir / "runs").load_request(first.run_id)
+        assert request.admission["exit_code"] == 0
+        assert request.admission["stdout"] == '{"admitted": true}'
+
+    def test_refused_run_starts_nothing_and_says_why(
+        self,
+        repository: Path,
+        fake_codex: Path,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+        capsys: Capture,
+    ) -> None:
+        monkeypatch.chdir(repository)
+        monkeypatch.setenv("AOP_CODEX_BIN", os.fspath(fake_codex))
+        monkeypatch.setenv(
+            "AOP_ADMIT_COMMAND",
+            os.fspath(self._hook(tmp_path, 1, '{"admitted": false, "why": "over pace"}')),
+        )
+        manager = WorktreeManager.discover(repository)
+
+        assert main(["run", "refused", "--agent", "codex", "--prompt", "x"]) == 2
+        output = capsys.readouterr()
+        refusal = json.loads(output.out)
+        assert refusal["admitted"] is False
+        assert refusal["exit_code"] == 1
+        assert "over pace" in refusal["reason"]
+        assert "admission refused" in output.err
+        assert not any(item.task == "refused" for item in manager.list())
+        runs = manager.state_dir / "runs"
+        assert not runs.exists() or not any(runs.iterdir())
+
+        # An empty --admit-command turns the default off for one run.
+        assert main(["run", "free", "--agent", "codex", "--prompt", "x", "--admit-command", ""]) == 0
+
+    def test_admission_fails_closed_when_the_command_cannot_answer(
+        self, repository: Path, fake_codex: Path, tmp_path: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+        first = runner.run(task="resume-refused", prompt="first")
+
+        with raises(AdmissionRefused, match="admission refused"):
+            runner.run(task="missing", prompt="x", admit_command=os.fspath(tmp_path / "absent"))
+        with raises(AdmissionRefused, match="over pace"):
+            runner.resume(
+                run_id=first.run_id,
+                prompt="second",
+                admit_command=os.fspath(self._hook(tmp_path, 1, "over pace")),
+            )

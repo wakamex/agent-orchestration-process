@@ -88,6 +88,14 @@ class AOPError(RuntimeError):
     """A user-actionable orchestration error."""
 
 
+class AdmissionRefused(AOPError):
+    """The run's admission command declined it, so the harness never started."""
+
+    def __init__(self, message: str, decision: dict[str, object]):
+        super().__init__(message)
+        self.decision = decision
+
+
 @dataclass(frozen=True)
 class Worktree:
     task: str

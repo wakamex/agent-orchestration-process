@@ -12,6 +12,7 @@ import re
 import shutil
 import stat
 import sqlite3
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,7 @@ from .pricing import (
 from .provider_versions import require_supported_agy
 from . import egress, sandbox_launch
 from .worktrees import (
+    AdmissionRefused,
     AOPError,
     Worktree,
     WorktreeManager,
@@ -6801,6 +6803,30 @@ def _hermes_runtime_environment(
                 _write_hermes_auth(shared_auth, task_auth)
 
 
+ADMIT_TIMEOUT_SECONDS = 60.0
+
+
+def _credential_home(provider: str, environment: dict[str, str]) -> str | None:
+    """The harness home a run's credentials come from, for admission commands."""
+    homes: dict[str, Callable[[], Path | None]] = {
+        "claude": lambda: _claude_source(environment)[0],
+        "codex": lambda: _codex_source_home(environment),
+        "cursor": lambda: _cursor_source_home(environment),
+        "devin": lambda: _devin_source_data(environment),
+        "grok": lambda: _grok_source_home(environment),
+        "agy": lambda: _agy_source_dir(environment),
+        "hermes": lambda: _hermes_source_home(environment),
+        "muse": lambda: _muse_source_config(environment),
+        "opencode": lambda: _opencode_source_config(environment),
+        "zcode": lambda: zcode.source_home(environment),
+    }
+    try:
+        home = homes[provider]() if provider in homes else None
+    except (AOPError, OSError):
+        return None
+    return None if home is None else os.fspath(home)
+
+
 def adapter_for(agent: str) -> AgentAdapter:
     if agent == "codex":
         return CodexAdapter()
@@ -6867,6 +6893,7 @@ class AgentRunner:
         workdir: str | os.PathLike[str] | None = None,
         native_state: bool = False,
         reminders: str | None = None,
+        admit_command: str | None = None,
     ) -> RunResult:
         self._validate_mode(mode)
         workdir = self._validated_workdir(workdir, profile)
@@ -6944,6 +6971,7 @@ class AgentRunner:
             native_state=native_state,
             reminders=reminders,
         )
+        request = self._admitted(request, admit_command)
         worktree = (
             Worktree(task=task, path=Path(workdir), head="")
             if workdir is not None
@@ -6978,6 +7006,7 @@ class AgentRunner:
         artifacts: Sequence[str] = (),
         input_paths: Sequence[str | os.PathLike[str]] | None = None,
         prompt_parts: Sequence[PromptPart] | None = None,
+        admit_command: str | None = None,
         _task_lock_held: bool = False,
     ) -> RunResult:
         parent_request = self.store.load_request(run_id)
@@ -7087,6 +7116,7 @@ class AgentRunner:
             native_state=parent_request.native_state,
             reminders=parent_request.reminders,
         )
+        request = self._admitted(request, admit_command)
         return self._execute(
             request,
             worktree,
@@ -7094,6 +7124,71 @@ class AgentRunner:
             input_provenance=input_provenance,
             task_lock_held=_task_lock_held,
         )
+
+    def _admitted(self, request: RunRequest, command: str | None) -> RunRequest:
+        """Ask the admission command whether this run may start.
+
+        The command comes from --admit-command or AOP_ADMIT_COMMAND; an empty
+        value means no admission. It receives the run as JSON on stdin and as
+        AOP_ADMIT_* variables, and exit status 0 admits the run. Anything
+        else, including a command that cannot run or does not finish in time,
+        refuses it before any task state exists.
+        """
+        if command is None:
+            command = os.environ.get("AOP_ADMIT_COMMAND", "")
+        if not command.strip():
+            return request
+        route = {
+            "run_id": request.run_id,
+            "parent_run_id": request.parent_run_id,
+            "session_id": request.session_id,
+            "agent": request.provider,
+            "model": request.model,
+            "effort": request.effort,
+            "inference_provider": request.inference_provider,
+            "profile": request.profile,
+            "task": request.task,
+            "workdir": request.workdir,
+            "credential_home": _credential_home(request.provider, dict(os.environ)),
+            "timeout_seconds": request.timeout_seconds,
+        }
+        environment = {
+            **os.environ,
+            **{
+                f"AOP_ADMIT_{key.upper()}": "" if value is None else str(value)
+                for key, value in route.items()
+            },
+        }
+        try:
+            argv = shlex.split(command)
+            completed = subprocess.run(
+                argv,
+                input=json.dumps(route),
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=ADMIT_TIMEOUT_SECONDS,
+            )
+            exit_code, stdout, stderr = (
+                completed.returncode, completed.stdout, completed.stderr
+            )
+        except (OSError, ValueError) as error:
+            exit_code, stdout, stderr = None, "", str(error)
+        except subprocess.TimeoutExpired:
+            exit_code, stdout = None, ""
+            stderr = f"did not finish within {ADMIT_TIMEOUT_SECONDS:g} seconds"
+        decision = {
+            "command": command,
+            "exit_code": exit_code,
+            "stdout": stdout.strip()[-4000:],
+            "stderr": stderr.strip()[-4000:],
+        }
+        if exit_code != 0:
+            reason = decision["stdout"] or decision["stderr"] or f"exit status {exit_code}"
+            raise AdmissionRefused(
+                f"admission refused by {command!r}: {reason.splitlines()[-1]}", decision
+            )
+        return replace(request, admission=decision)
 
     def _execute(
         self,

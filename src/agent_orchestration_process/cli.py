@@ -33,6 +33,7 @@ from .runner import (
 )
 from .migration import migrate_archive, migrate_runs, migration_roots, print_counts
 from .worktrees import (
+    AdmissionRefused,
     AOPError,
     WorktreeManager,
     compact_state_roots,
@@ -229,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
         "instead of a task worktree; TASK becomes optional and AOP keeps its "
         "records in the current directory",
     )
+    _add_admit_argument(run)
     run.add_argument(
         "--native-state",
         action="store_true",
@@ -271,6 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="print the normalized result as JSON"
     )
     _add_artifact_arguments(resume)
+    _add_admit_argument(resume)
     _add_input_arguments(resume, default=None, resume=True)
     _add_prompt_arguments(resume)
 
@@ -522,6 +525,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 writable_workspace=args.writable_workspace,
                 thinking_display=args.thinking_display,
                 reminders=args.reminders,
+                admit_command=args.admit_command,
             )
             return _report_run(result, manager, json_output=args.json)
 
@@ -534,6 +538,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_seconds=args.timeout,
                 artifacts=args.artifact,
                 input_paths=args.input_paths,
+                admit_command=args.admit_command,
             )
             return _report_run(result, manager, json_output=args.json)
 
@@ -553,6 +558,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         raise AOPError("unsupported command")
+    except AdmissionRefused as error:
+        # Standard output would carry the answer; a refused run has none, so
+        # it carries this line, which callers can tell from a result.
+        print(json.dumps({"admitted": False, "reason": str(error), **error.decision}))
+        print(f"aop: {error}", file=sys.stderr)
+        return 2
     except AOPError as error:
         print(f"aop: {error}", file=sys.stderr)
         return 2
@@ -578,6 +589,16 @@ def _add_prompt_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help='JSON list of prompt blocks, each {"text": ..., "cache": true|false}; '
         "Claude caches the prompt through the one cached block (claude only)",
+    )
+
+
+def _add_admit_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--admit-command",
+        metavar="CMD",
+        help="command that must exit 0 before the harness starts; it receives "
+        "the run as JSON on stdin and AOP_ADMIT_* variables (default: "
+        "AOP_ADMIT_COMMAND; empty for none)",
     )
 
 

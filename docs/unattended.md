@@ -40,11 +40,28 @@ Every result has three fields that say how it ended:
 | 0 | The run succeeded. |
 | 124 | The run timed out. |
 | 1 to 125 | The harness's own non-zero exit code, passed through, or 1 for any other failure. |
-| 2 | AOP refused the request, usually before starting the harness: a bad option, an unsupported combination, a failed input check, or missing credentials. |
+| 2 | AOP refused the request, usually before starting the harness: a bad option, an unsupported combination, a failed input check, missing credentials, or a refused admission. |
 | 127 | A command AOP itself needed was not found. A harness that is missing when its run starts gives a failed result and exit code 1. |
 | 130 | Interrupted with Ctrl-C. |
 
 `aop batch` exits 0 only if every task succeeded, and 1 otherwise.
+
+## Admission before a run starts
+
+An admission command decides whether a run may start, for example by checking a subscription's remaining quota. Set it once in the environment as `AOP_ADMIT_COMMAND`, so every `aop run`, `aop resume`, batch task, and integration resume passes it, or per run with `--admit-command CMD`; an empty value turns it off. AOP keeps no quota logic of its own: the command makes the decision.
+
+The command is split like a shell command line but run without a shell. It receives the run on standard input as one JSON object, and the same fields as `AOP_ADMIT_*` environment variables:
+
+| Field | Meaning |
+| --- | --- |
+| `run_id` | The ID the run will have |
+| `parent_run_id`, `session_id` | For a resume, the run and harness session it continues |
+| `agent`, `model`, `effort`, `inference_provider` | The harness and model selection |
+| `profile`, `task`, `workdir` | Where the run will execute |
+| `credential_home` | The harness home its credentials come from, such as `~/.claude` or `CODEX_HOME` |
+| `timeout_seconds` | The run's deadline |
+
+Exit status 0 admits the run, and AOP records the command and its output in `request.json` under `admission`. Any other exit status refuses it, and so does a command that cannot be started or does not finish within 60 seconds: no task state is created, the harness never starts, and `aop` exits 2 and prints one JSON line on standard output, `{"admitted": false, "reason": ..., "command": ..., "exit_code": ..., "stdout": ..., "stderr": ...}`. A run's standard output otherwise carries its answer, so that line tells a refusal apart from a run.
 
 ## Long commands inside a run
 

@@ -216,6 +216,9 @@ class RunResult:
     # when reported, the models that refused, the messages the harness
     # withdrew, and the line of events.jsonl where the refusal begins.
     refusal: dict[str, Any] | None = None
+    # The run's admission decision: the command and its answer, or how it
+    # was skipped; None when no admission command was configured.
+    admission: dict[str, Any] | None = None
     accounting_status: str = "complete"
     usage_schema: str = TOKEN_USAGE_SCHEMA
     # The .aop state directory the run was recorded in, as listed in the

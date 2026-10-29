@@ -18,6 +18,7 @@ from support import AOPTestCase, Capture, MonkeyPatch, fail, parametrize, raises
 from shared_fixtures import api_cost
 
 from agent_orchestration_process import __version__
+from agent_orchestration_process import runner as runner_module
 from agent_orchestration_process.cli import build_parser, main
 from agent_orchestration_process.locks import exclusive_lock, task_lock_path
 from agent_orchestration_process.models import RunRequest
@@ -1786,7 +1787,9 @@ class AdmissionTest(AOPTestCase):
         assert seen[1]["session_id"] == first.session_id
         request = RunStore(manager.state_dir / "runs").load_request(first.run_id)
         assert request.admission["exit_code"] == 0
+        assert request.admission["by"] == "--admit-command"
         assert request.admission["stdout"] == '{"admitted": true}'
+        assert first.admission == request.admission
 
     def test_refused_run_starts_nothing_and_says_why(
         self,
@@ -1817,6 +1820,53 @@ class AdmissionTest(AOPTestCase):
 
         # An empty --admit-command turns the default off for one run.
         assert main(["run", "free", "--agent", "codex", "--prompt", "x", "--admit-command", ""]) == 0
+
+    def test_user_config_admits_every_run_and_records_opt_outs(
+        self,
+        repository: Path,
+        fake_codex: Path,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+        private_aop_config: Path,
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+        private_aop_config.parent.mkdir()
+        private_aop_config.write_text(
+            f"admit_command = {json.dumps(os.fspath(self._hook(tmp_path, 1, 'no quota')))}\n"
+        )
+
+        with raises(AdmissionRefused, match="no quota"):
+            runner.run(task="configured", prompt="x")
+        monkeypatch.setenv("AOP_ADMIT_COMMAND", "")
+        skipped = runner.run(task="opted-out", prompt="x")
+
+        assert skipped.succeeded
+        assert skipped.admission == {"skipped": True, "by": "AOP_ADMIT_COMMAND"}
+        archived = json.loads(
+            (results_archive_dir() / f"{skipped.run_id}.json").read_text()
+        )
+        assert archived["admission"] == {"skipped": True, "by": "AOP_ADMIT_COMMAND"}
+
+        private_aop_config.write_text("admit = 'typo'\n")
+        monkeypatch.delenv("AOP_ADMIT_COMMAND")
+        with raises(AdmissionRefused, match="may set only admit_command"):
+            runner.run(task="bad-config", prompt="x")
+
+    def test_admission_reports_the_backend_a_run_spends(self) -> None:
+        def request(provider: str, model: str | None, inference: str | None = None):
+            return RunRequest(
+                run_id="r", provider=provider, mode="agent", task="t", prompt="p",
+                base="HEAD", model=model, effort=None, profile="edit", no_web=False,
+                effective_policy={}, timeout_seconds=None, session_id=None,
+                parent_run_id=None, artifacts=(), inputs=(), created_at="now",
+                inference_provider=inference, inference_route=None,
+            )
+
+        assert runner_module._backend(request("opencode", "opencode-go/glm-5.3")) == "opencode-go"
+        assert runner_module._backend(request("dsh", "deepseek-flash")) == "deepseek-official"
+        assert runner_module._backend(request("codex", "glm-5.3", "zai-coding-plan")) == "zai-coding-plan"
+        assert runner_module._backend(request("claude", "claude-opus-5-5")) is None
 
     def test_admission_fails_closed_when_the_command_cannot_answer(
         self, repository: Path, fake_codex: Path, tmp_path: Path

@@ -48,9 +48,19 @@ Every result has three fields that say how it ended:
 
 ## Admission before a run starts
 
-An admission command decides whether a run may start, for example by checking a subscription's remaining quota. Set it once in the environment as `AOP_ADMIT_COMMAND`, so every `aop run`, `aop resume`, batch task, and integration resume passes it, or per run with `--admit-command CMD`; an empty value turns it off. AOP keeps no quota logic of its own: the command makes the decision.
+An admission command decides whether a run may start, for example by checking a subscription's remaining quota. AOP keeps no quota logic of its own: the command makes the decision. Every `aop run`, `aop resume`, batch task, and integration resume asks the first of these that is set:
 
-The command is split like a shell command line but run without a shell. It receives the run on standard input as one JSON object, and the same fields as `AOP_ADMIT_*` environment variables:
+1. `--admit-command CMD` on `run` or `resume`;
+2. the `AOP_ADMIT_COMMAND` environment variable;
+3. `admit_command` in `~/.config/aop/config.toml` (or under `XDG_CONFIG_HOME`), which applies to every `aop` you run, from any shell, job, or directory:
+
+```toml
+admit_command = "/path/to/admit-check"
+```
+
+An empty value at a level turns admission off from there, and the run records the opt-out. A config file that cannot be read, or that sets anything else, refuses every run until it is fixed.
+
+The command is split like a shell command line but run without a shell. It receives the run on standard input as one JSON object, and the same fields as `AOP_ADMIT_*` environment variables, each cut to 4,096 characters:
 
 | Field | Meaning |
 | --- | --- |
@@ -58,10 +68,11 @@ The command is split like a shell command line but run without a shell. It recei
 | `parent_run_id`, `session_id` | For a resume, the run and harness session it continues |
 | `agent`, `model`, `effort`, `inference_provider` | The harness and model selection |
 | `profile`, `task`, `workdir` | Where the run will execute |
-| `credential_home` | The harness home its credentials come from, such as `~/.claude` or `CODEX_HOME` |
+| `credential_home` | The harness home its credentials come from, such as `~/.claude` or `CODEX_HOME`; the run's environment is a copy of the caller's, so this is the home the run uses |
+| `backend` | The inference provider the run spends, where AOP can tell: Hermes's configured or chosen provider, the provider prefix of an OpenCode model, DeepSeek Harness's route, or a Codex `--provider`; null otherwise |
 | `timeout_seconds` | The run's deadline |
 
-Exit status 0 admits the run, and AOP records the command and its output in `request.json` under `admission`. Any other exit status refuses it, and so does a command that cannot be started or does not finish within 60 seconds: no task state is created, the harness never starts, and `aop` exits 2 and prints one JSON line on standard output, `{"admitted": false, "reason": ..., "command": ..., "exit_code": ..., "stdout": ..., "stderr": ...}`. A run's standard output otherwise carries its answer, so that line tells a refusal apart from a run.
+Exit status 0 admits the run. Its `admission` record, in `request.json`, `result.json`, and the results archive, holds `by` (the flag, variable, or config file that set the command), `command`, `exit_code`, `stdout`, and `stderr`; an opt-out is `{"skipped": true, "by": ...}`, and `admission` is null only when no admission command is configured anywhere. Any other exit status refuses it, and so does a command that cannot be started or does not finish within 60 seconds: no task state is created, the harness never starts, and `aop` exits 2 and prints one JSON line on standard output, `{"admitted": false, "reason": ..., "command": ..., "exit_code": ..., "stdout": ..., "stderr": ...}`. A run's standard output otherwise carries its answer, so that line tells a refusal apart from a run.
 
 ## Long commands inside a run
 

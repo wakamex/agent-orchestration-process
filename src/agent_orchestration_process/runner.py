@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.parse
 import uuid
 from contextlib import contextmanager
@@ -268,6 +269,7 @@ def _build_run_result(
         provider_status=provider_status,
         provider_error=provider_error,
         refusal=refusal,
+        admission=request.admission,
     )
 
 
@@ -6806,6 +6808,56 @@ def _hermes_runtime_environment(
 ADMIT_TIMEOUT_SECONDS = 60.0
 
 
+def admission_config_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / "aop" / "config.toml"
+
+
+def _admit_command(explicit: str | None) -> tuple[str | None, str | None]:
+    """The admission command and where it was set, most specific first.
+
+    --admit-command, then AOP_ADMIT_COMMAND, then admit_command in the user's
+    AOP config. An empty value at any level turns admission off from there.
+    """
+    if explicit is not None:
+        return explicit, "--admit-command"
+    if "AOP_ADMIT_COMMAND" in os.environ:
+        return os.environ["AOP_ADMIT_COMMAND"], "AOP_ADMIT_COMMAND"
+    path = admission_config_path()
+    try:
+        config = tomllib.loads(path.read_text())
+    except FileNotFoundError:
+        return None, None
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise AdmissionRefused(
+            f"admission refused: could not read {path}: {error}",
+            {"by": os.fspath(path), "exit_code": None},
+        ) from error
+    unknown = set(config) - {"admit_command"}
+    command = config.get("admit_command")
+    if unknown or (command is not None and not isinstance(command, str)):
+        raise AdmissionRefused(
+            f"admission refused: {path} may set only admit_command, as a string",
+            {"by": os.fspath(path), "exit_code": None},
+        )
+    return command, (None if command is None else os.fspath(path))
+
+
+def _backend(request: RunRequest) -> str | None:
+    """The inference provider a run will spend, where AOP can tell."""
+    if request.provider == "hermes":
+        try:
+            return _hermes_inference_provider(request)
+        except AOPError:
+            return None
+    if request.provider == "opencode":
+        prefix, separator, _ = (request.model or "").partition("/")
+        return prefix if separator else None
+    if request.provider == "dsh":
+        return request.inference_provider or "deepseek-official"
+    return request.inference_provider
+
+
 def _credential_home(provider: str, environment: dict[str, str]) -> str | None:
     """The harness home a run's credentials come from, for admission commands."""
     homes: dict[str, Callable[[], Path | None]] = {
@@ -7134,10 +7186,12 @@ class AgentRunner:
         else, including a command that cannot run or does not finish in time,
         refuses it before any task state exists.
         """
+        command, source = _admit_command(command)
         if command is None:
-            command = os.environ.get("AOP_ADMIT_COMMAND", "")
-        if not command.strip():
             return request
+        if not command.strip():
+            # An explicit opt-out stays visible in the run's records.
+            return replace(request, admission={"skipped": True, "by": source})
         route = {
             "run_id": request.run_id,
             "parent_run_id": request.parent_run_id,
@@ -7149,13 +7203,18 @@ class AgentRunner:
             "profile": request.profile,
             "task": request.task,
             "workdir": request.workdir,
+            # The run's environment is a copy of this one, and its credentials
+            # are seeded from this home.
             "credential_home": _credential_home(request.provider, dict(os.environ)),
+            "backend": _backend(request),
             "timeout_seconds": request.timeout_seconds,
         }
         environment = {
             **os.environ,
+            # stdin carries every field in full; the variables are a
+            # convenience, bounded so no value can exceed the exec limits.
             **{
-                f"AOP_ADMIT_{key.upper()}": "" if value is None else str(value)
+                f"AOP_ADMIT_{key.upper()}": "" if value is None else str(value)[:4096]
                 for key, value in route.items()
             },
         }
@@ -7178,6 +7237,7 @@ class AgentRunner:
             exit_code, stdout = None, ""
             stderr = f"did not finish within {ADMIT_TIMEOUT_SECONDS:g} seconds"
         decision = {
+            "by": source,
             "command": command,
             "exit_code": exit_code,
             "stdout": stdout.strip()[-4000:],

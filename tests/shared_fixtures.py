@@ -62,6 +62,17 @@ if prompt.startswith("SEALED_PROVIDER_PROBE"):
 
 
 @fixture(autouse=True)
+def private_aop_config(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
+    """Keep the user's AOP config, such as an admission command, out of tests."""
+    from agent_orchestration_process import runner
+
+    path = tmp_path / "aop-config" / "config.toml"
+    monkeypatch.setattr(runner, "admission_config_path", lambda: path)
+    monkeypatch.delenv("AOP_ADMIT_COMMAND", raising=False)
+    return path
+
+
+@fixture(autouse=True)
 def private_state_roots(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """Keep AOP's registry of state directories out of the user's state."""
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(tmp_path / "xdg-state"))

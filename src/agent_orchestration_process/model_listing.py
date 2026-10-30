@@ -62,6 +62,9 @@ class AvailableModel:
     input_per_million_usd: float | None = None
     cached_input_per_million_usd: float | None = None
     cache_write_per_million_usd: float | None = None
+    # Writes to a longer-lived cache, such as Anthropic's one-hour cache; equal
+    # to cache_write_per_million_usd where those cost the ordinary write price.
+    cache_write_1h_per_million_usd: float | None = None
     output_per_million_usd: float | None = None
     pricing_source: str | None = None
 
@@ -877,6 +880,11 @@ def _record(
         input_per_million_usd=rates.input,
         cached_input_per_million_usd=rates.cache_read,
         cache_write_per_million_usd=rates.cache_write,
+        cache_write_1h_per_million_usd=(
+            rates.input * rates.cache_write_1h_multiple
+            if rates.cache_write_1h_multiple is not None
+            else rates.cache_write
+        ),
         output_per_million_usd=rates.output,
         pricing_source=rates.source,
     )

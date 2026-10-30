@@ -1150,7 +1150,7 @@ def _report_models(
     else:
         print(
             "agent\tprovider\tmodel\tavailability\tprice-scope\tinput\tcache-read\t"
-            "cache-write\toutput"
+            "cache-write\toutput\tcache-write-1h"
         )
         for model in models:
             print(
@@ -1159,7 +1159,8 @@ def _report_models(
                 f"{model.price_scope}\t{_price(model.input_per_million_usd)}\t"
                 f"{_price(model.cached_input_per_million_usd)}\t"
                 f"{_price(model.cache_write_per_million_usd)}\t"
-                f"{_price(model.output_per_million_usd)}"
+                f"{_price(model.output_per_million_usd)}\t"
+                f"{_price(model.cache_write_1h_per_million_usd)}"
             )
         print(
             f"aop: prices_per_million_usd basis={model_prices.pricing_basis()} "

@@ -76,6 +76,9 @@ class ClaudeModelsTest(AOPTestCase):
         assert launch.input_per_million_usd is None
         known = model_prices.rates("claude-sonnet-5", provider="anthropic")
         assert rows["claude-sonnet-5"].input_per_million_usd == known.input
+        # Claude Code writes mostly to Anthropic's one-hour cache, at 2x input.
+        assert known.cache_write_1h_multiple == 2.0
+        assert rows["claude-sonnet-5"].cache_write_1h_per_million_usd == known.input * 2.0
         assert rows["claude-sonnet-5"].availability == "native-advertised"
         assert rows["legacy-alias"].price_scope == "unknown"
         fallback = rows["claude-catalog-only"]

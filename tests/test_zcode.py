@@ -244,6 +244,11 @@ class ZcodeTest(AOPTestCase):
         assert flash.cached_input_per_million_usd == rates.cache_read
         assert flash.output_per_million_usd == rates.output
         assert flash.cache_write_per_million_usd == rates.cache_write
+        assert flash.cache_write_1h_per_million_usd == (
+            rates.input * rates.cache_write_1h_multiple
+            if rates.cache_write_1h_multiple is not None
+            else rates.cache_write
+        )
         assert flash.pricing_source == rates.source
         assert models["test/test-model"].price_scope == "unknown"
         assert models["test/test-model"].input_per_million_usd is None

@@ -386,7 +386,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "cleanup" and args.dry_run and not args.all:
             raise AOPError("--dry-run requires --all")
         if args.command == "cleanup" and args.all:
-            return _cleanup_all(manager, dry_run=args.dry_run)
+            # --workdir and sealed runs keep their records in the current
+            # directory's .aop, which inside a repository differs from the
+            # repository's own state, so both are cleaned.
+            managers = [manager]
+            local = Path.cwd() / ".aop"
+            if local.is_dir() and local.resolve() != manager.state_dir.resolve():
+                managers.append(WorktreeManager.standalone(Path.cwd()))
+            return max(_cleanup_all(item, dry_run=args.dry_run) for item in managers)
         if args.command == "cleanup":
             request = RunStore(manager.state_dir / "runs").load_request(args.run_id)
             if request.profile == "sealed":

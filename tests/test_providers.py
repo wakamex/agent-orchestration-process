@@ -2861,6 +2861,36 @@ class ProvidersTest(AOPTestCase):
         assert main(["cleanup", "--all", "--dry-run"]) == 0
         assert capsys.readouterr().out == ""
 
+    def test_cleanup_all_inside_a_repository_finds_in_place_runs_recorded_here(
+        self,
+        repository: Path,
+        tmp_path: Path,
+        fake_claude: Path,
+        monkeypatch: MonkeyPatch,
+        capsys: Capture,
+    ) -> None:
+        # Records live in a subdirectory of a repository, as in w3sim/tmp/team.
+        records = repository / "tmp" / "team"
+        records.mkdir(parents=True)
+        workdir = tmp_path / "checkout"
+        workdir.mkdir()
+        monkeypatch.chdir(records)
+        monkeypatch.setenv("AOP_CLAUDE_BIN", os.fspath(fake_claude))
+
+        assert main([
+            "run", "--agent", "claude", "--profile", "host",
+            "--workdir", os.fspath(workdir), "--prompt", "WHERE", "--json",
+        ]) == 0
+        capsys.readouterr()
+        state = records / ".aop" / "provider-state"
+        assert any(state.iterdir())
+
+        assert main(["cleanup", "--all", "--dry-run"]) == 0
+        assert "would clean in-place task " in capsys.readouterr().out
+        assert main(["cleanup", "--all"]) == 0
+        capsys.readouterr()
+        assert not any(state.iterdir())
+
     def test_claude_runs_in_place_with_native_state_outside_git(
         self,
         tmp_path: Path,

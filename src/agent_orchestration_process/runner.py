@@ -1384,22 +1384,20 @@ class ClaudeAdapter:
             self._command(request, worktree), request, worktree, environment
         )
         started_at = _now()
-        capture = _capture_process(
-            command,
-            cwd=worktree.path,
-            environment=environment,
-            prompt=(
-                prompt_transport.claude_message(request.prompt, request.prompt_parts)
-                if request.prompt_parts is not None
-                else prompt_transport.stdin_prompt(self.provider, request.prompt)
-            ),
-            timeout_seconds=request.timeout_seconds,
-            is_response=self._is_response,
-            live_dir=run_dir,
-            stop_when=None if login is None else lambda _lines: login.sync(),
-        )
-        if login is not None:
-            login.sync()
+        with login.watching() if login is not None else contextlib.nullcontext():
+            capture = _capture_process(
+                command,
+                cwd=worktree.path,
+                environment=environment,
+                prompt=(
+                    prompt_transport.claude_message(request.prompt, request.prompt_parts)
+                    if request.prompt_parts is not None
+                    else prompt_transport.stdin_prompt(self.provider, request.prompt)
+                ),
+                timeout_seconds=request.timeout_seconds,
+                is_response=self._is_response,
+                live_dir=run_dir,
+            )
         previous_total_cost_usd = (
             self._reported_total_cost_usd(
                 run_dir.parent / request.parent_run_id / "events.jsonl"
@@ -6202,8 +6200,42 @@ class _ClaudeLogin:
     does not, so a refresh on either side used to break the other: the run
     failed with "OAuth session expired", or the user's own sessions did. AOP
     therefore copies whichever side refreshed onto the other, before the run,
-    every few seconds while it runs, and after it ends.
+    within a fraction of a second while it runs, and after it ends: a refresh
+    revokes the previous access token at once, and Claude retries a rejected
+    request within a second, so a slower copy arrives too late.
     """
+
+    POLL_SECONDS = 0.1
+
+    @contextmanager
+    def watching(self) -> Iterator[None]:
+        """Copy refreshes between the two sign-ins while the block runs."""
+        stopped = threading.Event()
+
+        def watch() -> None:
+            seen = None
+            while not stopped.wait(self.POLL_SECONDS):
+                current = (self._stamp(self.source), self._stamp(self.private))
+                if current != seen:
+                    self.sync()
+                    seen = (self._stamp(self.source), self._stamp(self.private))
+
+        watcher = threading.Thread(target=watch, daemon=True)
+        watcher.start()
+        try:
+            yield
+        finally:
+            stopped.set()
+            watcher.join(timeout=5)
+            self.sync()
+
+    @staticmethod
+    def _stamp(path: Path) -> tuple[int, int] | None:
+        try:
+            status = path.stat()
+        except OSError:
+            return None
+        return status.st_mtime_ns, status.st_ino
 
     def __init__(self, source_config: Path, private_config: Path):
         self.source = source_config / ".credentials.json"

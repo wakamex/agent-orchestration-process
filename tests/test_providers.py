@@ -2551,6 +2551,24 @@ class ProvidersTest(AOPTestCase):
         assert token(source) == "user"
         assert (source / ".credentials.json").stat().st_mode & 0o777 == 0o600
 
+    def test_users_refresh_reaches_a_running_claude_within_a_second(
+        self, repository: Path, fake_claude: Path
+    ) -> None:
+        source = Path(os.environ["HOME"]) / ".claude" / ".credentials.json"
+        source.write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "access-1", "refreshToken": "refresh-1", "expiresAt": 1000,
+        }}))
+        runner = AgentRunner(
+            WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+        )
+
+        result = runner.run(
+            task="user-refresh", prompt="CLAUDE_AWAIT_USER_REFRESH", profile="host"
+        )
+
+        assert result.succeeded, result.error
+        assert "refresh-user" in source.read_text()
+
     @parametrize("profile", ["host", "edit", "sealed"])
     def test_claude_run_refresh_reaches_the_users_sign_in(
         self,

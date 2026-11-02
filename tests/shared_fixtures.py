@@ -731,6 +731,22 @@ if args == ["auth", "status", "--json"]:
     raise SystemExit(0)
 prompt = sys.stdin.read()
 {SEALED_PROVIDER_PROBE}
+if prompt == "CLAUDE_AWAIT_USER_REFRESH":
+    # The user's own session refreshes the shared sign-in mid-run; the run's
+    # copy must follow before Claude retries a rejected request.
+    import time
+    user = pathlib.Path(os.environ["HOME"]) / ".claude" / ".credentials.json"
+    user.write_text(json.dumps({{"claudeAiOauth": {{
+        "accessToken": "access-user", "refreshToken": "refresh-user", "expiresAt": 5000,
+    }}}}))
+    mine = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".credentials.json"
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if "refresh-user" in mine.read_text():
+            break
+        time.sleep(0.02)
+    else:
+        raise SystemExit("the run's sign-in did not follow within a second")
 if prompt == "CLAUDE_REFRESH_SIGN_IN":
     # Claude refreshes its sign-in, which rotates the refresh token.
     config = pathlib.Path(

@@ -304,12 +304,42 @@ class WorktreeManager:
                 metadata_path = self._metadata_path(task)
                 if metadata_path.exists():
                     metadata_path.unlink()
-                shutil.rmtree(self.state_dir / "overlays" / task, ignore_errors=True)
-                shutil.rmtree(
-                    self.state_dir / "provider-state" / task, ignore_errors=True
-                )
-                shutil.rmtree(self.state_dir / "scratch" / task, ignore_errors=True)
+                self._remove_private_dirs(task)
             return archived
+
+    def remove_private_state(self, task: str) -> list[Path]:
+        """Remove the private state of a task that has no worktree, such as a
+        --workdir run's harness home and scratch, and return what was removed.
+
+        The caller's own directory is never touched.
+        """
+        from .locks import exclusive_lock, task_lock_path
+
+        with exclusive_lock(task_lock_path(self.state_dir, task), f"task {task}"):
+            return self._remove_private_dirs(task)
+
+    def private_state(self, task: str) -> list[Path]:
+        """The private directories a task has, without removing them."""
+        self._validate_private_task(task)
+        return [
+            path
+            for path in (
+                self.state_dir / kind / task
+                for kind in ("overlays", "provider-state", "scratch")
+            )
+            if path.exists()
+        ]
+
+    def _remove_private_dirs(self, task: str) -> list[Path]:
+        removed = self.private_state(task)
+        for path in removed:
+            shutil.rmtree(path, ignore_errors=True)
+        return removed
+
+    def _validate_private_task(self, task: str) -> None:
+        # A --workdir run's task may be a generated UUID, which is also valid.
+        if "/" in task or task in {"", ".", ".."}:
+            raise AOPError(f"invalid task name: {task!r}")
 
     def metadata(self, task: str) -> TaskMetadata:
         self._validate_task(task)

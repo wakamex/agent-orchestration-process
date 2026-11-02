@@ -6159,15 +6159,33 @@ def _seed_claude_home(
         shutil.copytree(
             source_config,
             private_config,
+            # Runtime records of the user's own sessions, not configuration:
+            # jobs/ alone can hold gigabytes of background-job scratch.
             ignore=shutil.ignore_patterns(
                 "*.lock",
+                "backups",
+                "cache",
+                "daemon",
+                "daemon-*",
+                "daemon.*",
                 "debug",
+                "downloads",
+                "feedback",
+                "file-history",
                 "history.jsonl",
+                "ide",
+                "jobs",
+                "paste-cache",
                 "projects",
                 "session-env",
+                "sessions",
                 "shell-snapshots",
+                "stats-cache.json",
                 "statsig",
+                "telemetry",
                 "todos",
+                "usage-limits",
+                "usage-limits.json",
             ),
             copy_function=_copy_unless_removed,
         )

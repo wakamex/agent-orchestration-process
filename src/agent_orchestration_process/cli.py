@@ -392,7 +392,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if request.profile == "sealed":
                 _cleanup_sealed(manager, request)
             elif request.workdir is not None:
-                pass  # The caller's directory is not AOP's to remove.
+                # The caller's directory is not AOP's to remove; the run's
+                # private harness home and scratch are.
+                for path in manager.remove_private_state(request.task):
+                    print(f"aop: removed {path}", file=sys.stderr)
             elif any(item.task == request.task for item in manager.list()):
                 _report_archived(manager.remove(request.task, force=True))
             print(request.task)
@@ -865,10 +868,12 @@ def _report_archived(ref: str | None) -> None:
 
 
 def _cleanup_all(manager: WorktreeManager, *, dry_run: bool) -> int:
-    """Clean every task worktree and sealed run in this state, skipping busy ones.
+    """Clean every task worktree, sealed run, and --workdir run's private state
+    in this state, skipping busy ones.
 
     Worktrees are found from Git, so a task whose run record is missing is
-    cleaned too. Run records, results, logs, and artifacts are kept.
+    cleaned too. Run records, results, logs, and artifacts are kept, and so is
+    every --workdir run's own directory.
     """
     skipped = 0
     try:
@@ -876,6 +881,7 @@ def _cleanup_all(manager: WorktreeManager, *, dry_run: bool) -> int:
     except AOPError:
         tasks = []  # Not a Git repository: only sealed runs.
     sealed = []
+    in_place: dict[str, None] = {}
     runs = manager.state_dir / "runs"
     for run_dir in sorted(runs.iterdir()) if runs.is_dir() else []:
         try:
@@ -886,6 +892,12 @@ def _cleanup_all(manager: WorktreeManager, *, dry_run: bool) -> int:
             continue
         if request.profile == "sealed" and _sealed_paths(manager, request):
             sealed.append(request)
+        elif (
+            request.workdir is not None
+            and request.task not in tasks
+            and manager.private_state(request.task)
+        ):
+            in_place[request.task] = None
     for task in tasks:
         if dry_run:
             print(f"would remove task {task}")
@@ -906,6 +918,16 @@ def _cleanup_all(manager: WorktreeManager, *, dry_run: bool) -> int:
         except AOPError as error:
             skipped += 1
             print(f"aop: skipped sealed run {request.run_id}: {error}", file=sys.stderr)
+    for task in in_place:
+        if dry_run:
+            print(f"would clean in-place task {task}")
+            continue
+        try:
+            manager.remove_private_state(task)
+            print(f"cleaned in-place task {task}")
+        except AOPError as error:
+            skipped += 1
+            print(f"aop: skipped in-place task {task}: {error}", file=sys.stderr)
     return 1 if skipped else 0
 
 

@@ -2820,6 +2820,47 @@ class ProvidersTest(AOPTestCase):
             "web_search",
         ]
 
+    def test_in_place_run_state_skips_user_jobs_and_cleanup_reclaims_it(
+        self,
+        tmp_path: Path,
+        fake_claude: Path,
+        monkeypatch: MonkeyPatch,
+        capsys: Capture,
+    ) -> None:
+        source = Path(os.environ["HOME"]) / ".claude"
+        for runtime in ("jobs/job-1/tmp", "file-history/x", "paste-cache"):
+            (source / runtime).mkdir(parents=True)
+        (source / "jobs" / "job-1" / "tmp" / "scratch.bin").write_bytes(b"x" * 1000)
+        (source / "skills").mkdir()
+        workdir = tmp_path / "checkout"
+        workdir.mkdir()
+        (workdir / "keep.txt").write_text("caller's file")
+        records = tmp_path / "records"
+        records.mkdir()
+        monkeypatch.chdir(records)
+        monkeypatch.setenv("AOP_CLAUDE_BIN", os.fspath(fake_claude))
+        base = ["--agent", "claude", "--profile", "host", "--workdir", os.fspath(workdir)]
+
+        assert main(["run", *base, "--prompt", "WHERE", "--json"]) == 0
+        result = json.loads(capsys.readouterr().out)
+        state = records / ".aop" / "provider-state"
+        homes = list(state.glob("*/claude/home/.claude"))
+        assert len(homes) == 1
+        seeded = sorted(path.name for path in homes[0].iterdir())
+        assert "skills" in seeded
+        assert not {"jobs", "file-history", "paste-cache"} & set(seeded)
+
+        assert main(["cleanup", "--all", "--dry-run"]) == 0
+        assert capsys.readouterr().out.startswith("would clean in-place task ")
+        assert main(["cleanup", "--all"]) == 0
+        capsys.readouterr()
+
+        assert not any(state.iterdir())
+        assert (workdir / "keep.txt").read_text() == "caller's file"
+        assert (records / ".aop" / "runs" / result["run_id"] / "result.json").is_file()
+        assert main(["cleanup", "--all", "--dry-run"]) == 0
+        assert capsys.readouterr().out == ""
+
     def test_claude_runs_in_place_with_native_state_outside_git(
         self,
         tmp_path: Path,

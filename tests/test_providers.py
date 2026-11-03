@@ -2569,6 +2569,30 @@ class ProvidersTest(AOPTestCase):
         assert result.succeeded, result.error
         assert "refresh-user" in source.read_text()
 
+    def test_host_claude_shares_the_users_credential_store(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "source"
+        (source / ".claude").mkdir(parents=True)
+        (source / ".claude" / ".credentials.json").write_text("{}")
+        environment = {
+            "HOME": os.fspath(source),
+            "AOP_PROFILE": "host",
+            "AOP_PROVIDER_STATE_DIR": os.fspath(tmp_path / "state"),
+        }
+
+        runner_module._prepare_claude_environment(environment)
+
+        private = tmp_path / "state" / "claude" / "home" / ".claude"
+        assert environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] == os.fspath(source / ".claude")
+        assert environment["CLAUDE_CONFIG_DIR"] == os.fspath(private)
+        # No second copy of the user's sign-in is kept for a host run.
+        assert not (private / ".credentials.json").exists()
+        sandboxed = {**environment, "AOP_PROFILE": "edit", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "x"}
+        sandboxed["AOP_PROVIDER_STATE_DIR"] = os.fspath(tmp_path / "edit-state")
+        runner_module._prepare_claude_environment(sandboxed)
+        assert "CLAUDE_SECURESTORAGE_CONFIG_DIR" not in sandboxed
+
     @parametrize("profile", ["host", "edit", "sealed"])
     def test_claude_run_refresh_reaches_the_users_sign_in(
         self,

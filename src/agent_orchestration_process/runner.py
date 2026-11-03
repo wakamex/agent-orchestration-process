@@ -1371,12 +1371,19 @@ class ClaudeAdapter:
         login = None
         if not request.native_state:
             source_config, _ = _claude_source(environment)
-            _prepare_claude_environment(environment)
-            login = _ClaudeLogin(
-                source_config,
-                Path(environment["AOP_PROVIDER_STATE_DIR"]) / "claude" / "home" / ".claude",
+            credentials = Path(
+                environment.get("CLAUDE_SECURESTORAGE_CONFIG_DIR") or source_config
             )
-            login.start()
+            _prepare_claude_environment(environment)
+            if request.profile != "host":
+                # A sandboxed run cannot share the user's store, so its private
+                # copy is kept in step with it.
+                login = _ClaudeLogin(
+                    credentials,
+                    Path(environment["AOP_PROVIDER_STATE_DIR"])
+                    / "claude" / "home" / ".claude",
+                )
+                login.start()
         if request.provider_base_url is not None:
             environment["ANTHROPIC_BASE_URL"] = request.provider_base_url
             environment["AOP_PROVIDER_BASE_URL_ENV"] = "ANTHROPIC_BASE_URL"
@@ -6137,10 +6144,19 @@ def _prepare_claude_environment(environment: dict[str, str]) -> None:
         if settings.is_file() and not (config / ".claude.json").exists():
             os.replace(settings, config / ".claude.json")
         environment["CLAUDE_CONFIG_DIR"] = os.fspath(config)
+        # The run signs in with the user's own credentials file and refresh
+        # lock, so Claude coordinates its refreshes with the user's sessions;
+        # a host run already has the user's account, so this exposes nothing
+        # new. A private copy left from before would only go stale.
+        environment.setdefault(
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR", os.fspath(source_config)
+        )
+        (config / ".credentials.json").unlink(missing_ok=True)
         return
     environment["HOME"] = os.fspath(destination)
     # The run uses the private copy in its standard place.
     environment.pop("CLAUDE_CONFIG_DIR", None)
+    environment.pop("CLAUDE_SECURESTORAGE_CONFIG_DIR", None)
 
 
 def _seed_claude_home(

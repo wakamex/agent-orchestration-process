@@ -739,7 +739,9 @@ if prompt == "CLAUDE_AWAIT_USER_REFRESH":
     user.write_text(json.dumps({{"claudeAiOauth": {{
         "accessToken": "access-user", "refreshToken": "refresh-user", "expiresAt": 5000,
     }}}}))
-    mine = pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".credentials.json"
+    mine = pathlib.Path(
+        os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR") or os.environ["CLAUDE_CONFIG_DIR"]
+    ) / ".credentials.json"
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline:
         if "refresh-user" in mine.read_text():
@@ -749,8 +751,12 @@ if prompt == "CLAUDE_AWAIT_USER_REFRESH":
         raise SystemExit("the run's sign-in did not follow within a second")
 if prompt == "CLAUDE_REFRESH_SIGN_IN":
     # Claude refreshes its sign-in, which rotates the refresh token.
+    # Claude keeps its credentials where CLAUDE_SECURESTORAGE_CONFIG_DIR
+    # says, else in its config directory.
     config = pathlib.Path(
-        os.environ.get("CLAUDE_CONFIG_DIR") or pathlib.Path(os.environ["HOME"]) / ".claude"
+        os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        or os.environ.get("CLAUDE_CONFIG_DIR")
+        or pathlib.Path(os.environ["HOME"]) / ".claude"
     )
     (config / ".credentials.json").write_text(json.dumps({{"claudeAiOauth": {{
         "accessToken": "access-2", "refreshToken": "refresh-2", "expiresAt": 2000,

@@ -2755,7 +2755,12 @@ class DevinAdapter:
     # Devin gives up on a usage limit after three retries within a second, even
     # when its error names a reset minutes away. AOP waits for that reset and
     # continues the same session, as long as the run's deadline allows.
-    _LIMIT_RESET = re.compile(r"will reset in [^()]*\(at (\d{1,2}):(\d{2}) UTC\)")
+    # "Your limit will reset in 2 minutes (at 12:21 UTC)", or with a date when
+    # the reset is further off, "(at Nov 6 00:01 UTC)".
+    _LIMIT_RESET = re.compile(
+        r"will reset in (\d+) (second|minute|hour)s?"
+        r"(?: \(at (?:([A-Z][a-z]{2}) (\d{1,2}) )?(\d{1,2}):(\d{2}) UTC\))?"
+    )
     _LIMIT_MARGIN_SECONDS = 30.0
     _MAX_LIMIT_WAITS = 10
     CONTINUE_PROMPT = (
@@ -2913,18 +2918,33 @@ class DevinAdapter:
         """Seconds until the usage limit Devin stopped at resets, if it did."""
         if not capture.exit_code or capture.timed_out:
             return None
-        match = cls._LIMIT_RESET.search(capture.stderr)
-        if match is None:
+        matches = list(cls._LIMIT_RESET.finditer(capture.stderr))
+        if not matches:
             return None
+        amount, unit, month, day, hour, minute = matches[-1].groups()
         now = datetime.now(UTC)
-        reset = now.replace(
-            hour=int(match[1]), minute=int(match[2]), second=0, microsecond=0
-        )
-        # The error names only a time of day: take the one nearest to now.
-        if reset < now - timedelta(hours=12):
-            reset += timedelta(days=1)
-        elif reset > now + timedelta(hours=12):
-            reset -= timedelta(days=1)
+        if hour is None:
+            reset = now + timedelta(
+                seconds=int(amount) * {"second": 1, "minute": 60, "hour": 3600}[unit]
+            )
+        elif month is not None:
+            reset = datetime.strptime(
+                f"{now.year} {month} {day} {hour}:{minute}", "%Y %b %d %H:%M"
+            ).replace(tzinfo=UTC)
+            # The date carries no year: take the one nearest to now.
+            if reset < now - timedelta(days=180):
+                reset = reset.replace(year=now.year + 1)
+            elif reset > now + timedelta(days=180):
+                reset = reset.replace(year=now.year - 1)
+        else:
+            reset = now.replace(
+                hour=int(hour), minute=int(minute), second=0, microsecond=0
+            )
+            # A time of day alone: take the one nearest to now.
+            if reset < now - timedelta(hours=12):
+                reset += timedelta(days=1)
+            elif reset > now + timedelta(hours=12):
+                reset -= timedelta(days=1)
         return max(0.0, (reset - now).total_seconds()) + cls._LIMIT_MARGIN_SECONDS
 
     def _command(self, request: RunRequest, export_path: Path) -> list[str]:

@@ -828,6 +828,32 @@ class ProvidersTest(AOPTestCase):
         stderr = (manager.state_dir / "runs" / result.run_id / "stderr.log").read_text()
         assert "Reached free model rate limit" in stderr
 
+    def test_devin_limit_wait_reads_each_reset_format(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        def wait(message: str) -> float | None:
+            capture = runner_module._ProcessCapture(
+                stdout="", stderr=message, exit_code=1, timed_out=False,
+                duration_seconds=1.0, first_event_seconds=None,
+                first_response_seconds=None,
+            )
+            return DevinAdapter._limit_wait(capture)
+
+        prefix = (
+            "Error: Agent error: Reached free model rate limit. Upgrade to Max for "
+            "higher limits, or switch to a different model. Your limit will reset in "
+        )
+        later = datetime.now(UTC) + timedelta(minutes=35)
+        margin = DevinAdapter._LIMIT_MARGIN_SECONDS
+        timed = wait(f"{prefix}35 minutes (at {later:%H:%M} UTC).")
+        dated = wait(f"{prefix}35 minutes (at {later:%b} {later.day} {later:%H:%M} UTC).")
+        bare = wait(f"{prefix}24 seconds.")
+
+        for found in (timed, dated):
+            assert found is not None and abs(found - margin - 35 * 60) < 90
+        assert bare is not None and abs(bare - margin - 24) < 2
+        assert wait("Error: something else") is None
+
     def test_devin_keeps_waiting_on_repeated_limits_until_its_deadline(
         self, repository: Path, fake_devin: Path, monkeypatch: MonkeyPatch
     ) -> None:

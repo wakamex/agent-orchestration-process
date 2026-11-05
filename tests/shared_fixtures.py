@@ -1047,6 +1047,21 @@ if prompt == "DEVIN_INCOMPLETE":
 if prompt == "DEVIN_FAIL":
     print("synthetic Devin failure", file=sys.stderr)
     raise SystemExit(2)
+limits_left = data_dir / "cli" / "limits-left"
+if prompt == "DEVIN_RATE_LIMIT_REPEAT":
+    limits_left.write_text("11")
+repeated = "has now reset" in prompt and limits_left.is_file() and int(limits_left.read_text()) > 0
+if repeated:
+    # A free pool with short resets: the continued turn hits the limit again.
+    limits_left.write_text(str(int(limits_left.read_text()) - 1))
+    import datetime
+    now = datetime.datetime.now(datetime.UTC)
+    print(
+        "Error: Agent error: Reached free model rate limit. Your limit will reset in "
+        f"1 minute (at {{now:%H:%M}} UTC).",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 if prompt.startswith("DEVIN_RATE_LIMIT"):
     import datetime
     import sqlite3

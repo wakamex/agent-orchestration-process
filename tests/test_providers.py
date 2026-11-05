@@ -828,6 +828,21 @@ class ProvidersTest(AOPTestCase):
         stderr = (manager.state_dir / "runs" / result.run_id / "stderr.log").read_text()
         assert "Reached free model rate limit" in stderr
 
+    def test_devin_keeps_waiting_on_repeated_limits_until_its_deadline(
+        self, repository: Path, fake_devin: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(DevinAdapter, "_LIMIT_MARGIN_SECONDS", 0.0)
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+
+        # Twelve limits in a row, more than the cap for runs with no deadline.
+        result = runner.run(
+            task="devin-repeat", prompt="DEVIN_RATE_LIMIT_REPEAT", timeout_seconds=120
+        )
+
+        assert result.succeeded, result.error
+        assert result.final_message.startswith("answer:Your previous turn stopped")
+
     def test_devin_limit_past_the_deadline_fails_with_a_resumable_session(
         self, repository: Path, fake_devin: Path
     ) -> None:
@@ -843,6 +858,8 @@ class ProvidersTest(AOPTestCase):
         assert "Reached free model rate limit" in limited.error
         assert limited.duration_seconds < 30
         assert limited.session_id == "tested-basil"
+        # Devin wrote no export, so its usage is unknown rather than zero.
+        assert limited.accounting_status == "unavailable"
         assert resumed.succeeded, resumed.error
         assert resumed.session_id == "tested-basil"
 

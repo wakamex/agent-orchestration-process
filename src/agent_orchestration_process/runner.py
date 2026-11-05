@@ -2798,7 +2798,10 @@ class DevinAdapter:
         )
         turn, turn_command = request, command
         capture = None
-        for waits in range(self._MAX_LIMIT_WAITS + 1):
+        waits = 0
+        while True:
+            # Each attempt's export, if any, describes the session so far.
+            export_path.unlink(missing_ok=True)
             attempt = _capture_process(
                 turn_command,
                 cwd=worktree.path,
@@ -2811,7 +2814,8 @@ class DevinAdapter:
             )
             capture = attempt if capture is None else _joined_captures(capture, attempt)
             wait = self._limit_wait(attempt)
-            if wait is None or waits == self._MAX_LIMIT_WAITS or export_path.is_file():
+            # A deadline bounds the waiting; without one, the count does.
+            if wait is None or (deadline is None and waits == self._MAX_LIMIT_WAITS):
                 break
             session = request.session_id or _devin_session_for_prompt(
                 environment, request.prompt
@@ -2827,6 +2831,7 @@ class DevinAdapter:
                 flush=True,
             )
             time.sleep(wait)
+            waits += 1
             turn = replace(request, session_id=session, prompt=self.CONTINUE_PROMPT)
             turn_command = _provider_command(
                 self._command(turn, export_path), turn, worktree, environment
@@ -2881,6 +2886,9 @@ class DevinAdapter:
             usage=parsed["usage"],
             usage_observed=parsed["usage_observed"],
             calculated_cost=None,
+            # Devin reports usage only in its export, which a turn that ends
+            # in an error does not write.
+            require_observed=True,
         )
         return _build_run_result(
             request,

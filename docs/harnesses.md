@@ -153,7 +153,7 @@ On SSH, authenticate with `devin auth login --force-manual-token-flow`. Set `AOP
 `AOP_DEVIN_CONFIG_DIR` for nonstandard source locations. Each invocation must produce a valid Agent
 Trajectory Interchange Format (ATIF) export containing its terminal response and resume identity.
 
-When Devin stops at a usage limit, such as its free-model rate limit, it retries for under a second and exits, though its error names the time the limit resets. AOP then waits until that time plus 30 seconds and continues the same Devin session with a prompt saying the limit has reset, up to 10 times per run, as long as the reset comes before the run's `--timeout` deadline. The wait counts toward the deadline, and AOP prints each wait to stderr. When the reset is past the deadline, the run fails with the limit error and its session ID, so `aop resume` can continue it later. AOP keeps the model the run asked for rather than switching to another one.
+When Devin stops at a usage limit, such as its free-model rate limit, it retries for under a second and exits, though its error names the time the limit resets. AOP then waits until that time plus 30 seconds and continues the same Devin session with a prompt saying the limit has reset, as many times as the run's `--timeout` deadline allows, or up to 10 times for a run with no deadline. The wait counts toward the deadline, and AOP prints each wait to stderr. When the reset is past the deadline, the run fails with the limit error and its session ID, so `aop resume` can continue it later. AOP keeps the model the run asked for rather than switching to another one.
 
 ### OpenCode
 

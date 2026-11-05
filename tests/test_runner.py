@@ -24,6 +24,7 @@ from agent_orchestration_process.locks import exclusive_lock, task_lock_path
 from agent_orchestration_process.models import RunRequest
 from agent_orchestration_process.runner import (
     RunStore,
+    normalize_artifacts,
     AgentRunner,
     CodexAdapter,
     CursorAdapter,
@@ -1130,6 +1131,49 @@ class RunnerTest(AOPTestCase):
         request = json.loads((run_dir / "request.json").read_text())
         assert "/output" in request["prompt"]
         assert request["artifacts"] == ["paper.md"]
+
+    def test_a_missing_artifact_keeps_the_others(
+        self, repository: Path, fake_codex: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+
+        result = runner.run(
+            task="partial", prompt="WRITE_ARTIFACT", profile="review",
+            artifacts=["paper.md", "report.txt"],
+        )
+
+        assert not result.succeeded
+        assert result.error == "artifact report.txt: missing"
+        assert [item.logical_path for item in result.artifacts] == ["paper.md"]
+        run_dir = manager.state_dir / "runs" / result.run_id
+        assert (run_dir / "artifacts" / "paper.md").read_text() == "# Extracted\n"
+
+    def test_artifact_alternatives_need_only_one(
+        self, repository: Path, fake_codex: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+
+        either = runner.run(
+            task="either", prompt="WRITE_ARTIFACT", profile="review",
+            artifacts=["paper.svg|paper.md"],
+        )
+        neither = runner.run(
+            task="neither", prompt="WRITE_ARTIFACT", profile="review",
+            artifacts=["icon.svg|icon.png", "paper.md"],
+        )
+
+        assert either.succeeded, either.error
+        assert [item.logical_path for item in either.artifacts] == ["paper.md"]
+        request = json.loads(
+            (manager.state_dir / "runs" / either.run_id / "request.json").read_text()
+        )
+        assert "at least one of: paper.svg, paper.md" in request["prompt"]
+        assert neither.error == "artifact icon.svg|icon.png: missing (none of icon.svg, icon.png)"
+        assert [item.logical_path for item in neither.artifacts] == ["paper.md"]
+        with raises(AOPError, match="duplicate artifact path"):
+            normalize_artifacts(["a.md|b.md", "b.md"])
 
     def test_declared_artifact_directory_is_recursively_archived(
         self,

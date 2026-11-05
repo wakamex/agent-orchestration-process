@@ -152,6 +152,8 @@ nonempty regular files and directories, archives them beneath the retained run d
 records their paths, sizes, and SHA-256 values. Artifact declarations apply to one invocation, so a
 resume must declare its own required artifacts.
 
+Separate alternatives with `|` when either of several deliverables will do, for example `--artifact 'icon.svg|icon.png'`: the declaration is met when at least one of them is written, and AOP archives each one that was. Every declaration is checked on its own, so a missing or invalid artifact fails the run and is named in its error, while the artifacts that were written correctly are still archived.
+
 ## Models
 
 Inspect models exposed by installed harnesses and their current comparison prices:

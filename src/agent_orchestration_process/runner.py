@@ -7985,25 +7985,40 @@ def _path_provenance(path: Path) -> dict[str, object] | None:
     }
 
 
+ARTIFACT_ALTERNATIVES = "|"
+
+
+def artifact_alternatives(declaration: str) -> tuple[str, ...]:
+    """The paths a declaration accepts: one, or alternatives such as "a.svg|a.png"."""
+    return tuple(declaration.split(ARTIFACT_ALTERNATIVES))
+
+
 def normalize_artifacts(artifacts: Sequence[str]) -> tuple[str, ...]:
+    """Validate artifact declarations; "a|b" declares alternatives, of which at
+    least one must be written."""
     normalized: list[str] = []
-    for value in artifacts:
-        if not value:
-            raise AOPError("artifact path must not be empty")
-        if "\0" in value:
-            raise AOPError("artifact path must not contain a null byte")
-        path = PurePosixPath(value)
-        if path.is_absolute() or path == PurePosixPath(".") or ".." in path.parts:
-            raise AOPError(f"artifact path must be relative and contained: {value}")
-        logical_path = path.as_posix()
-        if logical_path in normalized:
-            raise AOPError(f"duplicate artifact path: {logical_path}")
-        for existing in map(PurePosixPath, normalized):
-            if path in existing.parents or existing in path.parents:
-                raise AOPError(
-                    f"overlapping artifact paths: {existing.as_posix()} and {logical_path}"
-                )
-        normalized.append(logical_path)
+    paths: list[str] = []
+    for declaration in artifacts:
+        alternatives = []
+        for value in artifact_alternatives(declaration):
+            if not value:
+                raise AOPError("artifact path must not be empty")
+            if "\0" in value:
+                raise AOPError("artifact path must not contain a null byte")
+            path = PurePosixPath(value)
+            if path.is_absolute() or path == PurePosixPath(".") or ".." in path.parts:
+                raise AOPError(f"artifact path must be relative and contained: {value}")
+            logical_path = path.as_posix()
+            if logical_path in paths:
+                raise AOPError(f"duplicate artifact path: {logical_path}")
+            for existing in map(PurePosixPath, paths):
+                if path in existing.parents or existing in path.parents:
+                    raise AOPError(
+                        f"overlapping artifact paths: {existing.as_posix()} and {logical_path}"
+                    )
+            paths.append(logical_path)
+            alternatives.append(logical_path)
+        normalized.append(ARTIFACT_ALTERNATIVES.join(alternatives))
     return tuple(normalized)
 
 
@@ -8295,7 +8310,12 @@ def _run_prompt(
 def _artifact_prompt(prompt: str, artifacts: tuple[str, ...], output_dir: Path) -> str:
     if not artifacts:
         return prompt
-    paths = "\n".join(f"- {artifact}" for artifact in artifacts)
+    paths = "\n".join(
+        f"- {artifact}"
+        if len(artifact_alternatives(artifact)) == 1
+        else "- at least one of: " + ", ".join(artifact_alternatives(artifact))
+        for artifact in artifacts
+    )
     return (
         f"{prompt.rstrip()}\n\n"
         "AOP artifact contract:\n"
@@ -8315,23 +8335,39 @@ def _archive_artifacts(
     output_dir: Path,
     run_dir: Path,
 ) -> RunResult:
-    try:
-        sources: list[tuple[str, Path]] = []
-        for declaration in declarations:
-            sources.extend(_collect_artifact(declaration, output_dir))
-        artifacts = tuple(
-            _archive_artifact(logical_path, source, run_dir)
-            for logical_path, source in sources
-        )
-    except (AOPError, OSError) as error:
-        shutil.rmtree(run_dir / "artifacts", ignore_errors=True)
-        diagnostic = (
-            str(error)
-            if isinstance(error, AOPError)
-            else f"could not archive artifacts: {error}"
-        )
-        return replace(result, error=diagnostic, artifacts=())
-    return replace(result, artifacts=artifacts)
+    """Archive each declared artifact that was written correctly.
+
+    One missing or invalid artifact fails the run but does not discard the
+    others. A declaration with alternatives is satisfied by any of them, and
+    every alternative that was written is archived.
+    """
+    artifacts: list[RunArtifact] = []
+    problems: list[str] = []
+    for declaration in declarations:
+        alternatives = artifact_alternatives(declaration)
+        missing = []
+        for logical_path in alternatives:
+            try:
+                sources = _collect_artifact(logical_path, output_dir)
+                artifacts.extend(
+                    _archive_artifact(path, source, run_dir) for path, source in sources
+                )
+            except AOPError as error:
+                if str(error) == f"artifact {logical_path}: missing":
+                    missing.append(logical_path)
+                else:
+                    problems.append(str(error))
+            except OSError as error:
+                problems.append(f"artifact {logical_path}: could not archive: {error}")
+        if len(missing) == len(alternatives):
+            problems.append(
+                f"artifact {missing[0]}: missing"
+                if len(missing) == 1
+                else f"artifact {declaration}: missing (none of {', '.join(missing)})"
+            )
+    if problems and result.error is None:
+        result = replace(result, error="; ".join(problems))
+    return replace(result, artifacts=tuple(artifacts))
 
 
 def _collect_artifact(

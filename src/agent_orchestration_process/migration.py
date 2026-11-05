@@ -51,7 +51,7 @@ def migrate_runs(runs_dir: Path, *, dry_run: bool = False) -> Counter[str]:
     for run_dir in sorted(path for path in runs_dir.iterdir() if path.is_dir()):
         for name, upgrade in (
             ("request.json", _upgraded_request),
-            ("result.json", _upgraded_result),
+            ("result.json", _upgraded_result_with_project),
         ):
             path = run_dir / name
             value = _migrate_file(path, run_dir, upgrade, name, counts, dry_run)
@@ -166,6 +166,30 @@ def _upgraded_request(
     fields["migration"] = _record(None, conversions, "request.json")
     request = RunRequest.from_dict(fields)
     return request.to_dict(), "+".join(conversions) or "normalized"
+
+
+def _upgraded_result_with_project(
+    raw: dict[str, Any], run_dir: Path
+) -> tuple[dict[str, Any], str] | None:
+    """Upgrade a result, and give a --workdir run recorded before results had
+    project_dir the directory its request names."""
+    upgraded = _upgraded_result(raw, run_dir)
+    value, outcome = upgraded if upgraded is not None else (raw, None)
+    if value.get("project_dir") is not None:
+        return upgraded
+    try:
+        workdir = json.loads((run_dir / "request.json").read_text()).get("workdir")
+    except (OSError, ValueError):
+        workdir = None
+    if not isinstance(workdir, str) or not workdir:
+        return upgraded
+    value = {**value, "project_dir": workdir}
+    if outcome is None:
+        value["migration"] = _record(value.get("usage_schema"), ["project-dir"], "result.json")
+        return value, "project-dir"
+    value["migration"]["conversions"].append("project-dir")
+    conversions, note, rest = outcome.partition(" (")
+    return value, f"{conversions}+project-dir{note}{rest}"
 
 
 def _upgraded_result(

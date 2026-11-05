@@ -1957,3 +1957,31 @@ class ProjectDirTest(AOPTestCase):
             (results_archive_dir() / f"{in_place.run_id}.json").read_text()
         )
         assert archived["project_dir"] == os.fspath(checkout.resolve())
+
+    def test_migration_gives_older_in_place_results_their_project_dir(
+        self, fake_codex: Path, tmp_path: Path
+    ) -> None:
+        from agent_orchestration_process.migration import migrate_runs
+
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        manager = WorktreeManager.standalone(tmp_path / "records")
+        run = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex))).run(
+            task="in-place", prompt="x", profile="host", workdir=checkout
+        )
+        runs = manager.state_dir / "runs"
+        path = runs / run.run_id / "result.json"
+        older = json.loads(path.read_text())
+        del older["project_dir"]  # as written before results had the field
+        path.write_text(json.dumps(older))
+
+        counts = migrate_runs(runs)
+        migrated = json.loads(path.read_text())
+        archived = json.loads((results_archive_dir() / f"{run.run_id}.json").read_text())
+
+        assert counts["result.json: project-dir"] == 1
+        assert migrated["project_dir"] == os.fspath(checkout.resolve())
+        assert migrated["migration"]["conversions"] == ["project-dir"]
+        assert archived["project_dir"] == migrated["project_dir"]
+        assert (runs / run.run_id / "result.pre-v3.json").is_file()
+        assert migrate_runs(runs)["result.json: current"] == 1

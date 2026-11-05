@@ -1927,3 +1927,33 @@ class AdmissionTest(AOPTestCase):
                 prompt="second",
                 admit_command=os.fspath(self._hook(tmp_path, 1, "over pace")),
             )
+
+
+class ProjectDirTest(AOPTestCase):
+    def test_results_name_the_directory_whose_work_the_run_did(
+        self, repository: Path, fake_codex: Path, tmp_path: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, CodexAdapter(os.fspath(fake_codex)))
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+
+        in_worktree = runner.run(task="worktree", prompt="x")
+        in_place = AgentRunner(
+            WorktreeManager.standalone(tmp_path / "records"),
+            CodexAdapter(os.fspath(fake_codex)),
+        ).run(task="in-place", prompt="x", profile="host", workdir=checkout)
+        sealed = AgentRunner(
+            WorktreeManager.standalone(tmp_path / "sealed"),
+            CodexAdapter(os.fspath(fake_codex)),
+        ).run(task="sealed", prompt="x", profile="sealed")
+        resumed = runner.resume(run_id=in_worktree.run_id, prompt="y")
+
+        assert in_worktree.project_dir == os.fspath(repository.resolve())
+        assert in_place.project_dir == os.fspath(checkout.resolve())
+        assert sealed.project_dir is None
+        assert resumed.project_dir == in_worktree.project_dir
+        archived = json.loads(
+            (results_archive_dir() / f"{in_place.run_id}.json").read_text()
+        )
+        assert archived["project_dir"] == os.fspath(checkout.resolve())

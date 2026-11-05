@@ -219,6 +219,10 @@ class RunResult:
     # The run's admission decision: the command and its answer, or how it
     # was skipped; None when no admission command was configured.
     admission: dict[str, Any] | None = None
+    # The directory whose work the run did: the --workdir directory, or the
+    # repository that owns the task worktree; None for a sealed run, which
+    # works on its own empty workspace.
+    project_dir: str | None = None
     accounting_status: str = "complete"
     usage_schema: str = TOKEN_USAGE_SCHEMA
     # The .aop state directory the run was recorded in, as listed in the

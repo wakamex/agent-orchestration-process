@@ -7653,6 +7653,13 @@ class AgentRunner:
             inference_provider=request.inference_provider or result.inference_provider,
             inference_route=request.inference_route,
             inputs=request.inputs,
+            project_dir=(
+                request.workdir
+                if request.workdir is not None
+                else None
+                if request.profile == "sealed"
+                else os.fspath(self.manager.root)
+            ),
         )
         if result.succeeded and request.artifacts:
             result = _archive_artifacts(result, request.artifacts, output_dir, run_dir)

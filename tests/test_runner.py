@@ -1985,3 +1985,49 @@ class ProjectDirTest(AOPTestCase):
         assert archived["project_dir"] == migrated["project_dir"]
         assert (runs / run.run_id / "result.pre-v3.json").is_file()
         assert migrate_runs(runs)["result.json: current"] == 1
+
+
+class InterruptTest(AOPTestCase):
+    def test_terminated_run_archives_a_partial_result(
+        self, repository: Path, fake_claude: Path, tmp_path: Path
+    ) -> None:
+        import signal
+
+        environment = {
+            **os.environ,
+            "AOP_CLAUDE_BIN": os.fspath(fake_claude),
+            "AOP_ADMIT_COMMAND": "",  # keep the user's admission config out
+        }
+        process = subprocess.Popen(
+            [sys.executable, "-m", "agent_orchestration_process", "run", "slow",
+             "--agent", "claude", "--prompt", "SLOW_WORK", "--timeout", "120"],
+            cwd=repository, env=environment, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        runs = repository / ".aop" / "runs"
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            events = list(runs.glob("*/events.jsonl")) if runs.is_dir() else []
+            if events and "msg_1" in events[0].read_text():
+                break
+            time.sleep(0.1)
+        else:
+            process.kill()
+            raise AssertionError("the run never reached its first model call")
+        process.send_signal(signal.SIGTERM)
+        _, stderr = process.communicate(timeout=60)
+
+        assert process.returncode == 128 + signal.SIGTERM
+        result = json.loads(next(runs.glob("*/result.json")).read_text())
+        assert result["interrupted"] == "SIGTERM"
+        assert result["error"] == "interrupted by SIGTERM"
+        assert result["timed_out"] is False
+        assert result["accounting_status"] == "partial"
+        assert result["usage"]["input_tokens"] == 112
+        assert result["usage"]["output_tokens"] == 3
+        assert result["session_id"]
+        assert f"aop: run_id={result['run_id']}" in stderr
+        archived = json.loads(
+            (results_archive_dir() / f"{result['run_id']}.json").read_text()
+        )
+        assert archived["interrupted"] == "SIGTERM"

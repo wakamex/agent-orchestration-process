@@ -809,6 +809,18 @@ print(json.dumps({{
     "session_id": session_id,
     "message": {{"content": [{{"type": "text", "text": "working"}}]}},
 }}), flush=True)
+if prompt == "SLOW_WORK":
+    # A model call reported as it streams, then work that outlasts the test.
+    import time
+    print(json.dumps({{
+        "type": "assistant",
+        "session_id": session_id,
+        "message": {{"id": "msg_1", "content": [], "usage": {{
+            "input_tokens": 5, "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 7, "output_tokens": 3,
+        }}}},
+    }}), flush=True)
+    time.sleep(60)
 if prompt == "INCOMPLETE":
     raise SystemExit(0)
 print(json.dumps({{

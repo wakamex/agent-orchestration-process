@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from .locks import exclusive_lock, task_lock_path
 from .model_catalog import ModelCatalog, ensure_catalog_fresh
 from .model_listing import AGENTS, AvailableModel, list_models
 from .models import PromptPart, RunRequest, RunResult
+from . import runner as runner_module
 from .runner import (
     AgentRunner,
     RunStore,
@@ -317,6 +319,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         raw_arguments = list(sys.argv[1:] if argv is None else argv)
         args = build_parser().parse_args(raw_arguments)
+        if (
+            argv is None
+            and args.command in {"run", "resume", "batch", "integrate"}
+            and threading.current_thread() is threading.main_thread()
+        ):
+            # A stop from a service manager or a terminal still leaves an
+            # archived result with the run's partial usage.
+            runner_module.handle_interrupts()
 
         if args.command in {
             "models",
@@ -585,8 +595,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 127
     except KeyboardInterrupt:
-        print("aop: interrupted", file=sys.stderr)
-        return 130
+        signal_name = runner_module.interrupted_by() or "SIGINT"
+        print(f"aop: interrupted by {signal_name}", file=sys.stderr)
+        return 128 + runner_module._signal_number(signal_name)
 
 
 def _add_prompt_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1058,6 +1069,8 @@ def _report_run(
 
 
 def _run_exit_code(result: RunResult) -> int:
+    if result.interrupted is not None:
+        return 128 + runner_module._signal_number(result.interrupted)
     if result.succeeded:
         return 0
     if result.timed_out:

@@ -42,7 +42,7 @@ Every result has three fields that say how it ended:
 | 1 to 125 | The harness's own non-zero exit code, passed through, or 1 for any other failure. |
 | 2 | AOP refused the request, usually before starting the harness: a bad option, an unsupported combination, a failed input check, missing credentials, or a refused admission. |
 | 127 | A command AOP itself needed was not found. A harness that is missing when its run starts gives a failed result and exit code 1. |
-| 130 | Interrupted with Ctrl-C. |
+| 129, 130, 143 | Stopped by SIGHUP, SIGINT (Ctrl-C), or SIGTERM: 128 plus the signal number. |
 
 `aop batch` exits 0 only if every task succeeded, and 1 otherwise.
 
@@ -90,7 +90,7 @@ When `--timeout` expires, AOP sends SIGTERM to the harness itself, so it can sav
 
 The sandbox is started with bubblewrap's `--die-with-parent`, so if AOP itself is killed, the harness and everything it started are killed too. Task and execution locks are kernel file locks, which are released when the process holding them exits, so no stale lock survives a crash.
 
-A run whose AOP process died has a `request.json` but no `result.json`, and cannot be resumed; start a new run. Its worktree or sealed state stays until `aop cleanup <run-id>`. Read the partial `events.jsonl` in its run directory to see how far it got.
+When `aop run`, `aop resume`, or a batch receives SIGTERM, SIGHUP, or SIGINT, for example from `systemctl stop`, a unit's memory or time limit, or Ctrl-C, it stops the harness the way a deadline does, then writes and archives a result with `interrupted` set to the signal's name, the error `interrupted by SIGTERM`, the session ID, and the usage the harness reported before it stopped, with accounting `partial`, or `unavailable` when it had reported none. It prints the usual `aop: run_id=...` line and exits with 128 plus the signal number, and the run can be resumed. For Claude, that usage is the sum of each model call's usage in the stream. Only an AOP process killed outright, such as by SIGKILL, leaves a `request.json` with no `result.json`; such a run cannot be resumed, so start a new one. Its worktree or sealed state stays until `aop cleanup <run-id>`. Read the partial `events.jsonl` in its run directory to see how far it got.
 
 ## Cleanup and disk use
 

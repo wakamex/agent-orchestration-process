@@ -223,6 +223,8 @@ class RunResult:
     # repository that owns the task worktree; None for a sealed run, which
     # works on its own empty workspace.
     project_dir: str | None = None
+    # The signal, such as "SIGTERM", that stopped the run before it finished.
+    interrupted: str | None = None
     accounting_status: str = "complete"
     usage_schema: str = TOKEN_USAGE_SCHEMA
     # The .aop state directory the run was recorded in, as listed in the

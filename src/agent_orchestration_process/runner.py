@@ -214,6 +214,52 @@ def _unanswered(
     return None
 
 
+def _interrupted_result(
+    request: RunRequest, run_dir: Path, started_at: str, signal_name: str
+) -> RunResult:
+    """A result for a run stopped by a signal before its adapter parsed it."""
+    try:
+        stdout = (run_dir / "events.jsonl").read_text()
+    except OSError:
+        stdout = ""
+    capture = _ProcessCapture(
+        stdout=stdout,
+        stderr="",
+        exit_code=128 + _signal_number(signal_name),
+        timed_out=False,
+        duration_seconds=round(
+            (datetime.now(UTC) - datetime.fromisoformat(started_at)).total_seconds(), 6
+        ),
+        first_event_seconds=None,
+        first_response_seconds=None,
+        interrupted=signal_name,
+    )
+    return _build_run_result(
+        request,
+        capture,
+        model=request.model,
+        session_id=request.session_id,
+        command=[],
+        started_at=started_at,
+        finished_at=_now(),
+        error=f"interrupted by {signal_name}",
+        final_message=None,
+        accounting=_Accounting(
+            usage=None,
+            calculated_cost=None,
+            provider_reported_cost=None,
+            status="unavailable",
+        ),
+        billing=BillingProvenance(),
+    )
+
+
+def _signal_number(name: str) -> int:
+    import signal
+
+    return int(getattr(signal, name, signal.SIGTERM))
+
+
 def _build_run_result(
     request: RunRequest,
     capture: _ProcessCapture | zcode_protocol.Capture,
@@ -1175,6 +1221,8 @@ class _ProcessCapture:
     protocol_error: str | None = None
     # Why AOP stopped a harness that had not exited, when a stop_when check did.
     stopped_reason: str | None = None
+    # The signal that made AOP stop the harness, when one did.
+    interrupted: str | None = None
 
 
 def _capture_process(
@@ -1258,6 +1306,7 @@ def _capture_process(
     stdout_reader.start()
     stderr_reader.start()
     stopped_reason = None
+    interrupted = None
     try:
         if stop_when is None:
             process.wait(timeout=timeout_seconds)
@@ -1277,9 +1326,12 @@ def _capture_process(
     except subprocess.TimeoutExpired:
         timed_out = True
         sandbox_launch.stop(process, CodexAdapter._SHUTDOWN_GRACE_SECONDS)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as error:
         sandbox_launch.stop(process, CodexAdapter._SHUTDOWN_GRACE_SECONDS)
-        raise
+        if not isinstance(error, RunInterrupted):
+            raise
+        # Stopped like a deadline, so the output so far still makes a result.
+        interrupted = error.signal_name
     finally:
         sandbox_launch.close(process)
         stdout_reader.join(timeout=5)
@@ -1298,10 +1350,47 @@ def _capture_process(
         first_event_seconds=_rounded(first_event_seconds),
         first_response_seconds=_rounded(first_response_seconds),
         stopped_reason=stopped_reason,
+        interrupted=interrupted,
     )
 
 
 _STOP_CHECK_SECONDS = 5.0
+
+
+class RunInterrupted(KeyboardInterrupt):
+    """A signal asked AOP to stop the run it is executing."""
+
+    def __init__(self, signal_name: str):
+        super().__init__(signal_name)
+        self.signal_name = signal_name
+
+
+_interrupted_by: str | None = None
+
+
+def handle_interrupts() -> None:
+    """Make SIGTERM, SIGHUP, and SIGINT stop the current run the way its
+    deadline would, so it still records and archives a result.
+
+    The first signal interrupts the run; later ones are only noted, so the
+    result can still be written.
+    """
+    import signal
+
+    def interrupt(number: int, _frame: object) -> None:
+        global _interrupted_by
+        if _interrupted_by is not None:
+            return
+        _interrupted_by = signal.Signals(number).name
+        raise RunInterrupted(_interrupted_by)
+
+    for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(number, interrupt)
+
+
+def interrupted_by() -> str | None:
+    """The signal that interrupted this process's run, if one did."""
+    return _interrupted_by
 
 
 def _joined_captures(first: _ProcessCapture, then: _ProcessCapture) -> _ProcessCapture:
@@ -1706,6 +1795,7 @@ class ClaudeAdapter:
         usage_observed = False
         refusal_events: list[tuple[int, dict[str, object]]] = []
         refused = False
+        message_usage: dict[str, dict[str, object]] = {}
         for line_number, line in enumerate(output.splitlines(), start=1):
             try:
                 event = json.loads(line)
@@ -1720,6 +1810,15 @@ class ClaudeAdapter:
                 event.get("subtype", "")
             ).startswith("model_refusal"):
                 refusal_events.append((line_number, event))
+            message = event.get("message")
+            if (
+                event.get("type") == "assistant"
+                and isinstance(message, dict)
+                and isinstance(message.get("id"), str)
+                and isinstance(message.get("usage"), dict)
+            ):
+                # A message's last event holds its final counts.
+                message_usage[message["id"]] = message["usage"]
             if event.get("type") != "result":
                 continue
             has_result = True
@@ -1779,6 +1878,24 @@ class ClaudeAdapter:
                     )
                 else:
                     cost = None
+        if not has_result and message_usage:
+            # A run stopped before its result event, by a deadline or a
+            # signal, still reported each model call's usage as it went.
+            usage = sum_usage(
+                TokenUsage.from_disjoint(
+                    uncached_input_tokens=raw.get("input_tokens"),
+                    cached_input_tokens=raw.get("cache_read_input_tokens"),
+                    cache_write_input_tokens=raw.get("cache_creation_input_tokens"),
+                    cache_write_1h_input_tokens=(
+                        raw["cache_creation"].get("ephemeral_1h_input_tokens")
+                        if isinstance(raw.get("cache_creation"), dict)
+                        else 0
+                    ),
+                    output_tokens=raw.get("output_tokens"),
+                )
+                for raw in message_usage.values()
+            )
+            usage_observed = True
         return {
             "session_id": session_id,
             "model": model,
@@ -7664,7 +7781,17 @@ class AgentRunner:
                     environment["AOP_EGRESS_FORWARDS"] = ",".join(
                         egress.forwarded_endpoints(egress_endpoints)
                     )
-                result = self.adapter.execute(request, worktree, run_dir, environment)
+                started_at = _now()
+                try:
+                    result = self.adapter.execute(
+                        request, worktree, run_dir, environment
+                    )
+                except RunInterrupted as interruption:
+                    # An adapter with its own protocol loop stopped the harness
+                    # and passed the interruption on, so nothing was parsed.
+                    result = _interrupted_result(
+                        request, run_dir, started_at, interruption.signal_name
+                    )
         finally:
             if input_projection != input_dir:
                 shutil.rmtree(input_projection)
@@ -7673,6 +7800,7 @@ class AgentRunner:
             inference_provider=request.inference_provider or result.inference_provider,
             inference_route=request.inference_route,
             inputs=request.inputs,
+            interrupted=_interrupted_by,
             project_dir=(
                 request.workdir
                 if request.workdir is not None
@@ -7681,6 +7809,15 @@ class AgentRunner:
                 else os.fspath(self.manager.root)
             ),
         )
+        if _interrupted_by is not None:
+            result = replace(
+                result,
+                error=f"interrupted by {_interrupted_by}",
+                # What the run used before the signal is a lower bound.
+                accounting_status=(
+                    "partial" if result.usage is not None else "unavailable"
+                ),
+            )
         if result.succeeded and request.artifacts:
             result = _archive_artifacts(result, request.artifacts, output_dir, run_dir)
         return self.store.write_result(run_dir, result)

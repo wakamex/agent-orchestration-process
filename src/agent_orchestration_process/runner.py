@@ -1350,12 +1350,13 @@ def _capture_process(
     is_response: Callable[[str], bool],
     live_dir: Path | None = None,
     live_append: bool = False,
-    stop_when: Callable[[list[str]], str | None] | None = None,
+    stop_when: Callable[[list[str], list[str]], str | None] | None = None,
 ) -> _ProcessCapture:
     """Run a harness to completion; with `live_dir`, its stdout and stderr also
     grow in live_dir/events.jsonl and live_dir/stderr.log while it runs, after
     any earlier attempt's output when `live_append` is set. `stop_when` is
-    asked every few seconds with the stdout lines so far; a reason it returns
+    asked every few seconds with the stdout and stderr lines so far; a reason
+    it returns
     stops the harness as if its deadline had passed, without timing out."""
     started = time.monotonic()
     timed_out = False
@@ -1434,7 +1435,7 @@ def _capture_process(
                 try:
                     process.wait(timeout=min(_STOP_CHECK_SECONDS, remaining or _STOP_CHECK_SECONDS))
                 except subprocess.TimeoutExpired:
-                    stopped_reason = stop_when(list(stdout_parts))
+                    stopped_reason = stop_when(list(stdout_parts), list(stderr_parts))
                     if stopped_reason is not None:
                         sandbox_launch.stop(process, CodexAdapter._SHUTDOWN_GRACE_SECONDS)
                         break
@@ -2689,7 +2690,7 @@ class _CursorTurnEnd:
         self.ended_before = self._ends() if self.transcript else 0
         self.noticed: tuple[float, int] | None = None
 
-    def __call__(self, lines: list[str]) -> str | None:
+    def __call__(self, lines: list[str], _stderr: list[str]) -> str | None:
         for line in lines:
             if '"type":"result"' in line.replace(" ", ""):
                 return None  # Cursor is exiting normally.
@@ -3619,9 +3620,86 @@ class MuseAdapter:
         }
 
 
+_OPENCODE_LOG_ERROR = re.compile(r'error\.error="((?:[^"\\]|\\.)*)"')
+_OPENCODE_RESET = re.compile(r"resets in ((?:\d+\s*[dhms]\b\s*)+)", re.IGNORECASE)
+
+
+def _opencode_log_time(line: str) -> datetime | None:
+    match = re.match(r"timestamp=(\S+)", line)
+    try:
+        return datetime.fromisoformat(match.group(1)) if match else None
+    except ValueError:
+        return None
+
+
+def _opencode_stderr_error(stderr: str) -> str:
+    """OpenCode's own error output without the log lines AOP asks it to
+    print, or its last logged error when it wrote nothing else."""
+    lines = stderr.splitlines()
+    plain = "\n".join(line for line in lines if not line.startswith("timestamp="))
+    if plain.strip():
+        return plain.strip()
+    for line in reversed(lines):
+        if " level=ERROR " in line:
+            match = _OPENCODE_LOG_ERROR.search(line)
+            return match.group(1) if match else line
+    return ""
+
+
+class _OpenCodeStall:
+    """Stop OpenCode once it has been silent for `grace` seconds after logging
+    a provider stream error, naming the error and any reset time it gives."""
+
+    def __init__(self, grace: float):
+        self.grace = grace
+
+    def __call__(self, stdout: list[str], stderr: list[str]) -> str | None:
+        failure = next(
+            (
+                line
+                for line in reversed(stderr)
+                if " level=ERROR " in line and 'message="stream error"' in line
+            ),
+            None,
+        )
+        failed_at = _opencode_log_time(failure) if failure else None
+        if failure is None or failed_at is None:
+            return None
+        for line in reversed(stdout):
+            try:
+                timestamp = json.loads(line).get("timestamp")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(timestamp, (int, float)):
+                if timestamp > failed_at.timestamp() * 1000:
+                    return None  # OpenCode carried on after the error.
+                break
+        if (datetime.now(UTC) - failed_at).total_seconds() < self.grace:
+            return None
+        match = _OPENCODE_LOG_ERROR.search(failure)
+        reason = (
+            f"OpenCode stopped responding after a provider error at "
+            f"{failed_at:%Y-%m-%dT%H:%M:%SZ}: "
+            + (match.group(1) if match else "the error was not logged")
+        )
+        reset = _OPENCODE_RESET.search(reason)
+        if reset:
+            units = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+            seconds = sum(
+                int(amount) * units[unit.lower()]
+                for amount, unit in re.findall(r"(\d+)\s*([dhms])", reset.group(1), re.I)
+            )
+            reason += f" (resets around {failed_at + timedelta(seconds=seconds):%Y-%m-%dT%H:%MZ})"
+        return reason
+
+
 class OpenCodeAdapter:
     provider = "opencode"
     modes = frozenset({"agent"})
+    # How long OpenCode may stay silent after logging a provider error before
+    # AOP stops it: OpenCode 1.19 can log one, such as a spent usage quota,
+    # and then neither retry nor exit.
+    STALL_GRACE_SECONDS = 30.0
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or os.environ.get("AOP_OPENCODE_BIN", "opencode")
@@ -3672,6 +3750,7 @@ class OpenCodeAdapter:
             timeout_seconds=request.timeout_seconds,
             is_response=self._is_response,
             live_dir=run_dir,
+            stop_when=_OpenCodeStall(self.STALL_GRACE_SECONDS),
         )
         parsed = self._parse(capture.stdout, request.model)
         final_message = parsed["final_message"]
@@ -3683,9 +3762,11 @@ class OpenCodeAdapter:
 
         if capture.timed_out:
             error = f"timed out after {request.timeout_seconds:g} seconds"
+        elif capture.stopped_reason is not None:
+            error = capture.stopped_reason
         elif capture.exit_code:
             error = (
-                capture.stderr.strip()
+                _opencode_stderr_error(capture.stderr)
                 or parsed["error"]
                 or f"OpenCode exited with status {capture.exit_code}"
             )
@@ -3803,6 +3884,10 @@ class OpenCodeAdapter:
             "run",
             "--format",
             "json",
+            # Provider errors reach only OpenCode's log; this sends it to stderr.
+            "--print-logs",
+            "--log-level",
+            "WARN",
             "--auto",
             "--dir",
             os.fspath(worktree.path),

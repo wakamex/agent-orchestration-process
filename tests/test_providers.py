@@ -1063,6 +1063,25 @@ class ProvidersTest(AOPTestCase):
             resumed.command.index("--variant") : resumed.command.index("--variant") + 2
         ]
 
+    def test_opencode_stuck_after_a_provider_error_fails_naming_it(
+        self, repository: Path, fake_opencode: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(runner_module, "_STOP_CHECK_SECONDS", 0.2)
+        monkeypatch.setattr(OpenCodeAdapter, "STALL_GRACE_SECONDS", 1.0)
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, OpenCodeAdapter(os.fspath(fake_opencode)))
+
+        result = runner.run(
+            task="opencode-quota", prompt="OPENCODE_QUOTA_HANG", timeout_seconds=120
+        )
+
+        assert not result.succeeded
+        assert not result.timed_out
+        assert result.duration_seconds < 30
+        assert result.error.startswith("OpenCode stopped responding after a provider error")
+        assert "usage limit reached (monthly, resets in 1d 16h)" in result.error
+        assert "resets around" in result.error
+
     def test_opencode_accepts_short_zen_model_and_fails_closed_on_changed_resume(
         self,
         repository: Path, fake_opencode: Path

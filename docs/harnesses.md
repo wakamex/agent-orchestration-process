@@ -159,6 +159,8 @@ When Devin stops at a usage limit, such as its free-model rate limit, it retries
 
 AOP preserves OpenCode's native `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` environment setting in sealed runs. OpenCode owns validation and the model-capacity bound. It can raise OpenCode's default output ceiling for reasoning-heavy tasks without changing reasoning effort; record the selected value alongside experiment inputs. For example, prefix an invocation with `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=64000`.
 
+AOP runs OpenCode with `--print-logs --log-level WARN`, so OpenCode's log lines for the run go to the run's `stderr.log` instead of OpenCode's shared log file. OpenCode 1.19 can log a provider stream error, such as a spent usage quota, and then neither retry nor exit. When OpenCode logs a stream error and writes no further event for 30 seconds, AOP stops it and fails the run with that error, the time it was logged, and the reset time when the error gives one, so the run frees its slot instead of idling until its deadline.
+
 `aop models --agent opencode --refresh` refreshes both AOP's model catalog and OpenCode's native models.dev cache. Regular listings use OpenCode's native cache policy.
 
 For `edit` and `review`, AOP seeds configuration, authentication, and existing generated plugin

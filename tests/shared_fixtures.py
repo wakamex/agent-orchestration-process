@@ -1278,6 +1278,28 @@ else:
     database.write_text(json.dumps({{"session_id": session_id}}))
 if prompt == "OPENCODE_DIFFERENT_SESSION":
     session_id = "ses_opencode_different"
+if prompt == "OPENCODE_QUOTA_HANG":
+    # OpenCode 1.19 logs a refused stream and then neither retries nor exits.
+    import datetime
+
+    if "--print-logs" not in args:
+        raise RuntimeError("OpenCode logs are not on stderr")
+    print(json.dumps({{
+        "type": "step_start",
+        "timestamp": int(time.time() * 1000),
+        "sessionID": session_id,
+        "part": {{"type": "step-start"}},
+    }}), flush=True)
+    now = datetime.datetime.now(datetime.UTC)
+    print(
+        f"timestamp={{now:%Y-%m-%dT%H:%M:%S.%f}}Z level=ERROR run=fake "
+        'message="stream error" providerID=opencode-go modelID=grok-4.7 '
+        'error.error="AI_APICallError: OpenCode Go usage limit reached '
+        '(monthly, resets in 1d 16h). To keep going now, turn on Extra Usage."',
+        file=sys.stderr,
+        flush=True,
+    )
+    time.sleep(600)
 if prompt.startswith("WRITE_ARTIFACT"):
     pathlib.Path(os.environ["AOP_OUTPUT_DIR"]).joinpath("report.md").write_text(
         "# OpenCode artifact\\n"

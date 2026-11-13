@@ -219,7 +219,7 @@ def _upgraded_result_current(
 ) -> tuple[dict[str, Any], str] | None:
     """Upgrade a result, then price it if it has usage but no cost and
     model-prices now has a rate for its model."""
-    upgraded = _upgraded_result_with_project(raw, run_dir)
+    upgraded = _upgraded_devin_usage(raw, run_dir)
     value, outcome = upgraded if upgraded is not None else (raw, None)
     if value.get("calculated_cost") is not None or value.get("usage") is None:
         return upgraded
@@ -248,6 +248,72 @@ def _upgraded_result_current(
     value["migration"]["conversions"].append("priced")
     conversions, note, rest = outcome.partition(" (")
     return value, f"{conversions}+priced{note}{rest}"
+
+
+def _upgraded_devin_usage(
+    raw: dict[str, Any], run_dir: Path
+) -> tuple[dict[str, Any], str] | None:
+    """Upgrade a result, and give a Devin run the usage its session database
+    recorded for the run's time.
+
+    Devin's export misses steps before a compaction, and a run whose turn
+    failed recorded measured zeros. When the database is gone, such a
+    zero-usage run without an export becomes unavailable instead.
+    """
+    upgraded = _upgraded_result_with_project(raw, run_dir)
+    value, outcome = upgraded if upgraded is not None else (raw, None)
+    if value.get("provider") != "devin":
+        return upgraded
+    from .runner import devin_session_usage, price_result_usage
+
+    try:
+        result = RunResult.from_dict(value)
+        controller = json.loads((run_dir / "request.json").read_text())[
+            "effective_policy"
+        ]["controller"]
+        provider_state = Path(controller["provider_state"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return upgraded
+    usage = devin_session_usage(
+        provider_state, result.session_id, result.started_at, result.finished_at
+    )
+    if usage is not None:
+        if usage == result.usage:
+            return upgraded
+        conversion = "devin-session-usage"
+        result = replace(
+            result,
+            usage=usage,
+            accounting_status="partial" if result.timed_out else "complete",
+            calculated_cost=price_result_usage(
+                result.provider,
+                result.model,
+                usage,
+                result.started_at,
+                result.finished_at,
+                inference_provider=result.inference_provider,
+            ),
+        )
+    elif (
+        result.usage == TokenUsage()
+        and result.accounting_status == "complete"
+        and not (run_dir / "provider-result.json").exists()
+    ):
+        conversion = "devin-usage-unavailable"
+        result = replace(
+            result, usage=None, accounting_status="unavailable", calculated_cost=None
+        )
+    else:
+        return upgraded
+    migration = value.get("migration") if outcome is not None else None
+    value = result.to_dict()
+    if migration is None:
+        value["migration"] = _record(value.get("usage_schema"), [conversion], "result.json")
+        return value, f"{conversion} (usage changed)"
+    migration["conversions"].append(conversion)
+    value["migration"] = migration
+    conversions, note, rest = outcome.partition(" (")
+    return value, f"{conversions}+{conversion} (usage changed)"
 
 
 def _upgraded_result_with_project(

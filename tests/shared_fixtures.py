@@ -1100,6 +1100,61 @@ if prompt.startswith("DEVIN_RATE_LIMIT"):
         file=sys.stderr,
     )
     raise SystemExit(1)
+if prompt in {{"DEVIN_COMPACTED", "DEVIN_COMPACTED_LIMIT"}}:
+    import sqlite3
+
+    # Devin keeps each call's metrics on every message the call produced.
+    database = sqlite3.connect(data_dir / "cli" / "sessions.db")
+    database.execute(
+        "CREATE TABLE IF NOT EXISTS message_nodes (row_id INTEGER PRIMARY KEY "
+        "AUTOINCREMENT, session_id TEXT NOT NULL, node_id INTEGER NOT NULL, "
+        "parent_node_id INTEGER, chat_message TEXT NOT NULL, "
+        "created_at INTEGER NOT NULL, metadata TEXT)"
+    )
+    now = int(time.time())
+    for node, (request, created, metrics) in enumerate([
+        ("earlier-run", now - 86400, {{"input_tokens": 9000, "output_tokens": 900}}),
+        ("before-compaction", now, {{
+            "input_tokens": 40, "cache_read_tokens": 60,
+            "cache_creation_tokens": None, "output_tokens": 7,
+        }}),
+        ("before-compaction", now, {{
+            "input_tokens": 40, "cache_read_tokens": 60,
+            "cache_creation_tokens": None, "output_tokens": 7,
+        }}),
+        ("after-compaction", now, {{
+            "input_tokens": 5, "cache_read_tokens": 15, "output_tokens": 3,
+        }}),
+    ]):
+        database.execute(
+            "INSERT INTO message_nodes (session_id, node_id, chat_message, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (session_id, node, json.dumps({{
+                "role": "assistant",
+                "metadata": {{"request_id": request, "metrics": metrics}},
+            }}), created),
+        )
+    database.execute(
+        "INSERT INTO message_nodes (session_id, node_id, chat_message, created_at) "
+        "VALUES (?, 99, ?, ?)",
+        (session_id, json.dumps({{"role": "user", "content": prompt}}), now),
+    )
+    database.commit()
+    database.close()
+    if prompt == "DEVIN_COMPACTED_LIMIT":
+        database = sqlite3.connect(data_dir / "cli" / "sessions.db")
+        database.execute(
+            "CREATE TABLE prompt_history (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "content TEXT NOT NULL, timestamp INTEGER NOT NULL, session_id TEXT NOT NULL)"
+        )
+        database.execute(
+            "INSERT INTO prompt_history (content, timestamp, session_id) VALUES (?, ?, ?)",
+            (prompt, now, session_id),
+        )
+        database.commit()
+        database.close()
+        print("Error: Agent error: Your weekly usage quota has been exhausted.", file=sys.stderr)
+        raise SystemExit(1)
 earlier = []
 if "has now reset" in prompt:
     earlier = [

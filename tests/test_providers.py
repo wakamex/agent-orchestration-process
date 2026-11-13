@@ -895,6 +895,25 @@ class ProvidersTest(AOPTestCase):
         assert resumed.succeeded, resumed.error
         assert resumed.session_id == "tested-basil"
 
+    def test_devin_usage_counts_each_call_in_the_run_from_its_session_database(
+        self, repository: Path, fake_devin: Path
+    ) -> None:
+        manager = WorktreeManager.discover(repository)
+        runner = AgentRunner(manager, DevinAdapter(os.fspath(fake_devin)))
+
+        # The export holds only the steps after a compaction, and a failed
+        # turn writes none; the database has every call, one record per message.
+        completed = runner.run(task="devin-compacted", prompt="DEVIN_COMPACTED")
+        failed = runner.run(task="devin-compacted-limit", prompt="DEVIN_COMPACTED_LIMIT")
+
+        assert completed.succeeded, completed.error
+        assert not failed.succeeded
+        for result in (completed, failed):
+            assert result.accounting_status == "complete"
+            assert result.usage.input_tokens == 120
+            assert result.usage.cached_input_tokens == 75
+            assert result.usage.output_tokens == 10
+
     def test_devin_refuses_a_prompt_it_would_read_as_a_slash_command(
         self, repository: Path, fake_devin: Path
     ) -> None:

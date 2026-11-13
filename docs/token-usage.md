@@ -45,19 +45,14 @@ sign means the provider reports disjoint buckets that AOP combines into a normal
 | Claude | input, cache read, and cache creation are disjoint | input + cache read + cache creation, with cache read and cache creation (including 1h TTL) as subsets | output is total | output |
 | Codex | input already includes `cached_input_tokens` | input | output already includes reasoning | output |
 | Cursor | input, cache read, and cache write are disjoint | input + cache read + cache write, with cache read and cache write as subsets | output is total | output |
-| Devin | ATIF `prompt_tokens` is total and `cached_tokens` is its subset | prompt | ATIF completion is total | completion |
+| Devin | each model call's metrics in the task's `sessions.db` carry disjoint input, cache read, and cache creation; without the database, ATIF `prompt_tokens` is total and `cached_tokens` is its subset | sum over the calls made during this invocation of input + cache read + cache creation, with cache read and cache creation as subsets; otherwise prompt | output is total | output, or ATIF completion |
 | DeepSeek Harness | Harness input, cache read, and cache write are disjoint for every inference provider | input + cache read + cache write, with cache read and cache write as subsets | Harness output includes reasoning | output, with reasoning as subset |
 | Grok | input, cache read, and cache creation are disjoint | input + cache read + cache creation, with cache read and cache creation (including 1h TTL) as subsets | output includes reasoning | output, with reasoning as subset |
 | Hermes | session input, cache read, and cache write are disjoint cumulative counters | invocation delta of their sum, with cache read and cache write deltas as subsets | session visible output and reasoning are disjoint cumulative counters | invocation delta of visible output + reasoning |
 | OpenCode | input, cache read, and cache write are disjoint | input + cache read + cache write, with cache read and cache write as subsets | output and reasoning are disjoint | output + reasoning, with reasoning as subset |
 | Zcode | Native `inputTokens` includes `cacheReadTokens` and `cacheWriteTokens` | input, with cache read and cache write as subsets | Native `outputTokens` includes `reasoningTokens` | output, with reasoning as subset |
 
-Hermes exports cumulative session counters. AOP snapshots the session before and after an invocation
-and persists only the component-wise invocation delta. For a Devin resume, AOP selects only agent
-steps after the current user prompt. A fresh run whose run-owned ATIF export omits every user step
-uses all agent steps from that new private session. The other adapters consume per-invocation
-terminal events. Resuming a session therefore does not turn a new run's usage into a cumulative
-session total.
+Hermes exports cumulative session counters. AOP snapshots the session before and after an invocation and persists only the component-wise invocation delta. Devin keeps each model call's metrics on every message the call produced in the task's private `sessions.db`, so AOP sums them once per request ID over the messages the session recorded between the run's start and finish. Devin's ATIF export holds only the steps since the session's last compaction, and a turn that ends in an error writes none, so the export is used only when the database is missing. For that fallback on a resume, AOP selects only agent steps after the current user prompt, and a fresh run whose run-owned ATIF export omits every user step uses all agent steps from that new private session. The other adapters consume per-invocation terminal events. Resuming a session therefore does not turn a new run's usage into a cumulative session total.
 
 Muse Code reports only its main agent's usage in `muse exec --json`. AOP sums every model call of the run, including Muse's reminder agents, from the session log in the task's private state, after checking that its main-agent calls equal the reported usage; see [Harness adapters](harnesses.md#muse-code).
 
@@ -121,6 +116,8 @@ Results convert as follows:
 | Claude, Cursor, DeepSeek Harness, Grok, and OpenCode results with cache writes in `events.jsonl` | `cache_write_input_tokens` and `cache_write_1h_input_tokens` recovered from `events.jsonl` when `result.json` predates those fields |
 | Resumed Claude results with cumulative `modelUsage` in `events.jsonl` | `calculated_cost` recomputed as the single-turn delta from the parent run's reported session cost (or `model-prices` when parent events are absent) |
 | `--workdir` results recorded before results had `project_dir` | `project_dir` set to the `workdir` in the run's `request.json`; archived results whose run directory is gone stay as they are |
+| Devin results whose task's `sessions.db` still exists | usage recomputed from the model calls the session recorded during the run, accounting `complete` (`partial` when the run timed out), and `calculated_cost` priced again; Devin runs that failed before AOP read this database recorded zero usage |
+| Devin results with zero usage, `complete` accounting, no `provider-result.json`, and no `sessions.db` | usage and costs become unavailable, because a failed turn writes no export and the zeros were never measured |
 | Results with usage but no calculated cost, such as Cursor and Devin runs recorded before AOP priced them, whose model model-prices now has a rate for at the run's time | `calculated_cost` priced from the recorded usage |
 | Runs that have a `request.json` but no `result.json`, because AOP was killed outright, for example by SIGKILL, an out-of-memory kill or a host restart, and whose harness writes usage to its event stream (Claude, Codex, Cursor, Grok, OpenCode, Antigravity, Muse, DeepSeek Harness) | a result rebuilt from `events.jsonl` with the session ID and the usage seen, accounting `partial`, and the error saying it was recovered; runs whose task lock is still held are skipped as running. For Claude, output counts in the stream can lag, so they are a lower bound |
 | Results without `state_root` | `state_root` set to the `.aop` directory that holds the run directory |

@@ -6,6 +6,7 @@ import contextlib
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -3121,19 +3122,20 @@ class DevinAdapter:
             error = None
 
         finished_at = _now()
+        usage = devin_session_usage(
+            Path(environment["AOP_PROVIDER_STATE_DIR"]), session_id, started_at, finished_at
+        )
+        usage_observed = usage is not None or parsed["usage_observed"]
+        usage = parsed["usage"] if usage is None else usage
         accounting = _finalize_accounting(
             timed_out=capture.timed_out,
-            usage=parsed["usage"],
-            usage_observed=parsed["usage_observed"],
+            usage=usage,
+            usage_observed=usage_observed,
             calculated_cost=price_result_usage(
-                self.provider,
-                parsed["model"] or request.model,
-                parsed["usage"],
-                started_at,
-                finished_at,
+                self.provider, parsed["model"] or request.model, usage, started_at, finished_at
             ),
-            # Devin reports usage only in its export, which a turn that ends
-            # in an error does not write.
+            # Without its session database, Devin reports usage only in its
+            # export, which a turn that ends in an error does not write.
             require_observed=True,
         )
         return _build_run_result(
@@ -6025,10 +6027,7 @@ def _prepare_devin_environment(
 
 def _devin_session_for_prompt(environment: dict[str, str], prompt: str) -> str | None:
     """The private Devin session most recently given this prompt, if any."""
-    database = (
-        Path(environment["AOP_PROVIDER_STATE_DIR"])
-        / "devin" / "data" / "devin" / "cli" / "sessions.db"
-    )
+    database = _devin_sessions_db(Path(environment["AOP_PROVIDER_STATE_DIR"]))
     if not database.is_file():
         return None
     try:
@@ -6047,6 +6046,68 @@ def _devin_session_for_prompt(environment: dict[str, str], prompt: str) -> str |
             if isinstance(content, str) and content.strip() == prompt.strip()
         ),
         None,
+    )
+
+
+def _devin_sessions_db(provider_state: Path) -> Path:
+    return provider_state / "devin" / "data" / "devin" / "cli" / "sessions.db"
+
+
+def devin_session_usage(
+    provider_state: Path, session_id: object, started_at: str, finished_at: str
+) -> TokenUsage | None:
+    """The tokens a Devin session's model calls used between two times, from
+    the per-request metrics Devin keeps in its session database.
+
+    Devin's trajectory export holds only the steps since the session's last
+    compaction, and a turn that ends in an error writes none, while the
+    database keeps every call. A call's metrics repeat on each message it
+    produced, so they count once per request. None when the database is
+    missing or unreadable or has no call in the window.
+    """
+    database = _devin_sessions_db(provider_state)
+    if not isinstance(session_id, str) or not database.is_file():
+        return None
+    # Devin records message times in whole seconds.
+    start = math.floor(datetime.fromisoformat(started_at).timestamp())
+    end = datetime.fromisoformat(finished_at).timestamp()
+    try:
+        with contextlib.closing(
+            sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+        ) as connection:
+            rows = connection.execute(
+                "SELECT row_id, json_extract(chat_message, '$.metadata.request_id'),"
+                " json_extract(chat_message, '$.metadata.metrics')"
+                " FROM message_nodes WHERE session_id = ? AND created_at BETWEEN ? AND ?"
+                " AND json_extract(chat_message, '$.role') = 'assistant'",
+                (session_id, start, end),
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    calls: dict[object, dict[str, object]] = {}
+    for row_id, request_id, metrics in rows:
+        try:
+            value = json.loads(metrics) if isinstance(metrics, str) else None
+        except ValueError:
+            value = None
+        if isinstance(value, dict):
+            calls.setdefault(request_id or ("row", row_id), value)
+    if not calls:
+        return None
+    totals = {
+        name: sum(nonnegative_int(metrics.get(name)) for metrics in calls.values())
+        for name in (
+            "input_tokens", "cache_read_tokens", "cache_creation_tokens", "output_tokens"
+        )
+    }
+    return TokenUsage(
+        # Devin's input, cache read, and cache creation counts are disjoint.
+        input_tokens=totals["input_tokens"]
+        + totals["cache_read_tokens"]
+        + totals["cache_creation_tokens"],
+        cached_input_tokens=totals["cache_read_tokens"],
+        cache_write_input_tokens=totals["cache_creation_tokens"],
+        output_tokens=totals["output_tokens"],
     )
 
 

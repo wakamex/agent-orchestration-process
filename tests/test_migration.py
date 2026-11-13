@@ -453,6 +453,105 @@ class MigrationTest(AOPTestCase):
         )
         assert migrated["calculated_cost"]["amount_usd"] == 0.15
 
+    def _devin_run(self, tmp_path: Path, metrics: list[tuple[str, int, dict]]) -> Path:
+        """A Devin run that failed before AOP read usage, recorded as measured
+        zeros priced at $0, beside its task's session database."""
+        import sqlite3
+
+        provider_state = tmp_path / "provider-state" / "task"
+        database = provider_state / "devin" / "data" / "devin" / "cli" / "sessions.db"
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "session_id TEXT, node_id INTEGER, chat_message TEXT, created_at INTEGER)"
+            )
+            for node, (request_id, created_at, call) in enumerate(metrics):
+                connection.execute(
+                    "INSERT INTO message_nodes (session_id, node_id, chat_message, "
+                    "created_at) VALUES ('session', ?, ?, ?)",
+                    (node, json.dumps({
+                        "role": "assistant",
+                        "metadata": {"request_id": request_id, "metrics": call},
+                    }), created_at),
+                )
+        state = tmp_path / ".aop"
+        request = {
+            "run_id": RUN_ID, "provider": "devin", "mode": "agent", "task": "task",
+            "prompt": "hello", "base": "HEAD", "model": "unpriced-test-model",
+            "effort": None, "profile": "host", "inference_provider": None,
+            "inference_route": None, "no_web": False,
+            "effective_policy": {"controller": {"provider_state": str(provider_state)}},
+            "artifacts": [], "inputs": [], "timeout_seconds": None, "session_id": None,
+            "parent_run_id": None, "created_at": "2026-08-30T07:09:00+00:00",
+        }
+        return write_run(
+            state / "runs",
+            result(
+                "devin",
+                usage(0, 0, 0, 0),
+                exit_code=1,
+                error="Error: Agent error: Reached free model rate limit.",
+                usage_schema=TOKEN_USAGE_SCHEMA,
+                accounting_status="complete",
+                calculated_cost={
+                    "amount_usd": 0.0,
+                    "currency": "USD",
+                    "model": "unpriced-test-model",
+                    "priced_as": "unpriced-test-model",
+                    "pricing_version": "test",
+                    "pricing_source": "test",
+                    "long_context_pricing": False,
+                },
+                state_root=str(state.resolve()),
+                mode="agent",
+                effort=None,
+                time_to_first_event_seconds=None,
+                time_to_first_response_seconds=None,
+            ),
+            request=request,
+        )
+
+    def test_devin_results_take_each_call_in_the_run_from_its_session_database(
+        self, tmp_path
+    ):
+        # 2026-08-30T07:09:00Z, when the result says the run started.
+        started = 1788073740
+        call = {"input_tokens": 40, "cache_read_tokens": 60, "output_tokens": 7}
+        run_dir = self._devin_run(tmp_path, [
+            ("earlier-run", started - 60, {"input_tokens": 9000, "output_tokens": 900}),
+            ("in-run", started + 1, call),
+            ("in-run", started + 1, call),
+            (None, started + 9, {"input_tokens": 5, "output_tokens": 3}),
+        ])
+
+        counts = migrate_runs(run_dir.parent)
+
+        assert counts["result.json: devin-session-usage (usage changed)"] == 1
+        migrated = json.loads((run_dir / "result.json").read_text())
+        assert migrated["usage"] == usage(105, 60, 10, 0)
+        assert migrated["accounting_status"] == "complete"
+        assert migrated["calculated_cost"] is None  # the model has no rate
+        assert migrated["migration"]["conversions"] == ["devin-session-usage"]
+        assert migrate_runs(run_dir.parent)["result.json: current"] == 1
+
+    def test_devin_zero_usage_without_an_export_or_database_becomes_unavailable(
+        self, tmp_path
+    ):
+        run_dir = self._devin_run(tmp_path, [])
+        (tmp_path / "provider-state" / "task" / "devin").joinpath(
+            "data", "devin", "cli", "sessions.db"
+        ).unlink()
+
+        migrate_runs(run_dir.parent)
+
+        migrated = json.loads((run_dir / "result.json").read_text())
+        assert migrated["usage"] is None
+        assert migrated["calculated_cost"] is None
+        assert migrated["accounting_status"] == "unavailable"
+        assert migrated["migration"]["conversions"] == ["devin-usage-unavailable"]
+        assert migrate_runs(run_dir.parent)["result.json: current"] == 1
+
 
 class ResultsArchiveTest(AOPTestCase):
     def test_backfill_names_the_state_root_and_archives_each_result(self, tmp_path):

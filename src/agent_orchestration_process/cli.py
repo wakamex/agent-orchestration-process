@@ -81,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
     migrate = commands.add_parser(
         "migrate-results",
         help="convert older run records to the current format, keeping each original",
+        description="Convert older run records to the current format, keeping each "
+        "original beside it. Whichever run directories are named, every invocation "
+        "also migrates results in the archive under $XDG_STATE_HOME/aop/results whose "
+        "run directory no longer exists, and drops duplicate and missing entries "
+        "from the state-roots registry.",
     )
     migrate.add_argument(
         "runs_dirs",

@@ -105,7 +105,7 @@ aop migrate-results /code/project/.aop/runs ~/other/.aop/runs
 
 Without arguments, the command migrates every state directory listed in `$XDG_STATE_HOME/aop/state-roots` (by default `~/.local/state/aop/state-roots`) and the current project's `.aop/runs`. AOP adds a state directory to that list whenever it records a run there, and the migration adds every directory it migrates. `--dry-run` prints, for each run directory, how many records each conversion would change, and writes nothing.
 
-The migration also maintains the results archive. It copies each current result into the archive when the archived copy is missing or differs, and migrates archived results whose run directory no longer exists in place. Finally it rewrites `state-roots` without duplicate entries or directories that no longer exist.
+The migration also maintains the results archive, `$XDG_STATE_HOME/aop/results`. It copies each current result of the run directories it migrates into the archive when the archived copy is missing or differs. Whichever run directories are named, every invocation also migrates archived results whose run directory no longer exists, in place, and rewrites `state-roots` without duplicate entries or directories that no longer exist.
 
 For each record the migration rewrites, it keeps the original byte for byte beside it as `result.pre-v3.json` or `request.pre-v3.json` and adds a `migration` object naming the original schema, the conversions applied, the original's file name, and the migration time. Raw provider artifacts such as `events.jsonl` are never changed. Running the migration again skips records already in the current format.
 

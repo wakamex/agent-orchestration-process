@@ -541,7 +541,9 @@ class ProvidersTest(AOPTestCase):
         assert first.usage.cached_input_tokens == 30
         assert first.usage.output_tokens == 20
         assert first.provider_duration_seconds == 1.25
-        assert first.calculated_cost is None
+        # Cursor reports no cost; AOP prices its usage at the model's API rates.
+        assert first.calculated_cost is not None
+        assert "composer-2.5" in first.calculated_cost.priced_as
         assert first.provider_reported_cost is None
         assert first.billing.route == "provider-credits"
         assert first.billing.credential_source == "cursor-account"
@@ -751,7 +753,8 @@ class ProvidersTest(AOPTestCase):
         assert first.usage.input_tokens == 100
         assert first.usage.cached_input_tokens == 30
         assert first.usage.output_tokens == 20
-        assert first.calculated_cost is None
+        assert first.calculated_cost is not None
+        assert "swe-1-7" in first.calculated_cost.priced_as
         assert first.provider_reported_cost is None
         assert first.billing.route == "provider-credits"
         assert first.billing.credential_source == "devin-account"
@@ -771,7 +774,10 @@ class ProvidersTest(AOPTestCase):
         assert ["--resume", first.session_id] == resumed.command[
             resumed.command.index("--resume") : resumed.command.index("--resume") + 2
         ]
-        assert "--model" not in resumed.command
+        # A resume names the model too, or Devin can fall back to its default.
+        assert ["--model", "swe-1-7"] == resumed.command[
+            resumed.command.index("--model") : resumed.command.index("--model") + 2
+        ]
         assert (
             manager.state_dir / "runs" / first.run_id / "provider-result.json"
         ).is_file()

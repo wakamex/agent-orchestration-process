@@ -26,7 +26,7 @@ from .runner import (
     OpenCodeAdapter,
     RunStore,
 )
-from .worktrees import results_archive_dir
+from .worktrees import AOPError, results_archive_dir
 
 ORIGINAL_SUFFIX = ".pre-v3.json"
 LEGACY_TOKEN_USAGE_SCHEMA = "aop-token-usage-v1"
@@ -51,10 +51,13 @@ def migrate_runs(runs_dir: Path, *, dry_run: bool = False) -> Counter[str]:
     for run_dir in sorted(path for path in runs_dir.iterdir() if path.is_dir()):
         for name, upgrade in (
             ("request.json", _upgraded_request),
-            ("result.json", _upgraded_result_with_project),
+            ("result.json", _upgraded_result_current),
         ):
             path = run_dir / name
-            value = _migrate_file(path, run_dir, upgrade, name, counts, dry_run)
+            if name == "result.json" and not path.exists():
+                value = _recovered(run_dir, counts, dry_run)
+            else:
+                value = _migrate_file(path, run_dir, upgrade, name, counts, dry_run)
             if name == "result.json" and value is not None:
                 _archive(value, counts, dry_run)
     return counts
@@ -80,7 +83,7 @@ def migrate_archive(*, dry_run: bool = False) -> Counter[str]:
             continue
         if (run_dir / "result.json").is_file():
             continue
-        _migrate_file(path, run_dir, _upgraded_result, "archive", counts, dry_run)
+        _migrate_file(path, run_dir, _upgraded_result_current, "archive", counts, dry_run)
     return counts
 
 
@@ -166,6 +169,85 @@ def _upgraded_request(
     fields["migration"] = _record(None, conversions, "request.json")
     request = RunRequest.from_dict(fields)
     return request.to_dict(), "+".join(conversions) or "normalized"
+
+
+def _recovered(run_dir: Path, counts: Counter[str], dry_run: bool) -> dict[str, Any] | None:
+    """Write a result for a run whose AOP process died without one.
+
+    A run whose task lock is held is still going, and is left alone.
+    """
+    from .locks import exclusive_lock, task_lock_path
+    from .runner import recover_lost_result
+
+    try:
+        request = RunStore(run_dir.parent).load_request(run_dir.name)
+    except (AOPError, OSError, ValueError, KeyError, TypeError):
+        return None
+    try:
+        with exclusive_lock(
+            task_lock_path(run_dir.parent.parent, request.task), f"task {request.task}"
+        ):
+            result = recover_lost_result(request, run_dir)
+    except AOPError:
+        counts["result.json: running"] += 1
+        return None
+    if result is None:
+        counts["result.json: missing"] += 1
+        return None
+    state_root = run_dir.parent.parent.resolve()
+    value = replace(
+        result,
+        state_root=str(state_root),
+        project_dir=(
+            request.workdir
+            if request.workdir is not None
+            else None
+            if request.profile == "sealed"
+            else str(state_root.parent)
+        ),
+    ).to_dict()
+    value["migration"] = _record(TOKEN_USAGE_SCHEMA, ["recovered"], "result.json")
+    value["migration"]["original"] = None  # there was no result to keep
+    counts["result.json: recovered"] += 1
+    if not dry_run:
+        RunStore.write_json(run_dir / "result.json", value)
+    return value
+
+
+def _upgraded_result_current(
+    raw: dict[str, Any], run_dir: Path
+) -> tuple[dict[str, Any], str] | None:
+    """Upgrade a result, then price it if it has usage but no cost and
+    model-prices now has a rate for its model."""
+    upgraded = _upgraded_result_with_project(raw, run_dir)
+    value, outcome = upgraded if upgraded is not None else (raw, None)
+    if value.get("calculated_cost") is not None or value.get("usage") is None:
+        return upgraded
+    if value.get("accounting_status") not in {"complete", "partial"}:
+        return upgraded
+    from .runner import price_result_usage
+
+    try:
+        result = RunResult.from_dict(value)
+    except (ValueError, TypeError, KeyError):
+        return upgraded
+    cost = price_result_usage(
+        result.provider,
+        result.model,
+        result.usage,
+        result.started_at,
+        result.finished_at,
+        inference_provider=result.inference_provider,
+    )
+    if cost is None:
+        return upgraded
+    value = {**value, "calculated_cost": cost.to_dict()}
+    if outcome is None:
+        value["migration"] = _record(value.get("usage_schema"), ["priced"], "result.json")
+        return value, "priced"
+    value["migration"]["conversions"].append("priced")
+    conversions, note, rest = outcome.partition(" (")
+    return value, f"{conversions}+priced{note}{rest}"
 
 
 def _upgraded_result_with_project(

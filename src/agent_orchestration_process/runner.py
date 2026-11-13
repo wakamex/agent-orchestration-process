@@ -214,6 +214,120 @@ def _unanswered(
     return None
 
 
+# The model-prices provider each harness's models are priced under; None
+# lets model-prices find the provider from the model name.
+_PRICING_PROVIDERS: dict[str, str | None] = {
+    "agy": "google",
+    "claude": "anthropic",
+    "codex": "openai",
+    "cursor": None,
+    "devin": None,
+    "grok": "xai",
+    "hermes": None,
+    "muse": "meta",
+    "zcode": "zai",
+}
+
+
+def price_result_usage(
+    agent: str,
+    model: str | None,
+    usage: TokenUsage | None,
+    started_at: str,
+    finished_at: str,
+    *,
+    inference_provider: str | None = None,
+) -> CalculatedCost | None:
+    """API-equivalent cost of a run's total usage at its model's rates.
+
+    For harnesses whose runs report no cost of their own, and for pricing a
+    recorded result again once model-prices has a rate for its model.
+    """
+    if usage is None or model is None:
+        return None
+    provider = _PRICING_PROVIDERS.get(agent)
+    priced_model = model
+    if agent == "opencode":
+        provider, _, priced_model = model.partition("/") if "/" in model else (None, "", model)
+    elif agent == "dsh":
+        provider = DeepSeekHarnessAdapter.pricing_provider(inference_provider)
+    return estimate_api_cost(
+        priced_model,
+        usage,
+        provider=provider,
+        started_at=started_at,
+        finished_at=finished_at,
+        estimate=agent == "muse",
+    )
+
+
+def recover_lost_result(request: RunRequest, run_dir: Path) -> RunResult | None:
+    """A result for a run whose AOP process ended without writing one, such
+    as after SIGKILL or a host restart, from the events it left.
+
+    Returns None for harnesses whose usage is not in their event stream.
+    """
+    parsers: dict[str, Callable[[str], dict[str, object]]] = {
+        "agy": AgyAdapter._parse,
+        "claude": ClaudeAdapter._parse,
+        "codex": CodexAdapter._parse_events,
+        "cursor": CursorAdapter._parse,
+        "dsh": DeepSeekHarnessAdapter._parse,
+        "grok": lambda output: GrokAdapter._parse(output, request.model),
+        "muse": MuseAdapter._parse,
+        "opencode": lambda output: OpenCodeAdapter._parse(output, request.model),
+    }
+    parse = parsers.get(request.provider)
+    events = run_dir / "events.jsonl"
+    if parse is None or not events.is_file():
+        return None
+    output = events.read_text(errors="replace")
+    parsed = parse(output)
+    usage = parsed.get("usage") if parsed.get("usage_observed") else None
+    model = parsed.get("model") or request.model
+    finished_at = datetime.fromtimestamp(events.stat().st_mtime, UTC).isoformat()
+    started = datetime.fromisoformat(request.created_at)
+    capture = _ProcessCapture(
+        stdout=output,
+        stderr="",
+        exit_code=-1,
+        timed_out=False,
+        duration_seconds=round(
+            max(0.0, (datetime.fromisoformat(finished_at) - started).total_seconds()), 6
+        ),
+        first_event_seconds=None,
+        first_response_seconds=None,
+    )
+    return _build_run_result(
+        request,
+        capture,
+        model=model if isinstance(model, str) else request.model,
+        session_id=parsed.get("session_id") or request.session_id,
+        command=[],
+        started_at=request.created_at,
+        finished_at=finished_at,
+        error=(
+            "AOP stopped without recording a result, as after SIGKILL or a host "
+            "restart; recovered from the run's events"
+        ),
+        final_message=None,
+        accounting=_Accounting(
+            usage=usage,
+            calculated_cost=price_result_usage(
+                request.provider,
+                model if isinstance(model, str) else request.model,
+                usage,
+                request.created_at,
+                finished_at,
+                inference_provider=request.inference_provider,
+            ),
+            provider_reported_cost=None,
+            status="partial" if usage is not None else "unavailable",
+        ),
+        billing=BillingProvenance(),
+    )
+
+
 def _interrupted_result(
     request: RunRequest, run_dir: Path, started_at: str, signal_name: str
 ) -> RunResult:
@@ -2739,11 +2853,14 @@ class CursorAdapter:
         else:
             error = None
 
+        finished_at = _now()
         accounting = _finalize_accounting(
             timed_out=capture.timed_out,
             usage=parsed["usage"],
             usage_observed=parsed["usage_observed"],
-            calculated_cost=None,
+            calculated_cost=price_result_usage(
+                self.provider, request.model, parsed["usage"], started_at, finished_at
+            ),
             # Cursor reports usage only in its terminal result.
             require_observed=not parsed["has_result"],
         )
@@ -2754,7 +2871,7 @@ class CursorAdapter:
             session_id=session_id,
             command=command,
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             error=error,
             final_message=final_message,
             accounting=accounting,
@@ -3003,11 +3120,18 @@ class DevinAdapter:
         else:
             error = None
 
+        finished_at = _now()
         accounting = _finalize_accounting(
             timed_out=capture.timed_out,
             usage=parsed["usage"],
             usage_observed=parsed["usage_observed"],
-            calculated_cost=None,
+            calculated_cost=price_result_usage(
+                self.provider,
+                parsed["model"] or request.model,
+                parsed["usage"],
+                started_at,
+                finished_at,
+            ),
             # Devin reports usage only in its export, which a turn that ends
             # in an error does not write.
             require_observed=True,
@@ -3019,7 +3143,7 @@ class DevinAdapter:
             session_id=session_id,
             command=command,
             started_at=started_at,
-            finished_at=_now(),
+            finished_at=finished_at,
             error=error,
             final_message=final_message,
             accounting=accounting,
@@ -3076,7 +3200,9 @@ class DevinAdapter:
         ]
         if request.session_id:
             command.extend(["--resume", request.session_id])
-        elif request.model:
+        # A resumed session can come back on Devin's default model, so the
+        # run's model is passed every time; Devin switches the session to it.
+        if request.model:
             command.extend(["--model", request.model])
         command.extend(["-p", request.prompt])
         return command
@@ -7739,6 +7865,13 @@ class AgentRunner:
             request.provider
         ]
         run_dir = self.store.create(request)
+        # Printed at once, so a caller can link the run to its task even if
+        # AOP is killed before it reports.
+        print(
+            f"aop: run_id={request.run_id} started task={request.task}",
+            file=sys.stderr,
+            flush=True,
+        )
         if request.inputs:
             input_manifest = input_dir / "manifest.json"
             guest_manifest = {

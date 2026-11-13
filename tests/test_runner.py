@@ -27,6 +27,7 @@ from agent_orchestration_process.runner import (
     normalize_artifacts,
     AgentRunner,
     CodexAdapter,
+    ClaudeAdapter,
     CursorAdapter,
     _capture_process,
     _codex_no_web_config,
@@ -1598,7 +1599,10 @@ class RunnerTest(AOPTestCase):
         first_output = capsys.readouterr()
         first = json.loads(first_output.out)
 
-        assert first_output.err == "", first_output.err
+        # Only the line naming the run as it starts.
+        assert first_output.err == (
+            f"aop: run_id={first['run_id']} started task=json-task\n"
+        ), first_output.err
         assert first["succeeded"] is True
         assert first["task"] == "json-task"
         assert first["final_message"] == "answer:first"
@@ -1607,7 +1611,9 @@ class RunnerTest(AOPTestCase):
         resumed_output = capsys.readouterr()
         resumed = json.loads(resumed_output.out)
 
-        assert resumed_output.err == ""
+        assert resumed_output.err == (
+            f"aop: run_id={resumed['run_id']} started task=json-task\n"
+        )
         assert resumed["succeeded"] is True
         assert resumed["session_id"] == first["session_id"]
         assert resumed["final_message"] == "answer:second"
@@ -2031,3 +2037,74 @@ class InterruptTest(AOPTestCase):
             (results_archive_dir() / f"{result['run_id']}.json").read_text()
         )
         assert archived["interrupted"] == "SIGTERM"
+
+
+class LostAndUnpricedResultTest(AOPTestCase):
+    def test_migration_rebuilds_a_killed_runs_result_from_its_events(
+        self, repository: Path, fake_claude: Path
+    ) -> None:
+        from agent_orchestration_process.locks import exclusive_lock, task_lock_path
+        from agent_orchestration_process.migration import migrate_runs
+
+        manager = WorktreeManager.discover(repository)
+        run = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude))).run(
+            task="killed", prompt="first"
+        )
+        runs = manager.state_dir / "runs"
+        run_dir = runs / run.run_id
+        # As left by an AOP process killed outright: events but no result,
+        # the stream cut before Claude's final result event.
+        events = [
+            line for line in (run_dir / "events.jsonl").read_text().splitlines()
+            if '"type": "result"' not in line
+        ]
+        events.append(json.dumps({
+            "type": "assistant", "session_id": run.session_id,
+            "message": {"id": "msg_1", "content": [], "usage": {
+                "input_tokens": 5, "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 7, "output_tokens": 3,
+            }},
+        }))
+        (run_dir / "events.jsonl").write_text("\n".join(events) + "\n")
+        (run_dir / "result.json").unlink()
+        (results_archive_dir() / f"{run.run_id}.json").unlink()
+
+        with exclusive_lock(task_lock_path(manager.state_dir, "killed"), "task killed"):
+            busy = migrate_runs(runs)
+        counts = migrate_runs(runs)
+
+        assert busy["result.json: running"] == 1
+        assert counts["result.json: recovered"] == 1
+        recovered = json.loads((run_dir / "result.json").read_text())
+        assert recovered["accounting_status"] == "partial"
+        assert recovered["usage"]["input_tokens"] == 112
+        assert recovered["session_id"] == run.session_id
+        assert "recovered from the run's events" in recovered["error"]
+        assert recovered["migration"]["conversions"] == ["recovered"]
+        archived = results_archive_dir() / f"{run.run_id}.json"
+        assert json.loads(archived.read_text())["usage"] == recovered["usage"]
+        again = migrate_runs(runs)
+        assert again["result.json: current"] == 1, again
+
+    def test_migration_prices_a_result_whose_model_gained_a_rate(
+        self, repository: Path, fake_cursor: Path
+    ) -> None:
+        from agent_orchestration_process.migration import migrate_runs
+
+        manager = WorktreeManager.discover(repository)
+        run = AgentRunner(manager, CursorAdapter(os.fspath(fake_cursor))).run(
+            task="unpriced", prompt="first"
+        )
+        runs = manager.state_dir / "runs"
+        path = runs / run.run_id / "result.json"
+        older = json.loads(path.read_text())
+        older["calculated_cost"] = None  # as recorded before Cursor runs were priced
+        path.write_text(json.dumps(older))
+
+        counts = migrate_runs(runs)
+        migrated = json.loads(path.read_text())
+
+        assert counts["result.json: priced"] == 1
+        assert migrated["calculated_cost"]["amount_usd"] > 0
+        assert migrated["migration"]["conversions"] == ["priced"]
+        assert migrate_runs(runs)["result.json: current"] == 1

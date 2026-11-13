@@ -121,6 +121,8 @@ Results convert as follows:
 | Claude, Cursor, DeepSeek Harness, Grok, and OpenCode results with cache writes in `events.jsonl` | `cache_write_input_tokens` and `cache_write_1h_input_tokens` recovered from `events.jsonl` when `result.json` predates those fields |
 | Resumed Claude results with cumulative `modelUsage` in `events.jsonl` | `calculated_cost` recomputed as the single-turn delta from the parent run's reported session cost (or `model-prices` when parent events are absent) |
 | `--workdir` results recorded before results had `project_dir` | `project_dir` set to the `workdir` in the run's `request.json`; archived results whose run directory is gone stay as they are |
+| Results with usage but no calculated cost, such as Cursor and Devin runs recorded before AOP priced them, whose model model-prices now has a rate for at the run's time | `calculated_cost` priced from the recorded usage |
+| Runs that have a `request.json` but no `result.json`, because AOP was killed outright, for example by SIGKILL, an out-of-memory kill or a host restart, and whose harness writes usage to its event stream (Claude, Codex, Cursor, Grok, OpenCode, Antigravity, Muse, DeepSeek Harness) | a result rebuilt from `events.jsonl` with the session ID and the usage seen, accounting `partial`, and the error saying it was recovered; runs whose task lock is still held are skipped as running. For Claude, output counts in the stream can lag, so they are a lower bound |
 | Results without `state_root` | `state_root` set to the `.aop` directory that holds the run directory |
 | `api_equivalent_cost`, `billing.actual_cost_known`, `calculated_cost.estimated`, `read_paths` | folded into `calculated_cost` or `provider_reported_cost`, removed, or renamed to `inputs` |
 

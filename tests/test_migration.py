@@ -48,7 +48,7 @@ def result(provider: str, usage: dict | None, **fields) -> dict:
         "run_id": RUN_ID,
         "provider": provider,
         "task": "task",
-        "model": "gemini-3.7-flash-high" if provider == "agy" else "gpt-5.6-sol",
+        "model": "gemini-3.7-flash-high" if provider == "agy" else "unpriced-test-model",
         "session_id": "session",
         "command": [provider],
         "started_at": "2026-08-30T07:09:00+00:00",

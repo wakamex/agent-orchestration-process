@@ -30,8 +30,8 @@ Every adapter supports bounded execution, exact resume, the `edit`, `review`, `s
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | All profiles | No | Account or authenticated route | Z.AI Coding Plan | API-equivalent | No | 0.150.1 | 0.163.0 |
 | Claude Code | All profiles | No | Native inventory plus catalog | No | Claude Code's own figure | No | | 2.1.308 |
-| Cursor Agent | No | No | Account | No | No | No | | 2026.10.16 |
-| Devin CLI | Sandboxed profiles | No | Account | No | No | No | | 3000.11.92 |
+| Cursor Agent | No | No | Account | No | API-equivalent | No | | 2026.11.05 |
+| Devin CLI | Sandboxed profiles | No | Account | No | API-equivalent | No | | 3000.11.234 |
 | OpenCode | All profiles | No | Account | No | API-equivalent | When emitted | | 1.19.3 |
 | Antigravity | No | No | Account | No | API-equivalent | No | 1.1.16 | 1.4.5 |
 | Grok Build | Sandboxed profiles | No | Account | No | API-equivalent | When emitted | | 1.0.60 |
@@ -291,8 +291,7 @@ Antigravity integration requires Agy 1.1.16 or newer. AOP checks the installed v
 dispatch and model discovery so an older or unrecognized interface fails before task state is
 created.
 
-Cursor Agent and Devin CLI do not report enough information for AOP to calculate an API-equivalent
-cost. See [Token usage and pricing](token-usage.md) for the values available from each harness.
+Cursor Agent and Devin CLI report no cost of their own, so AOP prices their usage at the model's API rates in model-prices, as for the other harnesses. A Devin resume passes the run's model again, because a resumed session can otherwise continue on Devin's default model. See [Token usage and pricing](token-usage.md) for the values available from each harness.
 
 ## Executable overrides
 

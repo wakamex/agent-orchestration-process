@@ -3112,6 +3112,32 @@ class ProvidersTest(AOPTestCase):
             assert (private / ".claude" / "settings.json").read_text() == '{"model": "second"}\n'
             assert (private / ".claude.json").read_text() == '{"userID": "second"}\n'
 
+    @parametrize("profile", ["edit", "host"])
+    def test_user_hooks_stay_out_of_sandboxed_claude_runs(
+        self, repository: Path, fake_claude: Path, profile: str
+    ) -> None:
+        settings = Path(os.environ["HOME"]) / ".claude" / "settings.json"
+        settings.write_text(json.dumps({
+            "model": "kept",
+            "hooks": {"UserPromptSubmit": [{"hooks": [{"command": "missing.py"}]}]},
+            "statusLine": {"type": "command", "command": "status.py"},
+        }))
+        manager = WorktreeManager.discover(repository)
+
+        result = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude))).run(
+            task=f"hooked-{profile}", prompt="HOOKED", profile=profile
+        )
+
+        if profile == "edit":
+            assert result.succeeded, result.error
+            private = manager.state_dir / "provider-state" / "hooked-edit" / "claude"
+            seeded = json.loads((private / "home" / ".claude" / "settings.json").read_text())
+            assert seeded == {"model": "kept"}
+        else:
+            # A host run keeps the user's hooks, and a prompt one blocks fails.
+            assert not result.succeeded
+            assert result.error.startswith("UserPromptSubmit operation blocked by hook")
+
     def test_claude_thinking_display_is_recorded_and_kept_on_resume(
         self,
         repository: Path, fake_claude: Path, fake_codex: Path

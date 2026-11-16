@@ -1911,6 +1911,7 @@ class ClaudeAdapter:
         usage_observed = False
         refusal_events: list[tuple[int, dict[str, object]]] = []
         refused = False
+        blocked = None
         message_usage: dict[str, dict[str, object]] = {}
         for line_number, line in enumerate(output.splitlines(), start=1):
             try:
@@ -1926,6 +1927,14 @@ class ClaudeAdapter:
                 event.get("subtype", "")
             ).startswith("model_refusal"):
                 refusal_events.append((line_number, event))
+            outcome = event.get("prompt_submit_outcome")
+            if isinstance(outcome, dict) and outcome.get("kind") == "blocked_by_hook":
+                # The prompt never reached the model, though the result that
+                # follows does not report an error.
+                content = event.get("content")
+                blocked = content if isinstance(content, str) and content else (
+                    "UserPromptSubmit operation blocked by hook"
+                )
             message = event.get("message")
             if (
                 event.get("type") == "assistant"
@@ -1946,6 +1955,8 @@ class ClaudeAdapter:
             )
             if event.get("is_error"):
                 error = final_message or "Claude turn failed"
+            elif blocked is not None:
+                error = blocked
             raw_usage = event.get("usage")
             usage_observed = isinstance(raw_usage, dict)
             raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -6550,6 +6561,8 @@ def _prepare_claude_environment(environment: dict[str, str]) -> None:
             raise AOPError(f"could not prepare isolated Claude state: {error}") from error
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
+    if environment.get("AOP_PROFILE") != "host":
+        _drop_user_hooks(destination / ".claude")
     if environment.get("AOP_PROFILE") == "host":
         # A host run keeps the user's HOME, which other tools resolve: rootless
         # podman cannot use a HOME under a directory its user namespace cannot
@@ -6574,6 +6587,24 @@ def _prepare_claude_environment(environment: dict[str, str]) -> None:
     # The run uses the private copy in its standard place.
     environment.pop("CLAUDE_CONFIG_DIR", None)
     environment.pop("CLAUDE_SECURESTORAGE_CONFIG_DIR", None)
+
+
+def _drop_user_hooks(config: Path) -> None:
+    """Remove the user's hooks and status line from a sandboxed Claude home.
+
+    They run the user's own commands, which live outside the sandbox and
+    would add personal context to the run's prompts; a hook that cannot run
+    blocks every prompt. The repository's own hooks are kept.
+    """
+    for path in (config / "settings.json", config / "settings.local.json"):
+        try:
+            settings = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(settings, dict) and {"hooks", "statusLine"} & settings.keys():
+            settings.pop("hooks", None)
+            settings.pop("statusLine", None)
+            _atomic_write(path, json.dumps(settings, indent=2) + "\n")
 
 
 def _seed_claude_home(

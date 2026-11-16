@@ -798,6 +798,34 @@ session_id = (
 )
 if prompt == "DIFFERENT_SESSION":
     session_id = "different-claude-session"
+if prompt == "HOOKED":
+    # A user hook whose command is missing blocks the prompt, and Claude
+    # Code 2.1 still ends with a result that reports no error.
+    config = pathlib.Path(
+        os.environ.get("CLAUDE_CONFIG_DIR")
+        or pathlib.Path(os.environ["HOME"]) / ".claude"
+    )
+    if "hooks" in json.loads((config / "settings.json").read_text()):
+        blocked = "UserPromptSubmit operation blocked by hook: missing.py"
+        print(json.dumps({{
+            "type": "system",
+            "subtype": "informational",
+            "content": blocked,
+            "prevent_continuation": True,
+            "prompt_submit_outcome": {{"kind": "blocked_by_hook", "prompt_kept": False}},
+            "session_id": session_id,
+        }}), flush=True)
+        print(json.dumps({{
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 0,
+            "session_id": session_id,
+            "result": blocked,
+            "total_cost_usd": 0,
+            "usage": {{"input_tokens": 0, "output_tokens": 0}},
+        }}), flush=True)
+        raise SystemExit(0)
 print(json.dumps({{
     "type": "system",
     "subtype": "init",

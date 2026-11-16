@@ -1677,6 +1677,24 @@ class ProvidersTest(AOPTestCase):
         assert not (worktree.path / "agent-write.txt").exists()
         assert not (repository / "main-write.txt").exists()
 
+    @parametrize("profile", ["edit", "sealed"])
+    def test_tmp_files_last_until_the_task_is_resumed(
+        self, repository: Path, tmp_path: Path, fake_claude: Path, profile: str
+    ) -> None:
+        manager = (
+            WorktreeManager.standalone(tmp_path / "controller")
+            if profile == "sealed"
+            else WorktreeManager.discover(repository)
+        )
+        runner = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude)))
+
+        built = runner.run(task="tmp-build", prompt="WRITE_TMP", profile=profile)
+        resumed = runner.resume(run_id=built.run_id, prompt="READ_TMP")
+
+        assert built.succeeded, built.error
+        assert resumed.succeeded, resumed.error
+        assert resumed.final_message == "answer:built"
+
     def test_hermes_run_and_exact_resume_report_per_turn_usage(
         self,
         repository: Path,

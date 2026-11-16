@@ -47,7 +47,7 @@ class SandboxLaunchTest(AOPTestCase):
             skip("bwrap is not installed")
         (tmp_path / "probe.py").write_text(PROBE)
         command = [
-            *_isolated_root_command("bwrap"),
+            *_isolated_root_command("bwrap", tmp_path),
             "--ro-bind",
             os.fspath(tmp_path),
             "/probe",

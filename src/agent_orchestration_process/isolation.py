@@ -142,7 +142,8 @@ def resolve_policy(
         "/scratch": "session-private" if name == "sealed" else "task-private",
         "/state": "session-private" if name == "sealed" else "task-private",
         "/cache": "session-private" if name == "sealed" else "shared",
-        "/tmp": "process-private",
+        # /tmp is a directory inside /scratch.
+        "/tmp": "session-private" if name == "sealed" else "task-private",
     }
     if selected.host_access == "native":
         writable_scopes = {"native host filesystem": "native"}

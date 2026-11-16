@@ -4965,7 +4965,11 @@ def _provider_command(
     scratch = Path(environment["AOP_SCRATCH_DIR"])
     output = Path(environment["AOP_OUTPUT_DIR"])
     input_root = Path(environment["AOP_INPUT_DIR"])
-    wrapped = _isolated_root_command(bwrap)
+    # /tmp lives in the task's scratch directory: agents build and test there
+    # and expect the files on resume, as /scratch keeps them.
+    tmp = scratch / "tmp"
+    tmp.mkdir(mode=0o700, exist_ok=True)
+    wrapped = _isolated_root_command(bwrap, tmp)
     if request.profile in {"edit", "review"}:
         wrapped.extend(["--ro-bind", os.fspath(root), "/repository"])
         if (root / ".aop").is_dir():
@@ -5182,7 +5186,9 @@ def _prompt_runtime_command(
     )
 
 
-def _isolated_root_command(bwrap: str) -> list[str]:
+def _isolated_root_command(bwrap: str, tmp: Path) -> list[str]:
+    """The sandbox's root: no host filesystem but the runtime allowlist, and
+    `tmp` as /tmp, so files there outlive the process."""
     command = [
         bwrap,
         "--die-with-parent",
@@ -5197,7 +5203,8 @@ def _isolated_root_command(bwrap: str) -> list[str]:
         "/proc",
         "--dev",
         "/dev",
-        "--tmpfs",
+        "--bind",
+        os.fspath(tmp),
         "/tmp",
     ]
     for path in ("/usr", "/bin", "/sbin", "/lib", "/lib64"):

@@ -1,10 +1,8 @@
 # Execution profiles
 
-AOP profiles define the complete execution boundary, not only where writes are allowed. The three
-isolated profiles build an empty `bwrap` mount namespace and explicitly add the selected workspace,
-repository view, read-only input snapshots, output, provider runtime, private state, cache, scratch,
-required operating-system runtime paths, and fresh `/proc`, `/dev`, and `/tmp`. They do not inherit
-the host root filesystem.
+AOP profiles define the complete execution boundary, not only where writes are allowed. The three isolated profiles build an empty `bwrap` mount namespace and explicitly add the selected workspace, repository view, read-only input snapshots, output, provider runtime, private state, cache, scratch, required operating-system runtime paths, `/tmp`, and fresh `/proc` and `/dev`. They do not inherit the host root filesystem.
+
+`/tmp` is the `tmp` directory inside the run's scratch directory, which is also visible at `/scratch/tmp`. Files an agent leaves in `/tmp` are therefore still there when the task is resumed, as agents often build and test in `/tmp`. Like `/scratch`, it belongs to the task under `edit` and `review` and to the session under `sealed`, and `aop cleanup` removes it.
 
 Inside the sandbox, bubblewrap's own reaper is process 1 and collects orphaned processes, and the harness runs as process 2. AOP passes bubblewrap's options through a private file descriptor, so process 1's command line, which every process in the sandbox can read, names no mount or host path. When `--timeout` expires, AOP sends SIGTERM to the harness itself, so it can save its session and flush its output, and stops the sandbox after a five-second grace period.
 

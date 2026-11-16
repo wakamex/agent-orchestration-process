@@ -776,6 +776,11 @@ if prompt == "CHECK_SANDBOX":
             pass
         else:
             raise RuntimeError(f"sandbox allowed write to {{protected}}")
+if prompt == "WRITE_TMP":
+    pathlib.Path("/tmp/build").mkdir()
+    pathlib.Path("/tmp/build/a.out").write_text("built")
+if prompt == "READ_TMP":
+    prompt = pathlib.Path("/tmp/build/a.out").read_text()
 if prompt == "CHECK_SCRATCH":
     pathlib.Path(os.environ["AOP_SCRATCH_DIR"]).joinpath("analysis.txt").write_text(
         "allowed"

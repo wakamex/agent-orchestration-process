@@ -213,7 +213,7 @@ class RunnerTest(AOPTestCase):
             "Codex did not activate the requested no-web permission profile aop-no-web"
         )
 
-    def test_isolated_root_sees_the_host_library_cache(self) -> None:
+    def test_isolated_root_sees_the_host_library_cache(self, tmp_path: Path) -> None:
         bwrap = shutil.which("bwrap")
         ldconfig = shutil.which("ldconfig") or shutil.which("ldconfig", path="/usr/sbin:/sbin")
         if bwrap is None:
@@ -226,7 +226,7 @@ class RunnerTest(AOPTestCase):
         # PipeWire's libjack.so.0 on Fedora, load only through this cache.
         host = subprocess.run([ldconfig, "-p"], capture_output=True, text=True, check=True)
         sandbox = subprocess.run(
-            [*_isolated_root_command(bwrap), ldconfig, "-p"],
+            [*_isolated_root_command(bwrap, tmp_path), ldconfig, "-p"],
             capture_output=True,
             text=True,
             check=True,

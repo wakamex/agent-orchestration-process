@@ -1780,6 +1780,8 @@ class ClaudeAdapter:
             command.extend(["--system-prompt", request.system_prompt])
         if request.thinking_display is not None:
             command.extend(["--thinking-display", request.thinking_display])
+        if request.claude_settings is not None:
+            command.extend(["--settings", json.dumps(request.claude_settings)])
         if request.prompt_parts is not None:
             command.extend(["--input-format", "stream-json"])
         if request.session_id:
@@ -7460,6 +7462,7 @@ class AgentRunner:
         allowed_urls: Sequence[str] = (),
         writable_workspace: bool = False,
         thinking_display: str | None = None,
+        claude_settings: dict[str, Any] | None = None,
         prompt_parts: Sequence[PromptPart] | None = None,
         input_excludes: Sequence[str] = (),
         skip_external_links: bool = False,
@@ -7496,6 +7499,13 @@ class AgentRunner:
                     "--thinking-display must be one of: "
                     + ", ".join(CLAUDE_THINKING_DISPLAYS)
                 )
+        if claude_settings is not None:
+            if self.adapter.provider != "claude":
+                raise AOPError(
+                    f"{self.adapter.provider} does not support --claude-settings"
+                )
+            if not isinstance(claude_settings, dict):
+                raise AOPError("--claude-settings must be a JSON object")
         if self.adapter.provider == "muse":
             reminders = muse_reminders(
                 reminders
@@ -7537,6 +7547,7 @@ class AgentRunner:
             allowed_urls=allowed_urls,
             writable_workspace=writable_workspace,
             thinking_display=thinking_display,
+            claude_settings=claude_settings,
             prompt_parts=prompt_parts,
             input_excludes=input_excludes,
             skip_external_links=skip_external_links,
@@ -7682,6 +7693,7 @@ class AgentRunner:
             allowed_urls=parent_request.allowed_urls,
             writable_workspace=parent_request.writable_workspace,
             thinking_display=parent_request.thinking_display,
+            claude_settings=parent_request.claude_settings,
             prompt_parts=prompt_parts,
             input_excludes=parent_request.input_excludes,
             skip_external_links=parent_request.skip_external_links,
@@ -8162,6 +8174,7 @@ class AgentRunner:
         allowed_urls: tuple[str, ...] = (),
         writable_workspace: bool = False,
         thinking_display: str | None = None,
+        claude_settings: dict[str, Any] | None = None,
         prompt_parts: tuple[PromptPart, ...] | None = None,
         input_excludes: tuple[str, ...] = (),
         skip_external_links: bool = False,
@@ -8195,6 +8208,7 @@ class AgentRunner:
             allowed_urls=allowed_urls,
             writable_workspace=writable_workspace,
             thinking_display=thinking_display,
+            claude_settings=claude_settings,
             prompt_parts=prompt_parts,
             input_excludes=input_excludes,
             skip_external_links=skip_external_links,

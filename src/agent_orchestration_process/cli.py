@@ -12,7 +12,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import Any, Sequence, TextIO
 
 import model_prices
 
@@ -228,6 +228,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["summarized", "omitted", "highlights"],
         help="how Claude returns the model's thinking, such as official summaries "
         "(claude only)",
+    )
+    run.add_argument(
+        "--claude-settings",
+        metavar="JSON_OR_FILE",
+        help="Claude Code settings for this run, as a JSON object or a file "
+        "holding one, passed to Claude as --settings and kept on resume; your "
+        "settings files are not changed (claude only)",
     )
     run.add_argument(
         "--workdir",
@@ -549,6 +556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 allowed_urls=args.allowed_urls,
                 writable_workspace=args.writable_workspace,
                 thinking_display=args.thinking_display,
+                claude_settings=_read_claude_settings(args.claude_settings),
                 reminders=args.reminders,
                 admit_command=args.admit_command,
             )
@@ -680,6 +688,25 @@ def _add_input_arguments(
 
 def _tool_list(value: str) -> tuple[str, ...]:
     return tuple(tool.strip() for tool in value.split(",")) if value.strip() else ()
+
+
+def _read_claude_settings(value: str | None) -> dict[str, Any] | None:
+    """A JSON object given inline or in a file; the run records its content."""
+    if value is None:
+        return None
+    text = value
+    if not value.lstrip().startswith("{"):
+        try:
+            text = Path(value).read_text()
+        except OSError as error:
+            raise AOPError(f"could not read Claude settings file {value}: {error}") from error
+    try:
+        settings = json.loads(text)
+    except ValueError as error:
+        raise AOPError(f"--claude-settings is not valid JSON: {error}") from error
+    if not isinstance(settings, dict):
+        raise AOPError("--claude-settings must be a JSON object")
+    return settings
 
 
 def _read_system_prompt(args: argparse.Namespace) -> str | None:

@@ -3181,6 +3181,37 @@ class ProvidersTest(AOPTestCase):
                 WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
             ).run(task="codex", prompt="x", thinking_display="summarized")
 
+    def test_claude_settings_are_recorded_and_kept_on_resume(
+        self, repository: Path, tmp_path: Path, fake_claude: Path, fake_codex: Path
+    ) -> None:
+        from agent_orchestration_process.cli import _read_claude_settings
+
+        settings = {"enabledPlugins": {"cc-plugin-easel@builtin": False}}
+        settings_file = tmp_path / "settings.json"
+        settings_file.write_text(json.dumps(settings))
+        assert _read_claude_settings(os.fspath(settings_file)) == settings
+        assert _read_claude_settings(json.dumps(settings)) == settings
+        listed = tmp_path / "list.json"
+        listed.write_text("[1]")
+        with raises(AOPError, match="must be a JSON object"):
+            _read_claude_settings(os.fspath(listed))
+        runner = AgentRunner(
+            WorktreeManager.discover(repository), ClaudeAdapter(os.fspath(fake_claude))
+        )
+
+        first = runner.run(task="settings", prompt="first", claude_settings=settings)
+        resumed = runner.resume(run_id=first.run_id, prompt="second")
+
+        for result in (first, resumed):
+            assert result.succeeded, result.error
+            flag = result.command.index("--settings")
+            assert json.loads(result.command[flag + 1]) == settings
+            assert runner.store.load_request(result.run_id).claude_settings == settings
+        with raises(AOPError, match="does not support --claude-settings"):
+            AgentRunner(
+                WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
+            ).run(task="codex", prompt="x", claude_settings=settings)
+
     def test_claude_prompt_parts_become_content_blocks_with_one_cache_mark(
         self,
         repository: Path,

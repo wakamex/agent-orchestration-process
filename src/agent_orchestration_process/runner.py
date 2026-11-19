@@ -1915,6 +1915,9 @@ class ClaudeAdapter:
         refused = False
         blocked = None
         message_usage: dict[str, dict[str, object]] = {}
+        # Each turn of the run ends in a result event whose usage is that
+        # turn's alone, while total_cost_usd is the running total.
+        turns = {"uncached": 0, "cached": 0, "created": 0, "created_1h": 0, "output": 0}
         for line_number, line in enumerate(output.splitlines(), start=1):
             try:
                 event = json.loads(line)
@@ -1960,31 +1963,32 @@ class ClaudeAdapter:
             elif blocked is not None:
                 error = blocked
             raw_usage = event.get("usage")
-            usage_observed = isinstance(raw_usage, dict)
+            usage_observed = usage_observed or isinstance(raw_usage, dict)
             raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
-            uncached = nonnegative_int(raw_usage.get("input_tokens"))
-            cached = nonnegative_int(raw_usage.get("cache_read_input_tokens"))
-            created = nonnegative_int(raw_usage.get("cache_creation_input_tokens"))
             cache_creation = raw_usage.get("cache_creation")
-            output_tokens = nonnegative_int(raw_usage.get("output_tokens"))
+            turns["uncached"] += nonnegative_int(raw_usage.get("input_tokens"))
+            turns["cached"] += nonnegative_int(raw_usage.get("cache_read_input_tokens"))
+            turns["created"] += nonnegative_int(raw_usage.get("cache_creation_input_tokens"))
+            turns["created_1h"] += nonnegative_int(
+                cache_creation.get("ephemeral_1h_input_tokens")
+                if isinstance(cache_creation, dict)
+                else 0
+            )
+            turns["output"] += nonnegative_int(raw_usage.get("output_tokens"))
             usage = TokenUsage.from_disjoint(
-                uncached_input_tokens=uncached,
-                cached_input_tokens=cached,
-                cache_write_input_tokens=created,
-                cache_write_1h_input_tokens=(
-                    cache_creation.get("ephemeral_1h_input_tokens")
-                    if isinstance(cache_creation, dict)
-                    else 0
-                ),
-                output_tokens=output_tokens,
+                uncached_input_tokens=turns["uncached"],
+                cached_input_tokens=turns["cached"],
+                cache_write_input_tokens=turns["created"],
+                cache_write_1h_input_tokens=turns["created_1h"],
+                output_tokens=turns["output"],
             )
             cost_is_cumulative = resumed and ClaudeAdapter._is_cumulative_model_usage(
                 event.get("modelUsage"),
                 model,
-                uncached=uncached,
-                cached=cached,
-                created=created,
-                output=output_tokens,
+                uncached=turns["uncached"],
+                cached=turns["cached"],
+                created=turns["created"],
+                output=turns["output"],
             )
             turn_amount = nonnegative_float(event.get("total_cost_usd"))
             if turn_amount is not None:

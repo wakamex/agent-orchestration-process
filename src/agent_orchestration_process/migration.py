@@ -219,7 +219,7 @@ def _upgraded_result_current(
 ) -> tuple[dict[str, Any], str] | None:
     """Upgrade a result, then price it if it has usage but no cost and
     model-prices now has a rate for its model."""
-    upgraded = _upgraded_devin_usage(raw, run_dir)
+    upgraded = _upgraded_claude_turns(raw, run_dir)
     value, outcome = upgraded if upgraded is not None else (raw, None)
     if value.get("calculated_cost") is not None or value.get("usage") is None:
         return upgraded
@@ -248,6 +248,42 @@ def _upgraded_result_current(
     value["migration"]["conversions"].append("priced")
     conversions, note, rest = outcome.partition(" (")
     return value, f"{conversions}+priced{note}{rest}"
+
+
+def _upgraded_claude_turns(
+    raw: dict[str, Any], run_dir: Path
+) -> tuple[dict[str, Any], str] | None:
+    """Upgrade a result, and give a Claude run that ended several turns the
+    usage of all of them.
+
+    Each turn ends in a result event with that turn's usage alone, and results
+    recorded the last one's; their cost, the running total, was already whole.
+    """
+    upgraded = _upgraded_devin_usage(raw, run_dir)
+    value, outcome = upgraded if upgraded is not None else (raw, None)
+    if value.get("provider") != "claude" or value.get("usage") is None:
+        return upgraded
+    try:
+        events_text = (run_dir / "events.jsonl").read_text()
+        result = RunResult.from_dict(value)
+    except (OSError, ValueError, TypeError, KeyError):
+        return upgraded
+    if events_text.count('"type":"result"') + events_text.count('"type": "result"') < 2:
+        return upgraded
+    parsed = ClaudeAdapter._parse(events_text)
+    usage = parsed["usage"]
+    if not parsed["has_result"] or usage == result.usage:
+        return upgraded
+    conversion = "claude-turn-usage"
+    migration = value.get("migration") if outcome is not None else None
+    value = replace(result, usage=usage).to_dict()
+    if migration is None:
+        value["migration"] = _record(value.get("usage_schema"), [conversion], "result.json")
+        return value, f"{conversion} (usage changed)"
+    migration["conversions"].append(conversion)
+    value["migration"] = migration
+    conversions, note, rest = outcome.partition(" (")
+    return value, f"{conversions}+{conversion} (usage changed)"
 
 
 def _upgraded_devin_usage(

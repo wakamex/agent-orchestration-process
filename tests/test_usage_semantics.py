@@ -196,6 +196,29 @@ class UsageSemanticsTest(AOPTestCase):
         assert usage.cache_write_input_tokens == 11_802
         assert usage.cache_write_1h_input_tokens == 10_000
 
+    def test_claude_run_of_several_turns_counts_every_turn(self) -> None:
+        # Each turn ends in a result event with that turn's usage alone, and
+        # total_cost_usd and modelUsage are running totals.
+        def result(read: int, output: int, cost: float, total_read: int) -> str:
+            return json.dumps({
+                "type": "result", "subtype": "success", "session_id": "session",
+                "result": "answer", "total_cost_usd": cost,
+                "usage": {"input_tokens": 1, "cache_read_input_tokens": read,
+                          "cache_creation_input_tokens": 0, "output_tokens": output},
+                "modelUsage": {"claude-haiku-5-5": {
+                    "inputTokens": 2, "cacheReadInputTokens": total_read,
+                    "cacheCreationInputTokens": 0, "outputTokens": 30}},
+            })
+
+        parsed = ClaudeAdapter._parse("\n".join([
+            result(1_000, 20, 0.5, 1_000),
+            result(300, 10, 0.6, 1_300),
+        ]))
+
+        assert _usage_tuple(parsed["usage"]) == (1_302, 1_300, 30, 0)
+        assert parsed["cost"].amount_usd == 0.6
+        assert parsed["cost_is_cumulative"] is False
+
     def test_claude_resumed_cumulative_model_usage_subtracts_parent_cost(self) -> None:
         events = [
             {"type": "system", "subtype": "init", "model": "claude-haiku-5-5"},

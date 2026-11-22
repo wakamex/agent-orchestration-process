@@ -3212,6 +3212,29 @@ class ProvidersTest(AOPTestCase):
                 WorktreeManager.discover(repository), CodexAdapter(os.fspath(fake_codex))
             ).run(task="codex", prompt="x", claude_settings=settings)
 
+    @parametrize("profile", ["edit", "sealed"])
+    def test_claude_prompt_caching_switch_reaches_sandboxed_runs(
+        self,
+        repository: Path,
+        tmp_path: Path,
+        fake_claude: Path,
+        monkeypatch: MonkeyPatch,
+        profile: str,
+    ) -> None:
+        monkeypatch.setenv("DISABLE_PROMPT_CACHING", "1")
+        manager = (
+            WorktreeManager.standalone(tmp_path / "controller")
+            if profile == "sealed"
+            else WorktreeManager.discover(repository)
+        )
+
+        result = AgentRunner(manager, ClaudeAdapter(os.fspath(fake_claude))).run(
+            task="uncached", prompt="CACHING", profile=profile
+        )
+
+        assert result.succeeded, result.error
+        assert result.final_message == "1"
+
     def test_claude_prompt_parts_become_content_blocks_with_one_cache_mark(
         self,
         repository: Path,

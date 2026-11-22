@@ -212,6 +212,13 @@ def resolve_policy(
                     "XDG_STATE_HOME",
                     "GROK_STORAGE_MODE",
                     "GOOGLE_GEMINI_BASE_URL",
+                    "DISABLE_PROMPT_CACHING",
+                    "DISABLE_PROMPT_CACHING_FABLE",
+                    "DISABLE_PROMPT_CACHING_HAIKU",
+                    "DISABLE_PROMPT_CACHING_MYTHOS",
+                    "DISABLE_PROMPT_CACHING_OPUS",
+                    "DISABLE_PROMPT_CACHING_SONNET",
+                    "FORCE_PROMPT_CACHING_5M",
                 ]
             ),
             "credential_names": (

@@ -487,6 +487,36 @@ class MigrationTest(AOPTestCase):
         assert migrated["migration"]["conversions"] == ["claude-turn-usage"]
         assert migrate_runs(state / "runs")["result.json: current"] == 1
 
+    def test_uncached_claude_results_count_their_input_once(self, tmp_path):
+        call = {"input_tokens": 40_618, "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0, "output_tokens": 1}
+        state = tmp_path / ".aop"
+        recorded = result(
+            "claude",
+            usage(81_236, 0, 4, 0),
+            usage_schema=TOKEN_USAGE_SCHEMA,
+            accounting_status="complete",
+            state_root=str(state.resolve()),
+            mode="agent",
+            effort=None,
+            time_to_first_event_seconds=None,
+            time_to_first_response_seconds=None,
+        )
+        run_dir = write_run(state / "runs", recorded, events=[
+            {"type": "assistant", "session_id": "session",
+             "message": {"id": "msg_1", "content": [], "usage": call}},
+            {"type": "result", "subtype": "success", "session_id": "session",
+             "result": "answer", "total_cost_usd": 0.0081256,
+             "usage": {**call, "input_tokens": 81_236, "output_tokens": 4}},
+        ])
+
+        migrate_runs(state / "runs")
+
+        migrated = json.loads((run_dir / "result.json").read_text())
+        assert migrated["usage"] == usage(40_618, 0, 4, 0)
+        assert migrated["migration"]["conversions"] == ["claude-uncached-usage"]
+        assert migrate_runs(state / "runs")["result.json: current"] == 1
+
     def _devin_run(self, tmp_path: Path, metrics: list[tuple[str, int, dict]]) -> Path:
         """A Devin run that failed before AOP read usage, recorded as measured
         zeros priced at $0, beside its task's session database."""

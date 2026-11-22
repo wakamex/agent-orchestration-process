@@ -219,6 +219,25 @@ class UsageSemanticsTest(AOPTestCase):
         assert parsed["cost"].amount_usd == 0.6
         assert parsed["cost_is_cumulative"] is False
 
+    def test_claude_uncached_input_counts_each_call_once(self) -> None:
+        # With prompt caching off, Claude Code 2.1.330's result summary counts
+        # the input twice, and its cost with it; the call's own usage is right.
+        call = {"input_tokens": 40_618, "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0, "output_tokens": 1}
+        events = [
+            {"type": "assistant", "session_id": "session",
+             "message": {"id": "msg_1", "content": [], "usage": call}},
+            {"type": "result", "subtype": "success", "session_id": "session",
+             "result": "answer", "total_cost_usd": 0.0081256,
+             "usage": {**call, "input_tokens": 81_236, "output_tokens": 4}},
+        ]
+
+        parsed = ClaudeAdapter._parse("\n".join(json.dumps(event) for event in events))
+
+        assert _usage_tuple(parsed["usage"]) == (40_618, 0, 4, 0)
+        assert parsed["calls_corrected"] is True
+        assert parsed["cost"] is None  # priced again from the corrected counts
+
     def test_claude_resumed_cumulative_model_usage_subtracts_parent_cost(self) -> None:
         events = [
             {"type": "system", "subtype": "init", "model": "claude-haiku-5-5"},

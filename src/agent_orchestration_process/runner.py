@@ -2011,6 +2011,33 @@ class ClaudeAdapter:
                     )
                 else:
                     cost = None
+        calls_corrected = False
+        if (
+            has_result
+            and turns["cached"] == turns["created"] == 0
+            and message_usage
+            and all(
+                nonnegative_int(raw.get(name)) == 0
+                for raw in message_usage.values()
+                for name in ("cache_read_input_tokens", "cache_creation_input_tokens")
+            )
+        ):
+            # With prompt caching off, Claude Code 2.1.330's result summary
+            # counts each call's input twice, and prices it twice; the calls'
+            # own usage in the stream is the API's. The stream can miss calls,
+            # so only that exact doubling is corrected.
+            called = sum(nonnegative_int(raw.get("input_tokens")) for raw in message_usage.values())
+            if called and turns["uncached"] == 2 * called:
+                calls_corrected = True
+                usage = TokenUsage.from_disjoint(
+                    uncached_input_tokens=called,
+                    cached_input_tokens=0,
+                    cache_write_input_tokens=0,
+                    output_tokens=turns["output"],
+                )
+                # Priced again from the corrected counts.
+                cost = None
+                cost_is_cumulative = False
         if not has_result and message_usage:
             # A run stopped before its result event, by a deadline or a
             # signal, still reported each model call's usage as it went.
@@ -2040,6 +2067,7 @@ class ClaudeAdapter:
             "has_result": has_result,
             "refusal": ClaudeAdapter._refusal(refusal_events) if refused else None,
             "usage_observed": usage_observed,
+            "calls_corrected": calls_corrected,
         }
 
 

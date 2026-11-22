@@ -253,11 +253,12 @@ def _upgraded_result_current(
 def _upgraded_claude_turns(
     raw: dict[str, Any], run_dir: Path
 ) -> tuple[dict[str, Any], str] | None:
-    """Upgrade a result, and give a Claude run that ended several turns the
-    usage of all of them.
+    """Upgrade a result, and give a Claude run the usage its events now give.
 
-    Each turn ends in a result event with that turn's usage alone, and results
-    recorded the last one's; their cost, the running total, was already whole.
+    A run of several turns ends each in a result event with that turn's usage
+    alone, and results recorded the last one's; their cost, the running total,
+    was already whole. A run without prompt caching had its input counted
+    twice, in its usage and its cost, by Claude Code's result summary.
     """
     upgraded = _upgraded_devin_usage(raw, run_dir)
     value, outcome = upgraded if upgraded is not None else (raw, None)
@@ -268,15 +269,28 @@ def _upgraded_claude_turns(
         result = RunResult.from_dict(value)
     except (OSError, ValueError, TypeError, KeyError):
         return upgraded
-    if events_text.count('"type":"result"') + events_text.count('"type": "result"') < 2:
-        return upgraded
     parsed = ClaudeAdapter._parse(events_text)
     usage = parsed["usage"]
     if not parsed["has_result"] or usage == result.usage:
         return upgraded
-    conversion = "claude-turn-usage"
+    if parsed["calls_corrected"]:
+        conversion = "claude-uncached-usage"
+        result = replace(
+            result,
+            usage=usage,
+            calculated_cost=estimate_api_cost(
+                result.model,
+                usage,
+                provider="anthropic",
+                started_at=result.started_at,
+                finished_at=result.finished_at,
+            ),
+        )
+    else:
+        conversion = "claude-turn-usage"
+        result = replace(result, usage=usage)
     migration = value.get("migration") if outcome is not None else None
-    value = replace(result, usage=usage).to_dict()
+    value = result.to_dict()
     if migration is None:
         value["migration"] = _record(value.get("usage_schema"), [conversion], "result.json")
         return value, f"{conversion} (usage changed)"
